@@ -1335,7 +1335,7 @@
 
 (def ^:private nn
   (delay (into {} (map (fn [k] [k (requiring-resolve (symbol "gen.array.nn" (name k)))]))
-               [:rms-norm :rope :sdpa :selective-log-softmax :quantize :dequantize :quantized-matmul :gather-qmm])))
+               [:rms-norm :rope :sdpa :selective-log-softmax :gated-delta :quantize :dequantize :quantized-matmul :gather-qmm])))
 
 (defn ^{:api :experimental} rms-norm
   "x normalized by its root mean square over the last axis, times weight:
@@ -1421,6 +1421,31 @@
    Experimental: outside the 1.x promise (DESIGN §9)."
   ([logits indices] (selective-log-softmax logits indices nil))
   ([logits indices opts] ((:selective-log-softmax @nn) logits indices opts)))
+(defn ^{:api :experimental} gated-delta
+  "The gated delta rule, GatedDeltaNet's recurrence (Yang, Kautz and
+   Hatamizadeh, 2025; Qwen3.5's linear attention), over T tokens from a
+   state: [y state'], each head's state S a [Dv Dk] matrix that every
+   token t decays, corrects and reads,
+     S ← exp(gₜ)·S,  S ← S + βₜ·(vₜ - S·kₜ)·kₜᵀ,  yₜ = S·qₜ,
+   of q and k [B T H Dk], v [B T H Dv], g [B T H] (log decays, <= 0),
+   beta [B T H] (write strengths, in [0, 1]) and state [B H Dv Dk]: y is
+   [B T H Dv] and state' the state after the last token. Every head has
+   its own keys (a model with fewer key heads repeats them first). The
+   float operands take one dtype, computed in float32 for the half floats,
+   as MLX's kernels do. Options:
+   - :method: :loop, token by token; :chunked, in chunks of :chunk-size
+     tokens (the form llama.cpp computes: a chunk's updates as matrix
+     products, a triangular inverse by doubling blocks, then the chunks in
+     order; T padded to whole chunks by tokens that leave the state as it
+     is); or :auto (the default): a backend's fused kernel where it has
+     one (MLX's Metal: mlx-lm's gated-delta kernel, gen.backend.mlx.nn),
+     else :chunked for T of :chunk-size or more and :loop below. The forms
+     are the same function, within float round-off.
+   - :chunk-size: a power of 2 (64).
+   A composite of gen.array's ops (so differentiated, batched and staged
+   as they are). Experimental: outside the 1.x promise (DESIGN §9)."
+  ([q k v g beta state] (gated-delta q k v g beta state nil))
+  ([q k v g beta state opts] ((:gated-delta @nn) q k v g beta state opts)))
 
 (defn ^{:api :experimental} quantize
   "[wq scales biases]: the float matrices w [.. N K] quantized along

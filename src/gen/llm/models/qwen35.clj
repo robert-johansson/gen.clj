@@ -1,0 +1,797 @@
+(ns gen.llm.models.qwen35
+  "Qwen3.5's and Qwen3.6's forward passes over gen.array, dense
+   (architecture qwen35) and mixture-of-experts (qwen35moe), from a GGUF
+   file's weights (docs/research/llm-mlx-engine.md §2, P4 of §6), beside
+   gen.llm.models.qwen3 and with its functions:
+
+     (load path)                       → a model {:config :weights} from a GGUF file
+     (load path {:dtype :float16})     → … computing in another float dtype
+     (model gguf)                      → the same from gen.array/load-gguf's result
+     (config metadata)                 → the architecture from a GGUF's metadata
+     (forward m tokens)                → logits [B T vocab] of every position
+     (prefill m tokens)                → [logits cache]: the logits, and the cache after the tokens
+     (step m cache tokens)             → [logits cache']: the tokens read after cache
+     (offset cache)                    → the positions cache holds
+     (offsets cache)                   → … in each row
+     (static-cache m rows capacity)    → an empty cache of fixed capacity
+     (compile-step m)                  → step over static caches, compiled (array/compile),
+                                         consuming each cache with :donate? true
+     (select-rows cache idx)           → a static cache of cache's rows idx
+     (concat-rows caches)              → a static cache of the caches' rows
+     (rewind cache offsets)            → a static cache with rows cleared (back at 0)
+     (grow cache capacity)             → a static cache of a larger capacity
+
+   tokens, :logits :last, prefill's :capacity and the steps are as
+   qwen3's: a row's tokens are positions offset, offset + 1, … after a
+   cache of offset positions, and (step m (second (prefill m a)) b) gives
+   the logits (prefill m (a ++ b)) gives b's positions, within float
+   round-off (exactly on the JVM backend for reads of fewer than 64 tokens:
+   test/gen/llm/models/qwen35_test.clj).
+
+   The layers. Most are GatedDeltaNet's linear attention, every
+   full_attention_interval-th (4: layers 3, 7, …) gated attention, or as
+   attention.recurrent_layers says. The tensors' meaning is llama.cpp's
+   (src/models/qwen35.cpp, qwen35moe.cpp and delta-net-base.cpp, v0.9.0),
+   which wrote the GGUF, not Hugging Face's: its converter adds Qwen3-Next's
+   +1 to the RMSNorm weights (but ssm_norm's), stores A as ssm_a = -exp(A_log)
+   and orders the value heads tiled (value head h reads key head h mod
+   key-heads); GenMLX's qwen35_forward.cljs gave the structure.
+   - Every block: RMSNorm (attn_norm), the layer, the residual; RMSNorm
+     (post_attention_norm), the feed-forward, the residual.
+   - GatedDeltaNet: the projection attn_qkv of the normed x, convolved
+     causally per channel by ssm_conv1d's 4 taps over the layer's last 3
+     inputs and this read's (the conv state), through SiLU, split into
+     q, k (key heads) and v (value heads); q and k l2-normed per head (eps
+     the RMS eps), repeated (tiled) to the value heads, q scaled by
+     1/√key-dim; beta = sigmoid(ssm_beta x), the log decay g =
+     ssm_a·softplus(ssm_alpha x + ssm_dt.bias); the gated delta rule
+     (gen.array/gated-delta) from the layer's recurrent state; its output
+     RMSNormed per head (ssm_norm) times silu(attn_gate x), through ssm_out.
+   - Gated attention: attn_q's projection holds each head's query and then
+     its output gate; q and k RMSNormed per head (attn_q_norm, attn_k_norm),
+     RoPE on the first rope.dimension_count dims of a head (NEOX's pairs,
+     base rope.freq_base: interleaved M-RoPE, whose sections a text
+     token's equal positions make one rotation), attention with grouped
+     KV heads, causal, scaled by 1/√head-dim, times sigmoid(gate), through
+     attn_output.
+   - The feed-forward: SwiGLU (ffn_gate, ffn_up, ffn_down); or (qwen35moe)
+     the router's softmax (ffn_gate_inp) over the experts, the
+     expert_used_count most likely, their probabilities renormalized to
+     sum 1, each one's SwiGLU (ffn_gate_exps, ffn_up_exps, ffn_down_exps:
+     stacks gathered by gather-qmm, or by take for dense ones) weighted
+     by them, plus the shared expert's SwiGLU (ffn_*_shexp) times
+     sigmoid(ffn_gate_inp_shexp · x).
+   - RMSNorm (output_norm) and the output projection (output, or the
+     embedding: tied).
+   The MTP block (nextn_predict_layers, the blocks past the forward's)
+   is llama.cpp's draft head for speculative decoding, which its forward
+   does not run either: its tensors are recognized and not read. Every
+   other tensor of the file must be one of these, and RoPE scaling,
+   expert groups and M-RoPE sections that leave a text token's dims
+   unrotated are loud (:unsupported), as tensors llama.cpp does not read.
+
+   A cache is a value, {:offset n :layers […]}: an attention layer's {:k
+   :v}, keys and values [B KV-heads n head-dim] grown by concatenation; a
+   GatedDeltaNet layer's {:conv :state}, its last 3 projected inputs
+   [B 3 channels] and its recurrent state [B value-heads value-dim
+   key-dim] (float32 for a half-float model), replaced by each read. A
+   static cache (static-cache, or prefill's :capacity) is qwen3's
+   {:capacity :offsets :positions :layers}: its attention layers' slots
+   written in place (put-along-axis) and masked by each row's position,
+   its GatedDeltaNet layers' states replaced, so a step's shapes stay
+   fixed and compile-step compiles it as qwen3's (on MLX one trace per
+   shape of tokens, :donate? consuming the cache). A recurrent state
+   cannot be moved back: rewind takes a row to its own offset or to 0 (a
+   slot reused), and anything else is loud (:unsupported); keep the cache
+   from before (a value) instead, as speculative decoding's rollback.
+
+   The forward is gen.array code: on MLX its rms-norm, rope and sdpa are
+   MLX's fused kernels and gated-delta mlx-lm's Metal kernel (reads of
+   any length), elsewhere gated-delta's composite (token by token below 64
+   tokens, in chunks of 64 from there); the tape (or MLX's native
+   gradients) differentiates it; on the JVM backend tiny models run in
+   float64. Experimental: outside the 1.x promise (DESIGN §9)."
+  {:api :experimental}
+  (:refer-clojure :exclude [+ - * / < > <= >= == load])
+  (:require [clojure.core :as c]
+            [clojure.string :as str]
+            [gen.array :as array :refer [+ * /]]
+            [gen.llm.models.common :as common]))
+
+(set! *warn-on-reflection* true)
+
+(def ^:private who "qwen35")
+
+(defn- unsupported
+  ([message] (common/unsupported who message))
+  ([message data] (common/unsupported who message data)))
+
+(defn- invalid
+  ([message] (common/invalid who message))
+  ([message data] (common/invalid who message data)))
+
+;; ---------------------------------------------------------------------------
+;; The configuration, from a GGUF's metadata
+;; ---------------------------------------------------------------------------
+
+(defn- rope-covered?
+  "Does interleaved M-RoPE with these sections ([t h w e], as ggml's
+   imrope) rotate each of the dims/2 pairs of a text token by its
+   position? Pair i's sector is i mod Σsections, and sector s reads the
+   t, h or w position (each a text token's own) when s mod 3 is 0, 1 or
+   2 and s < 3·(that section), else e's, 0 for text: no rotation."
+  [[t h w :as sections] dims]
+  (let [n (long (reduce c/+ 0 sections))]
+    (and (c/== 4 (count sections)) (pos? n)
+         (every? (fn [i]
+                   (let [s (mod (long i) n)]
+                     (case (int (mod s 3))
+                       0 (c/< s (c/* 3 (long t)))
+                       1 (c/< s (c/* 3 (long h)))
+                       2 (c/< s (c/* 3 (long w))))))
+                 (range (quot (long dims) 2))))))
+
+(defn config
+  "Qwen3.5's architecture from a GGUF's metadata (gen.array/load-gguf's
+   :metadata), llama.cpp's keys: {:arch :hidden :layers :kinds :mtp-layers
+   :heads :kv-heads :head-dim :rope-dims :rope-base :eps :context
+   :delta-key-heads :delta-value-heads :delta-key-dim :delta-value-dim
+   :delta-conv}, and :ffn for qwen35, or :experts :experts-used
+   :expert-ffn :shared-ffn for qwen35moe. :layers counts the blocks the
+   forward runs (block_count less nextn_predict_layers, the MTP block),
+   :kinds is each one's :delta (GatedDeltaNet) or :attention. Loud
+   (:unsupported) for another architecture, RoPE scaling, expert groups,
+   keys and values of different sizes, and M-RoPE sections that leave a
+   text token's dims unrotated, which llama.cpp's graphs do not compute
+   either."
+  [metadata]
+  (let [arch (get metadata "general.architecture")
+        k (fn [suffix] (get metadata (str arch "." suffix)))
+        need (fn [suffix]
+               (let [v (k suffix)]
+                 (when-not (and (integer? v) (pos? (long v)))
+                   (throw (invalid (str "the metadata's " arch "." suffix " must be a positive integer, not " (pr-str v))
+                                   {:key (str arch "." suffix)})))
+                 (long v)))]
+    (when-not (#{"qwen35" "qwen35moe"} arch)
+      (throw (unsupported (str "the model's architecture is " (pr-str arch) ", not qwen35 or qwen35moe") {:architecture arch})))
+    (let [moe? (= "qwen35moe" arch)
+          blocks (need "block_count")
+          mtp (long (or (k "nextn_predict_layers") 0))
+          layers (c/- blocks mtp)
+          heads (need "attention.head_count")
+          head-dim (need "attention.key_length")
+          rope-dims (if (k "rope.dimension_count") (need "rope.dimension_count") head-dim)
+          sections (k "rope.dimension_sections")
+          interval (if (k "full_attention_interval") (need "full_attention_interval") 4)
+          recurrent (k "attention.recurrent_layers")
+          kinds (if recurrent
+                  (mapv #(if % :delta :attention) (take layers recurrent))
+                  (mapv #(if (zero? (rem (inc (long %)) interval)) :attention :delta) (range layers)))
+          v-heads (need "ssm.time_step_rank")
+          k-heads (need "ssm.group_count")
+          key-dim (need "ssm.state_size")
+          inner (need "ssm.inner_size")
+          scaling (k "rope.scaling.type")
+          ffn (k "feed_forward_length")
+          cfg (merge {:arch arch
+                      :hidden (need "embedding_length")
+                      :layers layers
+                      :kinds kinds
+                      :mtp-layers mtp
+                      :heads heads
+                      :kv-heads (need "attention.head_count_kv")
+                      :head-dim head-dim
+                      :rope-dims rope-dims
+                      :rope-base (double (or (k "rope.freq_base") 10000.0))
+                      :eps (double (or (k "attention.layer_norm_rms_epsilon") 1e-6))
+                      :context (k "context_length")
+                      :delta-key-heads k-heads
+                      :delta-value-heads v-heads
+                      :delta-key-dim key-dim
+                      :delta-value-dim (quot inner v-heads)
+                      :delta-conv (need "ssm.conv_kernel")}
+                     (if moe?
+                       (let [used (need "expert_used_count")]
+                         {:experts (need "expert_count")
+                          :experts-used used
+                          :expert-ffn (if (k "expert_feed_forward_length")
+                                        (need "expert_feed_forward_length")
+                                        (quot (need "feed_forward_length") used))
+                          :shared-ffn (if (k "expert_shared_feed_forward_length")
+                                        (need "expert_shared_feed_forward_length")
+                                        (need "feed_forward_length"))})
+                       {:ffn (need "feed_forward_length")}))]
+      (when (c/< layers 1)
+        (throw (invalid "no blocks for the forward (block_count less nextn_predict_layers)" {:blocks blocks :mtp mtp})))
+      (when (and recurrent (not (and (sequential? recurrent) (c/>= (count recurrent) layers) (every? boolean? recurrent))))
+        (throw (invalid (str arch ".attention.recurrent_layers must be a boolean a block, not " (pr-str recurrent)))))
+      (when (and (k "attention.value_length") (not= head-dim (need "attention.value_length")))
+        (throw (unsupported "keys and values of different sizes" {:key-length head-dim :value-length (k "attention.value_length")})))
+      (when-not (and (even? rope-dims) (c/<= rope-dims head-dim))
+        (throw (invalid (str "RoPE over " rope-dims " dims of a head of " head-dim) {:rope-dims rope-dims :head-dim head-dim})))
+      (when-not (and (sequential? sections) (every? integer? sections) (rope-covered? (vec sections) rope-dims))
+        (throw (unsupported (str "M-RoPE sections " (pr-str sections) " that leave some of a text token's "
+                                 rope-dims " RoPE dims unrotated (or none given)")
+                            {:rope-sections sections :rope-dims rope-dims})))
+      (when (and scaling (not= "none" scaling))
+        (throw (unsupported (str "RoPE scaling (" scaling ")") {:rope-scaling scaling})))
+      (when (and moe? (c/> (long (or (k "expert_group_count") 0)) 1))
+        (throw (unsupported "expert groups" {:expert-groups (k "expert_group_count")})))
+      (when (and moe? (c/> (long (:experts-used cfg)) (long (:experts cfg))))
+        (throw (invalid "more experts used than there are" (select-keys cfg [:experts :experts-used]))))
+      (when-not (zero? (rem (long heads) (long (:kv-heads cfg))))
+        (throw (invalid "the query heads are not a multiple of the KV heads" (select-keys cfg [:heads :kv-heads]))))
+      (when-not (and (zero? (rem v-heads k-heads)) (c/== inner (c/* v-heads key-dim)))
+        (throw (invalid (str "GatedDeltaNet's value heads (" v-heads ") must be a multiple of its key heads (" k-heads
+                             ") and its inner size (" inner ") value heads of the key size (" key-dim ")")
+                        {:value-heads v-heads :key-heads k-heads :inner inner :key-dim key-dim})))
+      (when (and ffn (not moe?) (not (integer? ffn)))
+        (throw (invalid (str "the metadata's " arch ".feed_forward_length must be an integer"))))
+      cfg)))
+
+;; ---------------------------------------------------------------------------
+;; The weights, by llama.cpp's names
+;; ---------------------------------------------------------------------------
+
+(defn- mtp-tensor?
+  "Is name a tensor of the MTP blocks (blk.i for i at or past layers)?"
+  [name layers]
+  (when-let [[_ i] (re-matches #"blk\.(\d+)\..*" name)]
+    (c/>= (Long/parseLong i) (long layers))))
+
+(defn model
+  "A model {:config :weights} from gen.array/load-gguf's result: config
+   from its metadata (with :vocab, the embedding's rows, and :dtype, the
+   dtype it computes in), and the weights by llama.cpp's names, each
+   checked against the configuration's shape. Options: :dtype, a float
+   dtype (default: the backend's default float), to which the float
+   weights are cast, the quantized matrices' scales and biases among them.
+   Loud when a tensor the forward reads is missing or of another shape
+   (:invalid-args), and when the file holds one it does not read but the
+   MTP block's (:unsupported).
+
+   The weights: {:embed :norm :output :layers}, a layer's {:attn-norm
+   :post-norm}, and a GatedDeltaNet layer's {:qkv :z :conv :dt-bias :a
+   :beta :alpha :ssm-norm :out} or an attention layer's {:q :k :v :q-norm
+   :k-norm :o}, and its feed-forward's {:gate :up :down} (dense) or {:moe
+   {:router :gate :up :down :shared-gate :shared {:gate :up :down}}},
+   the experts' a stack [experts out in]. A matrix is an array [out in],
+   or a quantized one as gen.array/load-gguf gives Q8_0, Q4_0 and Q4_1
+   tensors, {:wq :scales :biases :bits :group-size}; the conv kernel,
+   ssm_a, ssm_dt.bias, the norms and the shared expert's gate are dense
+   arrays."
+  ([gguf] (model gguf nil))
+  ([{:keys [metadata tensors]} {:keys [dtype] :as opts}]
+   (common/check-options who :model opts #{:dtype})
+   (let [cfg (config metadata)
+         {:keys [hidden layers kinds heads kv-heads head-dim ffn delta-key-heads delta-value-heads delta-key-dim
+                 delta-value-dim delta-conv experts expert-ffn shared-ffn]} cfg
+         dtype (common/check-dtype who (or dtype (:float (array/defaults array/*backend*))))
+         seen (atom #{})
+         tensor (fn tensor
+                  ([name shape] (tensor name shape false))
+                  ([name shape dense?]
+                   (let [w (or (get tensors name)
+                               (throw (invalid (str "the file has no tensor " name) {:tensor name})))
+                         s (common/weight-shape w)]
+                     (when (and shape (not= shape s))
+                       (throw (invalid (str "tensor " name " has shape " s ", not " shape) {:tensor name :shape s :expected shape})))
+                     (when (and dense? (map? w))
+                       (throw (unsupported (str "tensor " name " is quantized; the forward reads it dense") {:tensor name})))
+                     (swap! seen conj name)
+                     (common/cast-weight who w dtype))))
+         embed (tensor "token_embd.weight" nil)
+         vocab (first (common/weight-shape embed))
+         _ (when-not (= [vocab hidden] (common/weight-shape embed))
+             (throw (invalid (str "the embedding has shape " (common/weight-shape embed) ", not [vocab " hidden "]")
+                             {:tensor "token_embd.weight"})))
+         key-width (c/* (long delta-key-heads) (long delta-key-dim))
+         value-width (c/* (long delta-value-heads) (long delta-value-dim))
+         channels (c/+ (c/* 2 key-width) value-width)
+         layer (fn [i]
+                 (let [t (fn ([nm shape] (tensor (str "blk." i "." nm ".weight") shape))
+                           ([nm shape dense?] (tensor (str "blk." i "." nm ".weight") shape dense?)))
+                       mixer (if (= :attention (kinds i))
+                               {:q (t "attn_q" [(c/* 2 heads head-dim) hidden])
+                                :k (t "attn_k" [(c/* kv-heads head-dim) hidden])
+                                :v (t "attn_v" [(c/* kv-heads head-dim) hidden])
+                                :q-norm (t "attn_q_norm" [head-dim] true)
+                                :k-norm (t "attn_k_norm" [head-dim] true)
+                                :o (t "attn_output" [hidden (c/* heads head-dim)])}
+                               {:qkv (t "attn_qkv" [channels hidden])
+                                :z (t "attn_gate" [value-width hidden])
+                                :conv (t "ssm_conv1d" [channels delta-conv] true)
+                                :dt-bias (tensor (str "blk." i ".ssm_dt.bias") [delta-value-heads] true)
+                                :a (tensor (str "blk." i ".ssm_a") [delta-value-heads] true)
+                                :beta (t "ssm_beta" [delta-value-heads hidden])
+                                :alpha (t "ssm_alpha" [delta-value-heads hidden])
+                                :ssm-norm (t "ssm_norm" [delta-value-dim] true)
+                                :out (t "ssm_out" [hidden value-width])})
+                       feed (if experts
+                              {:moe (merge {:router (t "ffn_gate_inp" [experts hidden])
+                                            :gate (t "ffn_gate_exps" [experts expert-ffn hidden])
+                                            :up (t "ffn_up_exps" [experts expert-ffn hidden])
+                                            :down (t "ffn_down_exps" [experts hidden expert-ffn])}
+                                           (when (contains? tensors (str "blk." i ".ffn_up_shexp.weight"))
+                                             {:shared-gate (t "ffn_gate_inp_shexp" [hidden] true)
+                                              :shared {:gate (t "ffn_gate_shexp" [shared-ffn hidden])
+                                                       :up (t "ffn_up_shexp" [shared-ffn hidden])
+                                                       :down (t "ffn_down_shexp" [hidden shared-ffn])}}))}
+                              {:gate (t "ffn_gate" [ffn hidden])
+                               :up (t "ffn_up" [ffn hidden])
+                               :down (t "ffn_down" [hidden ffn])})]
+                   (merge {:attn-norm (t "attn_norm" [hidden] true)
+                           :post-norm (t "post_attention_norm" [hidden] true)}
+                          mixer feed)))
+         weights {:embed embed
+                  :norm (tensor "output_norm.weight" [hidden] true)
+                  :output (when (contains? tensors "output.weight") (tensor "output.weight" [vocab hidden]))
+                  :layers (mapv layer (range layers))}
+         unread (sort (remove #(or (@seen %) (mtp-tensor? % layers)) (keys tensors)))]
+     (when (seq unread)
+       (throw (unsupported (str "the file holds tensors Qwen3.5's forward does not read: " (str/join ", " (take 8 unread))
+                                (when (c/> (count unread) 8) ", …"))
+                           {:tensors (vec unread)})))
+     {:config (assoc cfg :vocab vocab :dtype dtype) :weights weights})))
+
+(defn load
+  "(model (gen.array/load-gguf path) opts): a Qwen3.5 or Qwen3.6 GGUF
+   file's model (dense or MoE), on *backend*."
+  ([path] (load path nil))
+  ([path opts] (model (array/load-gguf path) opts)))
+
+;; ---------------------------------------------------------------------------
+;; The layers
+;; ---------------------------------------------------------------------------
+
+(defn- state-dtype
+  "The dtype of a GatedDeltaNet's recurrent state for a model computing
+   in dtype: float32 for the half floats, where the rule is computed."
+  [dtype]
+  (if (#{:float16 :bfloat16} dtype) :float32 dtype))
+
+(defn- causal-conv
+  "The causal depthwise convolution of padded [B K-1+t C], the layer's
+   last K-1 inputs then t new ones, by kernel [C K]: the output [B t C],
+   channel c's at i Σⱼ padded[i + j, c]·kernel[c, j] (ggml_ssm_conv: tap
+   j reads the window oldest first)."
+  [padded kernel t]
+  (let [[ch kk] (array/shape kernel)]
+    (reduce + (for [j (range kk)]
+                (* (array/slice padded 1 j (c/+ (long j) (long t)))
+                   (array/reshape (array/slice kernel 1 j (inc (long j))) [ch]))))))
+
+(defn- conv-state
+  "The conv state after a read: the newest K-1 inputs of padded [B K-1+t
+   C], the next read's window's start."
+  [padded t]
+  (let [n (long (second (array/shape padded)))]
+    (array/slice padded 1 t n)))
+
+(defn- l2-norm
+  "x divided by √(Σ x² + eps) over its last axis of n, as llama.cpp's
+   build_gdn_l2_norm: an RMSNorm of eps/n, over √n."
+  [x eps]
+  (let [n (double (peek (array/shape x)))]
+    (* (array/rms-norm x nil (c// (double eps) n)) (c// 1.0 (Math/sqrt n)))))
+
+(defn- key-heads-tiled
+  "y [B T key-heads D] repeated to value-heads heads, tiled: value head h
+   reads key head h mod key-heads (the order llama.cpp's converter gives
+   the value heads, ggml_repeat's)."
+  [y value-heads]
+  (let [hk (long (nth (array/shape y) 2))]
+    (if (c/== hk (long value-heads)) y (array/concatenate (vec (repeat (quot (long value-heads) hk) y)) 2))))
+
+(defn- delta-net
+  "One GatedDeltaNet layer of the normed x [B T hidden] after its cache
+   entry {:conv :state} (nil: zeros, the start): [its output, the entry
+   after x]."
+  [{:keys [eps dtype delta-conv delta-key-heads delta-value-heads delta-key-dim delta-value-dim]} w x entry]
+  (let [[b t] (array/shape x)
+        hk (long delta-key-heads) hv (long delta-value-heads) dk (long delta-key-dim) dv (long delta-value-dim)
+        width (c/* hk dk)
+        qkv (common/linear x (:qkv w))
+        channels (peek (array/shape qkv))
+        padded (array/concatenate [(or (:conv entry) (array/zeros [b (dec (long delta-conv)) channels] {:dtype (array/dtype qkv)}))
+                                   qkv]
+                                  1)
+        mixed (common/silu (causal-conv padded (:conv w) t))
+        heads (fn [from to n d] (array/reshape (array/slice mixed 2 from to) [b t n d]))
+        q (* (key-heads-tiled (l2-norm (heads 0 width hk dk) eps) hv) (c// 1.0 (Math/sqrt dk)))
+        k (key-heads-tiled (l2-norm (heads width (c/* 2 width) hk dk) eps) hv)
+        v (heads (c/* 2 width) channels hv dv)
+        beta (array/sigmoid (common/linear x (:beta w)))
+        g (* (array/softplus (+ (common/linear x (:alpha w)) (:dt-bias w))) (:a w))
+        state (or (:state entry) (array/zeros [b hv dv dk] {:dtype (state-dtype dtype)}))
+        [y state] (array/gated-delta q k v g beta state)
+        y (if (= dtype (array/dtype y)) y (array/astype y dtype))
+        z (array/reshape (common/linear x (:z w)) [b t hv dv])
+        y (* (array/rms-norm y (:ssm-norm w) eps) (common/silu z))]
+    [(common/linear (array/reshape y [b t (c/* hv dv)]) (:out w))
+     {:conv (conv-state padded t) :state state}]))
+
+(defn- query-and-gate
+  "[query gate] of attn_q's projection [B T heads 2 head-dim]: each head's
+   query, then its output gate."
+  [qg]
+  [(array/slice qg 3 0 1) (array/slice qg 3 1 2)])
+
+(defn- gated-qkv
+  "[q k v gate] of the normed x [B T hidden]: q [B heads T head-dim] and
+   k, v [B KV-heads T head-dim], q and k normed per head and rotated over
+   their first rope-dims at positions offset… (a host integer, or an int
+   array of one per row); the gate [B T heads·head-dim]."
+  [{:keys [heads kv-heads head-dim rope-dims rope-base eps]} w x offset]
+  (let [[b t] (array/shape x)
+        [q gate] (query-and-gate (array/reshape (common/linear x (:q w)) [b t heads 2 head-dim]))
+        heads-of (fn [y n] (array/transpose (array/reshape y [b t n head-dim]) [0 2 1 3]))
+        rotate (fn [y] (array/rope y rope-dims {:base rope-base :offset offset}))]
+    [(rotate (array/rms-norm (heads-of q heads) (:q-norm w) eps))
+     (rotate (array/rms-norm (heads-of (common/linear x (:k w)) kv-heads) (:k-norm w) eps))
+     (heads-of (common/linear x (:v w)) kv-heads)
+     (array/reshape gate [b t (c/* (long heads) (long head-dim))])]))
+
+(defn- attend
+  "The attention of q over the keys k and values v under mask, gated by
+   sigmoid(gate), through the output projection: [B T hidden]."
+  [{:keys [heads head-dim]} w q k v gate mask]
+  (let [[b _ t] (array/shape q)]
+    (-> (array/sdpa q k v {:mask mask})
+        (array/transpose [0 2 1 3])
+        (array/reshape [b t (c/* (long heads) (long head-dim))])
+        (* (array/sigmoid gate))
+        (common/linear (:o w)))))
+
+(defn- attention
+  "One gated attention layer of the normed x [B T hidden] at positions
+   offset… after its cache entry (nil for none): [its output, the entry
+   after x]."
+  [cfg w x offset entry]
+  (let [[q k v gate] (gated-qkv cfg w x offset)
+        k (if entry (array/concatenate [(:k entry) k] 2) k)
+        v (if entry (array/concatenate [(:v entry) v] 2) v)]
+    [(attend cfg w q k v gate :causal) {:k k :v v}]))
+
+(defn- static-attention
+  "One gated attention layer of the normed x [B T hidden] after its
+   static cache entry, at (static-forward's {:positions :mask :slots}):
+   its keys and values written over their slots, [its output, the entry
+   after x]."
+  [cfg w x {:keys [positions mask slots]} entry]
+  (let [[q k v gate] (gated-qkv cfg w x positions)
+        k (array/put-along-axis (:k entry) slots k 2)
+        v (array/put-along-axis (:v entry) slots v 2)]
+    [(attend cfg w q k v gate mask) {:k k :v v}]))
+
+(defn- top-k
+  "[indices values] of the k largest entries of p [N E] along its last
+   axis, largest first: [N k] each, the indices int32 (the first of equal
+   entries first, as argmax)."
+  [p k]
+  (let [ids (array/arange 0 (peek (array/shape p)) 1 {:dtype :int32})]
+    (loop [p p i 0 idx [] vals []]
+      (if (c/== i (long k))
+        [(array/concatenate idx -1) (array/concatenate vals -1)]
+        (let [j (array/expand-dims (array/astype (array/argmax p {:axis -1}) :int32) -1)]
+          (recur (array/where (array/== ids j) Double/NEGATIVE_INFINITY p)
+                 (inc i)
+                 (conj idx j)
+                 (conj vals (array/take-along-axis p j -1))))))))
+
+(defn- gathered
+  "x's matrices [.. 1 in] times their experts' matrices of the stack w
+   [experts out in] (transposed): expert indices [N k], x's matrix for
+   each by lhs (its leading axes broadcasting to [N k]): [N k 1 out].
+   Quantized stacks by gather-qmm, dense ones gathered by take."
+  [x w indices lhs]
+  (if (map? w)
+    (array/gather-qmm x (:wq w) (:scales w) (:biases w)
+                      (assoc (select-keys w [:bits :group-size]) :lhs-indices lhs :rhs-indices indices))
+    (array/matmul x (array/transpose (array/take w indices 0) [0 1 3 2]))))
+
+(defn- moe
+  "The mixture of experts of the normed x [B T hidden], as llama.cpp's
+   build_moe_ffn with qwen35moe's settings (softmax gating, the top k
+   weights renormalized, no scale), plus the shared expert."
+  [{:keys [experts-used dtype]} {:keys [router gate up down shared shared-gate]} x]
+  (let [s (array/shape x)
+        hidden (peek s)
+        xs (array/reshape x [-1 hidden])
+        n (long (first (array/shape xs)))
+        k (long experts-used)
+        logits (common/linear xs router)
+        probs (array/softmax (if (#{:float16 :bfloat16} dtype) (array/astype logits :float32) logits) {:axis -1})
+        [idx p] (top-k probs k)
+        p (/ p (array/maximum (array/sum p {:axis -1 :keep-dims? true}) 6.103515625e-5))
+        p (if (= dtype (array/dtype p)) p (array/astype p dtype))
+        x1 (array/reshape xs [n 1 1 hidden])
+        token (array/reshape (array/arange 0 n 1 {:dtype :int32}) [n 1])
+        act (* (common/silu (gathered x1 gate idx token)) (gathered x1 up idx token))
+        y (array/squeeze (gathered act down idx (array/reshape (array/arange 0 (c/* n k) 1 {:dtype :int32}) [n k])) [2])
+        routed (array/sum (* y (array/expand-dims p -1)) {:axis 1})
+        out (if shared
+              (+ routed (* (common/swiglu shared xs)
+                           (array/sigmoid (common/linear xs (array/reshape shared-gate [1 hidden])))))
+              routed)]
+    (array/reshape out s)))
+
+(defn- feed-forward [cfg w x]
+  (if-let [e (:moe w)]
+    (moe cfg e x)
+    (common/swiglu w x)))
+
+(defn- block
+  "One block of x [B T hidden], (mixer x') giving [the output, the cache
+   entry after it] of the normed x': [x after the block, the entry]."
+  [{:keys [eps] :as cfg} w x mixer]
+  (let [[a entry] (mixer (array/rms-norm x (:attn-norm w) eps))
+        x (+ x a)]
+    [(+ x (feed-forward cfg w (array/rms-norm x (:post-norm w) eps))) entry]))
+
+(defn- logits-of
+  "[logits, the cache entries after them] of tokens ids [B T] (an int
+   array) through every block, block i's layer (mixer i w x');
+   logits :all or :last."
+  [{:keys [layers eps dtype] :as cfg} weights ids mixer logits]
+  (let [t (long (second (array/shape ids)))
+        [h entries] (reduce (fn [[h entries] i]
+                              (let [w (nth (:layers weights) i)
+                                    [h e] (block cfg w h #(mixer i w %))]
+                                [h (conj entries e)]))
+                            [(common/embed (:embed weights) ids dtype) []]
+                            (range layers))
+        h (if (= :last logits) (array/slice h 1 (dec t) t) h)]
+    [(common/linear (array/rms-norm h (:norm weights) eps) (or (:output weights) (:embed weights))) entries]))
+
+;; ---------------------------------------------------------------------------
+;; Static caches
+;; ---------------------------------------------------------------------------
+
+(defn- static? [cache] (contains? cache :capacity))
+
+(defn- check-static [f cache]
+  (when-not (static? cache)
+    (throw (invalid (str (name f) " takes a static cache (static-cache, or prefill's :capacity), not "
+                         (if (map? cache) "a concatenating cache" (pr-str cache)))
+                    {:fn f}))))
+
+(defn- static-forward
+  "[logits, the static cache's layers after ids, its positions after
+   them] of tokens ids [B T] (an int array) after the layers at positions
+   (int32 [B]): arrays in and arrays out, the step compile-step compiles."
+  [{:keys [kinds kv-heads head-dim] :as cfg} weights layers positions ids logits]
+  (let [[b t] (array/shape ids)
+        at (when-let [i (first (keep-indexed (fn [i kind] (when (= :attention kind) i)) kinds))]
+             {:positions positions
+              :mask (common/static-mask positions t (nth (array/shape (:k (nth layers i))) 2))
+              :slots (common/write-slots positions [b kv-heads t head-dim])})
+        [out entries] (logits-of cfg weights ids
+                                 (fn [i w x]
+                                   (if (= :attention (kinds i))
+                                     (static-attention cfg w x at (nth layers i))
+                                     (delta-net cfg w x (nth layers i))))
+                                 logits)]
+    [out entries (+ positions t)]))
+
+(defn static-cache
+  "An empty static cache of rows rows and capacity positions each, every
+   row at offset 0: its attention layers' slots and its GatedDeltaNet
+   layers' conv and recurrent states zero (one zero array of each shape,
+   shared until a step writes). Its attention layers hold 2 × rows ×
+   KV-heads × capacity × head-dim floats each, its GatedDeltaNet layers
+   rows × (3 × channels + value-heads × value-dim × key-dim) whatever the
+   capacity: for Qwen3.5-0.8B in float32, 24 KiB a position and 19 MiB a
+   row."
+  [{:keys [config]} rows capacity]
+  (common/check-cache-arg who rows capacity)
+  (let [{:keys [kinds kv-heads head-dim dtype delta-conv delta-key-heads delta-value-heads delta-key-dim delta-value-dim]} config
+        kv (array/zeros [rows kv-heads capacity head-dim] {:dtype dtype})
+        conv (array/zeros [rows (dec (long delta-conv))
+                           (c/+ (c/* 2 (long delta-key-heads) (long delta-key-dim)) (c/* (long delta-value-heads) (long delta-value-dim)))]
+                          {:dtype dtype})
+        state (array/zeros [rows delta-value-heads delta-value-dim delta-key-dim] {:dtype (state-dtype dtype)})]
+    {:capacity (long capacity)
+     :offsets (vec (repeat rows 0))
+     :positions (array/zeros [rows] {:dtype :int32})
+     :layers (mapv #(if (= :attention %) {:k kv :v kv} {:conv conv :state state}) kinds)}))
+
+(defn select-rows
+  "The static cache of cache's rows idx (host integers, in order, repeats
+   allowed), each at its own offset: a resample's ancestors, or a row
+   alone."
+  [cache idx]
+  (check-static :select-rows cache)
+  (let [idx (vec idx)]
+    (common/check-row-indices who idx (count (:offsets cache)))
+    (let [ix (array/array idx {:dtype :int32})
+          pick #(array/take % ix 0)]
+      {:capacity (:capacity cache)
+       :offsets (mapv #((:offsets cache) %) idx)
+       :positions (pick (:positions cache))
+       :layers (mapv #(update-vals % pick) (:layers cache))})))
+
+(defn rewind
+  "The static cache with each row at its offset in offsets (a vector of
+   one per row, or a host integer for every row): its own (as it is), or
+   0, the row cleared as if it never read (its GatedDeltaNet states
+   zeroed, its attention slots left to be written over, as qwen3's
+   rewind). A recurrent state cannot be moved back to another position,
+   so any other offset is loud (:unsupported): keep the cache from before
+   it (a value) instead. It shares cache's arrays but a cleared row's
+   states: under compile-step's :donate? step one of the two only."
+  [cache offsets]
+  (check-static :rewind cache)
+  (let [os (:offsets cache)
+        new (common/new-offsets who os offsets)]
+    (when-let [[o n] (first (remove (fn [[o n]] (or (c/== (long o) (long n)) (zero? (long n)))) (map vector os new)))]
+      (throw (unsupported (str "rewind: a row at " o " goes back to its own offset or to 0, not " n
+                               " (a recurrent state cannot be moved back: keep the cache from before instead)")
+                          {:offset n :row-offset o})))
+    (let [cleared (mapv (fn [o n] (and (pos? (long o)) (zero? (long n)))) os new)
+          keep (array/array (mapv not cleared) {:dtype :bool})
+          clear (fn [x] (array/where (array/reshape keep (into [(count os)] (repeat (dec (array/ndim x)) 1))) x 0.0))]
+      (assoc cache
+             :offsets new
+             :positions (array/array new {:dtype :int32})
+             :layers (if (some true? cleared)
+                       (mapv #(if (contains? % :state) (update-vals % clear) %) (:layers cache))
+                       (:layers cache))))))
+
+(defn grow
+  "The static cache with capacity positions a row (at least its own), its
+   rows, offsets and states as they were: each attention layer's keys and
+   values extended by zero slots. A step's shapes change with the
+   capacity, so a compiled step traces again; grow by blocks."
+  [cache capacity]
+  (check-static :grow cache)
+  (let [old (long (:capacity cache))]
+    (common/check-grow who old capacity)
+    (if (c/== old (long capacity))
+      cache
+      (let [extend (fn [x]
+                     (let [[rows heads _ dim] (array/shape x)]
+                       (array/concatenate [x (array/zeros [rows heads (c/- (long capacity) old) dim] {:dtype (array/dtype x)})] 2)))]
+        (assoc cache
+               :capacity (long capacity)
+               :layers (mapv #(if (contains? % :k) (update-vals % extend) %) (:layers cache)))))))
+
+(defn concat-rows
+  "The static cache of the static caches' rows, in order, each at its own
+   offset: caches of one model and one capacity."
+  [caches]
+  (let [caches (vec caches)]
+    (common/check-concat who caches static?)
+    (let [cat #(array/concatenate (vec %) 0)]
+      {:capacity (:capacity (first caches))
+       :offsets (into [] (mapcat :offsets) caches)
+       :positions (cat (map :positions caches))
+       :layers (apply mapv (fn [& es] (into {} (map (fn [k] [k (cat (map k es))])) (keys (first es)))) (map :layers caches))})))
+
+;; ---------------------------------------------------------------------------
+;; Reading tokens
+;; ---------------------------------------------------------------------------
+
+(defn- cache-rows
+  "The rows of a cache's arrays."
+  [cache]
+  (if (static? cache)
+    (count (:offsets cache))
+    (first (array/shape (first (vals (first (:layers cache))))))))
+
+(defn offsets
+  "The positions each of cache's rows holds, a vector (nil for nil, no
+   cache)."
+  [cache]
+  (cond (nil? cache) nil
+        (static? cache) (:offsets cache)
+        :else (vec (repeat (cache-rows cache) (long (:offset cache))))))
+
+(defn offset
+  "The positions cache holds (0 for nil, no cache): every row's. Loud for
+   a static cache whose rows hold different numbers (read those with
+   offsets)."
+  ^long [cache]
+  (if (static? cache)
+    (let [os (:offsets cache)]
+      (when-not (apply = os)
+        (throw (invalid "offset: the cache's rows sit at different offsets (offsets reads them)" {:offsets os})))
+      (long (first os)))
+    (long (or (:offset cache) 0))))
+
+(defn- check-rows
+  "tokens' b rows are cache's (when there is one)."
+  [cache b]
+  (when cache
+    (let [kb (cache-rows cache)]
+      (when-not (= b kb)
+        (throw (invalid (str "tokens have " b " rows where the cache has " kb) {:rows b :cache-rows kb}))))))
+
+(defn- advanced
+  "The static cache after a chunk of t tokens, its layers and positions the
+   step's."
+  [cache layers positions t]
+  (assoc cache :layers layers :positions positions :offsets (mapv #(c/+ (long %) (long t)) (:offsets cache))))
+
+(defn- run
+  "[logits cache'] of tokens after cache (nil for none, a concatenating
+   cache or a static one); logits :all or :last."
+  [{:keys [config weights]} cache tokens logits]
+  (common/check-logits who logits)
+  (let [ids (common/token-array who tokens (:vocab config))
+        [b t] (array/shape ids)
+        kinds (:kinds config)]
+    (check-rows cache b)
+    (if (static? cache)
+      (do (common/check-capacity who cache t)
+          (let [[out layers positions] (static-forward config weights (:layers cache) (:positions cache) ids logits)]
+            [out (advanced cache layers positions t)]))
+      (let [start (offset cache)
+            [out entries] (logits-of config weights ids
+                                     (fn [i w x]
+                                       (let [entry (get-in cache [:layers i])]
+                                         (if (= :attention (kinds i))
+                                           (attention config w x start entry)
+                                           (delta-net config w x entry))))
+                                     logits)]
+        [out {:offset (c/+ start (long t)) :layers entries}]))))
+
+(defn forward
+  "The logits [B T vocab] of every position of tokens (B rows of T ids),
+   read from position 0."
+  [m tokens]
+  (first (run m nil tokens :all)))
+
+(defn prefill
+  "[logits cache]: the logits of tokens (B rows of T ids) read from
+   position 0, [B T vocab] (or [B 1 vocab] with :logits :last), and the
+   cache after them: a concatenating cache, or with :capacity n a static
+   one of n positions a row."
+  ([m tokens] (prefill m tokens nil))
+  ([m tokens {:keys [logits capacity] :or {logits :all} :as opts}]
+   (common/check-options who :prefill opts #{:logits :capacity})
+   (if capacity
+     (let [ids (common/token-array who tokens (:vocab (:config m)))]
+       (run m (static-cache m (first (array/shape ids)) capacity) ids logits))
+     (run m nil tokens logits))))
+
+(defn step
+  "[logits cache']: the logits of tokens (B rows of T ids, one or a
+   chunk) read after cache (row b's from position (offsets cache)[b]; nil
+   reads from 0, as prefill), and the cache after them, of cache's kind.
+   Options: :logits, as prefill's."
+  ([m cache tokens] (step m cache tokens nil))
+  ([m cache tokens {:keys [logits] :or {logits :all} :as opts}]
+   (common/check-options who :step opts #{:logits})
+   (run m cache tokens logits)))
+
+(defn compile-step
+  "step over static caches, compiled by array/compile, as qwen3's: a
+   function (f cache tokens) → [logits cache'], the values (step m cache
+   tokens opts) gives (within float32's round-off), one trace per shape
+   of tokens and cache on MLX, step itself elsewhere; a concatenating
+   cache is loud (:invalid-args). The model's weights are evaluated here
+   (array/eval!). Options:
+     :logits   as step's;
+     :donate?  true: each call consumes the cache it steps (array/compile's
+               :donate, experimental): on MLX its arrays are donated, the
+               attention slots written in place, and reading the consumed
+               cache again is loud (:donated); where compile is step
+               itself (the JVM backend) nothing is caught: never step a
+               consumed cache again (fork one first with select-rows)."
+  ([m] (compile-step m nil))
+  ([{:keys [config weights]} {:keys [logits donate?] :or {logits :all} :as opts}]
+   (common/check-options who :compile-step opts #{:logits :donate?})
+   (common/check-logits who logits)
+   (array/eval! weights)
+   (let [f (array/compile (fn [layers positions ids] (static-forward config weights layers positions ids logits))
+                          (when donate? {:donate #{0 1}}))]
+     (fn [cache tokens]
+       (check-static :compile-step cache)
+       (let [ids (common/token-array who tokens (:vocab config))
+             [b t] (array/shape ids)]
+         (check-rows cache b)
+         (common/check-capacity who cache t)
+         (let [[out layers positions] (f (:layers cache) (:positions cache) ids)]
+           [out (advanced cache layers positions t)]))))))

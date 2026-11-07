@@ -70,6 +70,47 @@ other values for the same key, from the same distribution.
   `:architecture "qwen3"`** (gen.llm.models.qwen3, experimental;
   genclj-yc3b), the GGUF's general.architecture, which an adapter's file
   names.
+- **Added (experimental): Qwen3.5's and Qwen3.6's forward passes over
+  gen.array, `gen.llm.models.qwen35`** (genclj-xnx3): a GGUF of
+  architecture qwen35 (dense) or qwen35moe (mixture of experts), with
+  qwen3's functions (`load`, `model`, `config`, `forward`, `prefill`,
+  `step`, `static-cache`, `compile-step` with `:donate?`, `select-rows`,
+  `concat-rows`, `grow`, `offset`, `offsets`, `rewind`). llama.cpp's
+  conventions (its qwen35, qwen35moe and delta-net graphs): GatedDeltaNet
+  layers (a causal depthwise conv with its conv state, l2-normed q and k
+  repeated to the value heads tiled, the gated delta rule with its
+  recurrent state, a gated RMSNorm), gated attention every fourth layer
+  (attn_q's query and output gate, RoPE on rope.dimension_count dims of
+  a head), SwiGLU or the experts (softmax router, the top k renormalized,
+  gather-qmm for quantized stacks, and the shared expert gated by a
+  sigmoid); the MTP block's tensors recognized and not read. A cache is a
+  value: attention layers' `{:k :v}`, GatedDeltaNet layers' `{:conv
+  :state}`, replaced by each read. A recurrent state cannot be moved
+  back: `rewind` takes a row to its own offset or to 0, anything else is
+  loud (`:unsupported`). On Metal, Qwen3.5-0.8B-Q8_0's next-token
+  log-probabilities are llama.cpp's on the same file within 1.6e-2 nats
+  (20 prompts, whole, chunked and stepped; median 1.3e-3), the argmax
+  and top 5 always the same (gen.llm.models.qwen35-llama-test). Compiled
+  decode runs at 74.5 tokens/s at batch 1 and 437 at batch 16 (llama.cpp
+  through gen.llm.llama: 79.3 and 418; bench/gen/qwen3_bench.clj, which
+  now runs either family, as bench/gen/qwen3_llama_noise.clj does).
+- **Added (experimental): `array/gated-delta`** (genclj-xnx3): the gated
+  delta rule, GatedDeltaNet's recurrence, `[y state']` of q, k, v, the
+  log decays g, beta and a state; `:method` `:loop` (token by token),
+  `:chunked` (in chunks of `:chunk-size`, 64: the WY form llama.cpp
+  computes, with a triangular inverse by doubling blocks) or `:auto` (a
+  backend's fused kernel, else chunks from 64 tokens). A composite of
+  gen.array's ops (the tape differentiates it, the batch tracer batches
+  it), behind `p/IFused`'s new op `:gated-delta`: on MLX's Metal, mlx-lm's
+  gated-delta kernel (ported with its notice: THIRD-PARTY-NOTICES,
+  gen.backend.mlx.gated-delta), declined under MLX's native gradients,
+  on the CPU device and for a key size not a multiple of 32.
+- **Changed (experimental): `gen.llm.array-engine` runs Qwen3.5 and
+  Qwen3.6** (genclj-xnx3): `:model` a GGUF of architecture qwen3, qwen35
+  or qwen35moe (read from its header), or a model either family's `load`
+  made (its config's `:arch`); another architecture is loud
+  (`:unsupported`). Its info's `:model` gains `:arch`.
+
 - **Fixed: `gen.llm.trie/insert` loops down a path** (gen.llm.trie,
   experimental; genclj-gn5i). insert recursed once for each node on the
   path it walked, so a trie with an entry at each of a few thousand

@@ -402,6 +402,166 @@
                           bounds)]
           (- (reduce + (map #(array/take % 1 0) parts))
              (logsumexp-of (mapv #(array/take % 0 0) parts))))))))
+;; The gated delta rule (GatedDeltaNet's recurrence)
+;; ---------------------------------------------------------------------------
+
+(defn- step-slice
+  "x's entries at index i of axis, that axis dropped."
+  [x axis i]
+  (array/squeeze (array/slice x axis i (inc (long i))) [axis]))
+
+(defn- gated-delta-loop
+  "The gated delta rule token by token, every operand of one float dtype:
+   [y state']."
+  [q k v g beta state]
+  (let [t (long (second (array/shape q)))
+        decay (array/exp g)
+        [s ys] (reduce (fn [[s ys] i]
+                         (let [at #(step-slice % 1 i)
+                               kt (at k)
+                               s (* s (array/expand-dims (at decay) [-1 -2]))
+                               kv (array/squeeze (array/matmul s (array/expand-dims kt -1)) [-1])
+                               delta (* (- (at v) kv) (array/expand-dims (at beta) -1))
+                               s (+ s (* (array/expand-dims delta -1) (array/expand-dims kt -2)))]
+                           [s (conj ys (array/squeeze (array/matmul s (array/expand-dims (at q) -1)) [-1]))]))
+                       [state []]
+                       (range t))]
+    [(array/stack ys 1) s]))
+
+(defn- lower-triangle
+  "A bool [n n] on backend b, true where column j <= row i (j < i when
+   strict?)."
+  [b n strict?]
+  (array/with-backend b
+    (let [i (array/expand-dims (array/arange 0 n 1) -1)
+          j (array/arange 0 n 1)]
+      (if strict? (array/< j i) (array/<= j i)))))
+
+(defn- unit-lower-inverse
+  "(I + a)⁻¹ for a [.. n n] strictly lower triangular, n a power of 2: by
+   diagonal blocks of doubling size, every block of one size at once, the
+   inverse of [[L₁₁ 0] [L₂₁ L₂₂]] being [[X₁₁ 0] [-X₂₂·L₂₁·X₁₁ X₂₂]]
+   (Xᵢᵢ = Lᵢᵢ⁻¹). A divide-and-conquer forward substitution: log₂ n rounds
+   of matrix products in place of n dependent steps, with no division
+   (the diagonal is 1)."
+  [b a]
+  (let [s (array/shape a)
+        lead (subvec s 0 (c/- (count s) 2))
+        ones (vec (repeat (count lead) 1))
+        n (long (peek s))]
+    (loop [x (array/with-backend b (array/ones (conj lead n 1 1) {:dtype (array/dtype a)}))
+           size 1]
+      (if (c/== size n)
+        (array/reshape x (conj lead n n))
+        (let [m (quot n (c/* 2 size))
+              x (array/reshape x (conj lead m 2 size size))
+              x11 (step-slice x -3 0)
+              x22 (step-slice x -3 1)
+              ;; L₂₁ of pair p: a's rows p·2size + size + i, columns p·2size + j
+              rows (array/slice (array/reshape a (conj lead m (c/* 2 size) n)) -2 size (c/* 2 size))
+              cols (array/with-backend b
+                     (array/reshape (+ (array/expand-dims (array/arange 0 (c/* m 2 size) (c/* 2 size) {:dtype :int32}) -1)
+                                       (array/arange 0 size 1 {:dtype :int32}))
+                                    (into ones [m 1 size])))
+              a21 (array/take-along-axis rows cols -1)
+              x21 (array/negate (array/matmul x22 (array/matmul a21 x11)))]
+          (recur (array/concatenate [(array/concatenate [x11 (array/zeros-like x11)] -1)
+                                     (array/concatenate [x21 x22] -1)]
+                                    -2)
+                 (c/* 2 size)))))))
+
+(defn- next-power-of-2 ^long [^long n]
+  (loop [p 1] (if (c/< p n) (recur (c/* 2 p)) p)))
+
+(defn- gated-delta-chunked
+  "The gated delta rule in chunks of c tokens (c the chunk size, or the
+   power of 2 at or above T if T is fewer), the form llama.cpp's
+   delta-net-base.cpp computes (the WY representation of the chunk's
+   updates, as in Yang, Kautz and Hatamizadeh's GatedDeltaNet): within a
+   chunk, with G the cumulative log decay and Dᵢⱼ = exp(Gᵢ - Gⱼ) for
+   j <= i,
+     A = strict-lower((β k)·kᵀ ⊙ D),  W = (I + A)⁻¹·(β exp(G) k),
+     U = (I + A)⁻¹·(β v),             V' = U - W·Sᵀ,
+     y = (exp(G) q)·Sᵀ + lower(q·kᵀ ⊙ D)·V',
+     S' = exp(G_last) S + V'ᵀ·(exp(G_last - G) k);
+   the chunks in order, T padded to whole chunks by tokens of zero key,
+   value and β and of no decay, which leave the state as it is. Every
+   operand of one float dtype: [y state']."
+  [q k v g beta state chunk]
+  (let [[bsz t h _] (array/shape q)
+        dv (peek (array/shape v))
+        t (long t)
+        c (if (c/>= t (long chunk)) (long chunk) (next-power-of-2 t))
+        n (quot (c/+ t (dec c)) c)
+        pad (c/- (c/* n c) t)
+        b (array/backend-of :gated-delta [q k v g beta state])
+        chunks (fn [x]
+                 ;; [B T H ..] → [B H n c ..]
+                 (let [s (array/shape x)
+                       x (if (zero? pad)
+                           x
+                           (array/concatenate [x (array/with-backend b (array/zeros (assoc s 1 pad) {:dtype (array/dtype x)}))] 1))
+                       x (array/transpose x (into [0 2 1] (range 3 (count s))))]
+                   (array/reshape x (into [bsz h n c] (subvec s 3)))))
+        [q k v g beta] (mapv chunks [q k v g beta])
+        cum (array/cumsum g {:axis -1})
+        incl (lower-triangle b c false)
+        strict (lower-triangle b c true)
+        decay (array/where incl (array/exp (array/where incl (- (array/expand-dims cum -1) (array/expand-dims cum -2)) 0.0)) 0.0)
+        kb (* k (array/expand-dims beta -1))
+        inv (unit-lower-inverse b (array/where strict (* (array/matmul kb (swap-last-two k)) decay) 0.0))
+        u (array/matmul inv (* v (array/expand-dims beta -1)))
+        w (array/matmul inv (* kb (array/expand-dims (array/exp cum) -1)))
+        qk (array/where incl (* (array/matmul q (swap-last-two k)) decay) 0.0)
+        last-cum (array/slice cum -1 (dec c) c)
+        qg (* q (array/expand-dims (array/exp cum) -1))
+        kg (* k (array/expand-dims (array/exp (- last-cum cum)) -1))
+        whole (array/expand-dims (array/exp last-cum) -1)
+        [s ys] (reduce (fn [[s ys] i]
+                         (let [at #(step-slice % 2 i)
+                               st (swap-last-two s)
+                               v' (- (at u) (array/matmul (at w) st))
+                               y (+ (array/matmul (at qg) st) (array/matmul (at qk) v'))]
+                           [(+ (* s (at whole)) (array/matmul (swap-last-two v') (at kg)))
+                            (conj ys y)]))
+                       [state []]
+                       (range n))
+        y (array/slice (array/reshape (array/stack ys 2) [bsz h (c/* n c) dv]) 2 0 t)]
+    [(array/transpose y [0 2 1 3]) s]))
+
+(def ^:private gated-delta-options #{:method :chunk-size})
+
+(defn gated-delta
+  "gen.array/gated-delta's body."
+  [q k v g beta state {:keys [method chunk-size] :or {method :auto chunk-size 64} :as opts}]
+  (when-not (or (nil? opts) (map? opts))
+    (throw (invalid :gated-delta (str "options must be a map, not " (pr-str opts)))))
+  (when-let [unknown (seq (remove gated-delta-options (keys opts)))]
+    (throw (ex-info (str "gated-delta: unknown options " (vec unknown) "; it takes " (vec (sort gated-delta-options)))
+                    {:reason :unknown-options :op :gated-delta :unknown (vec unknown)})))
+  (when-not (#{:auto :loop :chunked} method)
+    (throw (invalid :gated-delta (str ":method must be :auto, :loop or :chunked, not " (pr-str method)) {:method method})))
+  (when-not (and (integer? chunk-size) (pos? (long chunk-size)) (c/== (long chunk-size) (next-power-of-2 chunk-size)))
+    (throw (invalid :gated-delta (str ":chunk-size must be a power of 2, not " (pr-str chunk-size)) {:chunk-size chunk-size})))
+  (let [shapes (mapv array/shape [q k v g beta state])
+        [[bq tq hq dk] sk [bv tv hv dv] sg sb ss] shapes]
+    (when-not (and (= 4 (count (first shapes))) (= (first shapes) sk) (= 4 (count (nth shapes 2)))
+                   (= [bq tq hq] [bv tv hv]) (= [bq tq hq] sg sb) (= [bq hq dv dk] ss))
+      (throw (invalid :gated-delta (str "q and k must be [B T H Dk], v [B T H Dv], g and beta [B T H] and the state "
+                                        "[B H Dv Dk], not shapes " shapes)
+                      {:shapes shapes})))
+    (when (zero? (long tq))
+      (throw (invalid :gated-delta "no tokens (T is 0)" {:shapes shapes})))
+    (let [b (backend-of :gated-delta [q k v g beta state])
+          xs (as-floats b [q k v g beta state])
+          d (array/dtype (first xs))
+          cd (compute-dtype d)
+          [q k v g beta state] (mapv #(as-dtype % cd) xs)]
+      (or (when (= :auto method) (fused b :gated-delta (into xs [{:chunk-size chunk-size}])))
+          (let [[y s] (if (or (= :chunked method) (and (= :auto method) (c/>= (long tq) (long chunk-size))))
+                        (gated-delta-chunked q k v g beta state chunk-size)
+                        (gated-delta-loop q k v g beta state))]
+            [(as-dtype y d) (as-dtype s d)])))))
 
 ;; ---------------------------------------------------------------------------
 ;; Quantized weights
