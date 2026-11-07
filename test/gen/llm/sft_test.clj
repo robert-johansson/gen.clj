@@ -13,7 +13,9 @@
    2. batches pad, truncate and mask the targets;
    3. the loss is the mean NLL per trained token, against the forward's
       log-softmax read by hand;
-   4. two batches accumulated step as one batch of both;
+   4. two batches accumulated step as one batch of both; step's :loss,
+      the NLL written over the log-probabilities it reports, steps as
+      the default;
    5. a run saved at step 2, loaded and trained on to step 4 is the run
       trained to 4 without a stop, bit for bit (its checkpoints' files
       identical), through dropout, warmup and AdamW's moments;
@@ -210,6 +212,29 @@
                                                     [(array// l k) (array/tree-map #(array// % k) g) n]))}
                accumulation-matches?))
         "planted: the sums divided by the batches' number, then by the tokens")))
+
+(deftest a-loss-of-the-log-probs-steps-as-the-nll
+  ;; step's :loss (gen.llm.grpo's): the NLL written as a :loss of the
+  ;; log-probabilities, reporting them, steps as the default; what it
+  ;; reports are qwen3's log-probs under the adapted model
+  (let [tr (sft/trainer (adapter) (learn/sgd {:lr 0.5}) (rng/key 3))
+        bs [(sft/batch (subvec @examples 2 4)) (sft/batch (subvec @examples 4 7))]
+        nll-of (fn [m b opts] (let [lp (qwen3/log-probs m (:tokens b) (select-keys opts [:checkpoint? :chunk]))]
+                                [(array/negate (array/sum (array/* (:mask b) lp))) lp]))
+        [t1 i1] (sft/step @model tr bs)
+        [t2 i2] (sft/step @model tr bs {:loss nll-of})
+        flat #(array/concatenate (mapv (fn [x] (array/reshape x [-1])) (array/tree-leaves (get-in % [:adapter :params]))))]
+    (is (= (:tokens i1) (:tokens i2)))
+    (is (ts/close? (:loss i1) (:loss i2) {:rtol band :atol 0.0}))
+    (is (ts/close? (flat t1) (flat t2) {:rtol 0.0 :atol (ts/tol 1e-12)}))
+    (is (nil? (:reported i1)))
+    (is (= 2 (count (:reported i2))))
+    (is (every? true? (map (fn [b x] (ts/close? x (qwen3/log-probs (lora/adapt @model (:adapter tr)) (:tokens b)) {:rtol band :atol band}))
+                           bs (:reported i2))))
+    (is (= [nil nil] (:reported (second (sft/step @model tr bs {:loss (fn [m b opts] (first (nll-of m b opts)))}))))
+        "a loss that reports nothing")
+    (is (= :invalid-args (:reason (ts/thrown-data (sft/step @model tr bs {:loss (fn [m b opts] [(first (nll-of m b opts)) (array/ones [1])])}))))
+        "a report of another shape than the mask's")))
 
 ;; ---------------------------------------------------------------------------
 ;; 5. Resuming from a checkpoint

@@ -5,7 +5,8 @@
    under test and its gradients (the tape, or MLX's native ones with
    -Dgen.mlx.grad=native):
    1. log-probs are the forward's log-softmax at the next tokens, plain,
-      chunked and checkpointed;
+      chunked and checkpointed, and at a temperature its logits divided by
+      it;
    2. the training loss's gradients (nll, checkpointed per block, its
       output projection by vocabulary chunks of 48: 48, 48 and 32) match
       central differences (the JVM backend, float64): a dense matrix, the
@@ -98,7 +99,14 @@
       (is (ts/close? (qwen3/nll m tokens {:mask @mask})
                      (array/negate (array/sum (array/* @mask want)))
                      {:rtol 1e-4 :atol (if (ts/jvm?) 1e-12 1e-3)})
-          (str (name k) ": nll, masked")))))
+          (str (name k) ": nll, masked"))
+      (let [tempered (array/pick (array/log-softmax (array// (array/slice (qwen3/forward m tokens) 1 0 8) 0.7))
+                                 (array/slice ids 1 1 9))]
+        (doseq [opts [{:temperature 0.7} (assoc training :temperature 0.7)]]
+          (is (ts/close? (qwen3/log-probs m tokens opts) tempered {:rtol 1e-4 :atol (if (ts/jvm?) 1e-12 1e-4)})
+              (str (name k) " " opts ": the logits divided by the temperature")))
+        (is (= (host (qwen3/log-probs m tokens training)) (host (qwen3/log-probs m tokens (assoc training :temperature 1.0))))
+            "temperature 1 is the model's own, bit for bit")))))
 
 ;; ---------------------------------------------------------------------------
 ;; 2. Central differences (the JVM backend, float64)
@@ -231,6 +239,7 @@
           "a quantized matrix is frozen on the tape"))
     (is (= :invalid-args (reason #(qwen3/log-probs m [[5]]))) "one token: nothing to predict")
     (is (= :unknown-options (reason #(qwen3/log-probs m tokens {:checkpoint true}))))
+    (is (= :invalid-args (reason #(qwen3/log-probs m tokens {:temperature 0}))))
     (is (= :unknown-options (reason #(qwen3/nll m tokens {:weights @mask}))))
     (is (= :invalid-args (reason #(qwen3/nll m tokens {:mask (array/ones [2 9])}))) "a mask of the tokens' shape")
     (is (= :invalid-token (reason #(qwen3/log-probs m [[1 128]]))))))

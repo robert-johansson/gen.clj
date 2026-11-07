@@ -385,10 +385,17 @@
                    compute. The values and gradients are the same.
      :chunk        vocabulary entries per chunk of the output projection
                    (default: the whole vocabulary, one chunk).
+     :temperature  the log-probabilities of the logits divided by it, a
+                   positive number (default 1: the model's own): the
+                   tempered distribution a sampler draws from
+                   (gen.llm.sample's :temp; policy-gradient training,
+                   gen.llm.grpo).
    Experimental: outside the 1.x promise (DESIGN §9)."
   ([m tokens] (log-probs m tokens nil))
-  ([{:keys [config weights]} tokens {:keys [checkpoint? chunk] :as opts}]
-   (check-options :log-probs opts #{:checkpoint? :chunk})
+  ([{:keys [config weights]} tokens {:keys [checkpoint? chunk temperature] :as opts}]
+   (check-options :log-probs opts #{:checkpoint? :chunk :temperature})
+   (when-not (or (nil? temperature) (and (number? temperature) (pos? (double temperature)) (Double/isFinite (double temperature))))
+     (throw (invalid (str "log-probs: :temperature is a positive number, not " (pr-str temperature)) {:temperature temperature})))
    (let [{:keys [eps dtype vocab]} config
          ids (token-array tokens vocab)
          [_ t] (array/shape ids)
@@ -397,8 +404,11 @@
          block-of (if checkpoint? (array/checkpoint #(train-block config %1 %2)) #(train-block config %1 %2))
          h (reduce block-of (embed (:embed weights) ids dtype) (:layers weights))
          hn (array/rms-norm (array/slice h 1 0 (dec t)) (:norm weights) eps)
-         w (or (:output weights) (:embed weights))]
-     (array/selective-log-softmax (if checkpoint? head-logits #(head-logits %1 %2 hn w))
+         w (or (:output weights) (:embed weights))
+         head (if (or (nil? temperature) (c/== 1.0 (double temperature)))
+                head-logits
+                (let [temp (double temperature)] (fn [start stop hn w] (array// (head-logits start stop hn w) temp))))]
+     (array/selective-log-softmax (if checkpoint? head #(head %1 %2 hn w))
                                   (array/slice ids 1 1 t)
                                   (cond-> {:vocab vocab :chunk chunk} checkpoint? (assoc :args [hn w]))))))
 
