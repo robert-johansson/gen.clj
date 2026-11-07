@@ -4624,3 +4624,61 @@ gen.array.gguf writes atomically, byte-identical to gguf-py's.
     the frozen weights' cotangents (genclj-8xua).
 
 The lora-llama test has not yet run on Metal (0.075 band).
+
+### Qwen3.5/3.6 and gen.array/gated-delta
+
+(PROVISIONAL, owner to confirm; genclj-xnx3, 2026-11-07)
+
+**What was built.**
+- **gen.llm.models.qwen35** (experimental): dense and MoE, following
+  llama.cpp's qwen35, qwen35moe and delta-net-base graphs.
+  - GatedDeltaNet layers hold {:conv :state}, as values.
+  - MoE uses a softmax router, renormalized top-k, gather-qmm, and a
+    sigmoid-gated shared expert.
+  - Static caches and compiled steps work as qwen3's do.
+- **gen.array/gated-delta** (experimental) has :method :loop, :chunked or
+  :auto. The chunked form is llama.cpp's, with the triangular inverse done
+  by doubling blocks.
+- **mlx-lm's gated-delta Metal kernel**, behind IFused's :gated-delta. Its
+  origin was checked: mlx-lm PR #454, which mlx-node's step kernels copy. It
+  was ported from mlx-lm at 760c5ab (v0.31.1, MIT, Apple), with the header
+  and a THIRD-PARTY-NOTICES line.
+- **The array engine** picks the family from the GGUF's architecture.
+
+**Checked on Metal, Qwen3.5-0.8B Q8_0, against llama.cpp.**
+- 200 comparisons: max |Δ log p| 1.6e-2 (median 1.3e-3), argmax and top 5
+  equal in all.
+- Planted errors fail by these margins:
+  - conv state stale: 1.4-8.9 nats;
+  - conv kernel reversed: 8.5-18.5;
+  - gate swapped: 14-29;
+  - KV heads tiled: 5.6-14.4;
+  - norms skipped: 11-21.5;
+  - RoPE traditional: 0.14-4.1, at least 1.25 on the 44-token prompt the
+    test uses.
+- Speed against llama.cpp, tokens/s:
+  - batch 1: 74.5 against 79.3;
+  - batch 16: 437 against 418;
+  - prefill: 1968 against 2293.
+
+**The lead's calls, on the implementing agent's recommendations:**
+1. **gated-delta is an experimental gen.array op.** g is the log decay; every
+   head has its own keys (the model tiles the key heads); the options are
+   :method and :chunk-size; :auto runs a backend kernel, otherwise chunked
+   from 64 tokens.
+2. **gen.llm.models.common** (internal) holds what the families share. qwen3
+   moves onto it later (genclj-dnt5).
+3. **rewind on a recurrent cache** allows only the row's own offset or 0.
+   Anything else is loud (:unsupported): a recurrent state can't move back.
+4. **The recurrent state stays in float32** for half-float models.
+5. **The unequal-heads check is a stand-in**, opt-in on tiny random models
+   with the 0.8B's tokenizer. Grouping the V heads wrongly fails it by
+   7-11 nats. A trained model with unequal heads and a real Qwen3.6 MoE wait
+   for k-quants (genclj-utti, blocked by genclj-kqxr).
+6. **The band off the Mac is 0.65, borrowed from Qwen3** and not measured
+   for Qwen3.5 (genclj-2krw: a CUDA kernel and the band).
+
+**Deferred:**
+- mlx-node's chunked kernel, only if measured (genclj-afy0);
+- the CUDA kernel (genclj-2krw);
+- tape replay for speculative rollback (genclj-ond4).
