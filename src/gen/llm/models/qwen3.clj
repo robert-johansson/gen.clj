@@ -20,6 +20,11 @@
      (concat-rows caches)              → a static cache of the caches' rows
      (rewind cache offsets)            → a static cache with its rows back at offsets
      (grow cache capacity)             → a static cache of a larger capacity
+     (paged-pools m n-blocks bs)       → empty paged KV pools (gen.array/paged-write's layouts)
+     (paged-step m pools positions tables slots tokens)
+                                       → [logits pools']: a token a row over paged pools
+     (compile-paged-step m)            → paged-step compiled, consuming the pools with
+                                         :donate? true
 
    tokens are B rows of T token ids each: host vectors (checked against the
    vocabulary) or an int array [B T]. A row's tokens are positions offset,
@@ -99,6 +104,7 @@
   (:require [clojure.core :as c]
             [clojure.string :as str]
             [gen.array :as array :refer [+ * <=]]
+            [gen.array.paged :as paged]
             [gen.llm.lora :as lora]
             [gen.llm.models :as models]))
 
@@ -652,6 +658,132 @@
                                      (fn [i w x] (attention config w x start (get-in cache [:layers i])))
                                      logits)]
         [out {:offset (c/+ start (long t)) :layers entries}]))))
+
+;; ---------------------------------------------------------------------------
+;; Paged KV caches (genclj-1daf): pools of blocks, one query a row
+;; ---------------------------------------------------------------------------
+
+(defn paged-pools
+  "Empty paged KV pools of n-blocks blocks of block-size positions, a
+   layer's {:k :v} in gen.array/paged-write's layouts and the model's
+   dtype ([NB KV-heads head-dim/x BS x] and [NB KV-heads head-dim BS]):
+   a vector, by layer (one zero array, shared until a step writes). They
+   hold 2 × layers × KV-heads × head-dim floats a position, as a static
+   cache's row does."
+  [{:keys [config]} n-blocks block-size]
+  (doseq [[what v] [[:n-blocks n-blocks] [:block-size block-size]]]
+    (when-not (and (integer? v) (pos? (long v)))
+      (throw (invalid (str "paged-pools: " (name what) " must be a positive integer, not " (pr-str v)) {what v}))))
+  (let [{:keys [layers kv-heads head-dim dtype]} config
+        x (quot 16 (long ({:float16 2 :bfloat16 2 :float32 4 :float64 8} dtype)))]
+    (when-not (zero? (rem (long head-dim) x))
+      (throw (ex-info (str "qwen3: a head of " head-dim " is not whole groups of " x " (the paged key layout)")
+                      {:reason :unsupported :head-dim head-dim :group x})))
+    (let [k (array/zeros [n-blocks kv-heads (quot (long head-dim) x) block-size x] {:dtype dtype})
+          v (array/zeros [n-blocks kv-heads head-dim block-size] {:dtype dtype})]
+      (vec (repeat layers {:k k :v v})))))
+
+(defn paged-cache
+  "The concatenating cache of one row holding a sequence's first len
+   positions from paged pools, its blocks (block ids, a vector, of
+   block-size positions each) gathered: for reading several tokens after
+   it (step), whose keys and values paged-entries then gives."
+  [_m pools blocks len block-size]
+  (let [len (long len)
+        tables (array/array [(vec blocks)] {:dtype :int32})]
+    (when-not (c/<= len (c/* (count blocks) (long block-size)))
+      (throw (invalid (str "paged-cache: " (count blocks) " blocks of " block-size " cannot hold " len " positions")
+                      {:blocks (count blocks) :len len})))
+    {:offset len
+     :layers (mapv (fn [{:keys [k v]}]
+                     (let [[gk gv] (paged/gathered k v tables)]
+                       {:k (array/slice gk 2 0 len) :v (array/slice gv 2 0 len)}))
+                   pools)}))
+
+(defn paged-entries
+  "The keys and values of a concatenating cache of one row at its
+   positions from on, by layer [k v], each [n KV-heads head-dim]: what
+   gen.array/paged-write writes."
+  [cache from]
+  (mapv (fn [{:keys [k v]}]
+          (let [[b hk t d] (array/shape k)
+                n (c/- (long t) (long from))]
+            (when-not (and (= 1 b) (c/<= 0 n))
+              (throw (invalid "paged-entries: a cache of one row, from at most its offset" {:shape (array/shape k) :from from})))
+            (mapv #(array/transpose (array/reshape (array/slice % 2 from t) [hk n d]) [1 0 2]) [k v])))
+        (:layers cache)))
+
+(defn- paged-attention
+  "One block's attention of x [R 1 hidden], a token a row, over the
+   layer's pools entry: its key and value written at slots (at positions,
+   rotated there), then attention over each row's blocks (tables) to its
+   position: [its output, the pools after x]."
+  [{:keys [heads kv-heads head-dim] :as cfg} w x {:keys [positions tables slots]} entry]
+  (let [r (first (array/shape x))
+        [q k v] (qkv cfg w x positions)
+        [kp vp] (array/paged-write (:k entry) (:v entry)
+                                   (array/reshape k [r kv-heads head-dim]) (array/reshape v [r kv-heads head-dim]) slots)
+        o (array/paged-attention (array/reshape q [r heads head-dim]) kp vp tables (+ positions 1))]
+    [(linear (array/reshape o [r 1 (c/* heads head-dim)]) (:o w)) {:k kp :v vp}]))
+
+(defn- paged-forward
+  "[logits [R 1 vocab], the pools after the tokens] of one token a row,
+   ids [R 1] at positions (int32 [R]), written at slots (int32 [R]) and
+   attending over tables (int32 [R MB]): arrays in and arrays out, the
+   step compile-paged-step compiles."
+  [cfg weights pools positions tables slots ids]
+  (let [at {:positions positions :tables tables :slots slots}]
+    (logits-of cfg weights ids (fn [i w x] (paged-attention cfg w x at (nth pools i))) :last)))
+
+(defn- check-paged
+  "The paged step's operands: pools of the model's layers, R rows."
+  [{:keys [layers]} pools positions tables slots ids]
+  (let [r (first (array/shape ids))]
+    (when-not (and (vector? pools) (= layers (count pools)))
+      (throw (invalid (str "the pools must be a vector of the model's " layers " layers (paged-pools)") {:layers (count pools)})))
+    (when-not (= [r 1] (array/shape ids))
+      (throw (invalid (str "a paged step reads one token a row, [R 1], not " (array/shape ids)) {:tokens (array/shape ids)})))
+    (doseq [[what x shape] [[:positions positions [r]] [:slots slots [r]]]]
+      (when-not (= shape (array/shape x))
+        (throw (invalid (str (name what) " must be [R] " shape ", not " (array/shape x)) {what (array/shape x)}))))
+    (when-not (and (= 2 (array/ndim tables)) (= r (first (array/shape tables))))
+      (throw (invalid (str "tables must be [R MB] for " r " rows, not " (array/shape tables)) {:tables (array/shape tables)})))))
+
+(defn paged-step
+  "[logits pools']: the logits [R 1 vocab] of one token a row, read after
+   each row's positions in paged pools (paged-pools'), and the pools after
+   them. Row i's token is position positions[i] of its sequence, written
+   at slots[i] (gen.llm.paged/prepare's), and attends over its first
+   positions[i] + 1 positions, its blocks the row i of tables [R MB].
+   positions, tables and slots are int32 arrays; tokens are R rows of one
+   id or an int array [R 1]. Its logits are a static cache's within
+   float round-off (on the JVM backend, float64, a masked position's
+   weight is an exact 0), the pools being values: a step leaves the pools
+   it was given as they were (compile-paged-step's :donate? consumes
+   them instead)."
+  [{:keys [config weights]} pools positions tables slots tokens]
+  (let [ids (token-array tokens (:vocab config))]
+    (check-paged config pools positions tables slots ids)
+    (paged-forward config weights pools positions tables slots ids)))
+
+(defn compile-paged-step
+  "paged-step compiled by array/compile: a function (f pools positions
+   tables slots tokens) → [logits pools'], one trace per shape (rows,
+   table width, pool size). The model's weights are evaluated here, as
+   compile-step's. Options: :donate? true, each call consumes the pools
+   it steps (array/compile's :donate, experimental): on MLX the step
+   writes its keys and values into the pools in place, and reading the
+   consumed pools again is loud (:donated)."
+  ([m] (compile-paged-step m nil))
+  ([{:keys [config weights]} {:keys [donate?] :as opts}]
+   (check-options :compile-paged-step opts #{:donate?})
+   (array/eval! weights)
+   (let [f (array/compile (fn [pools positions tables slots ids] (paged-forward config weights pools positions tables slots ids))
+                          (when donate? {:donate #{0}}))]
+     (fn [pools positions tables slots tokens]
+       (let [ids (token-array tokens (:vocab config))]
+         (check-paged config pools positions tables slots ids)
+         (f pools positions tables slots ids))))))
 
 (defn forward
   "The logits [B T vocab] of every position of tokens (B rows of T ids),

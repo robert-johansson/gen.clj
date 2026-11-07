@@ -40,6 +40,28 @@ other values for the same key, from the same distribution.
 
 ### Changes
 
+- **Added (experimental): paged KV caches and paged attention**
+  (genclj-1daf; route A of the spike, PROVISIONAL: mlx_fast_metal_kernel
+  and MLX's donated scatter, no C++ of gen.clj's).
+  - `gen.array/paged-write`, `copy-blocks` and `paged-attention`, in
+    vLLM's layouts: key pools [NB Hk D/x BS x], value pools [NB Hk D BS],
+    block tables [B MB] and lengths [B]. Each is a composite of gen.array's
+    ops (put-along-axis, take, sdpa), its own reference; on MLX's Metal
+    paged-attention runs kernels-community's paged_attention kernel (v1;
+    ported per THIRD-PARTY-NOTICES, Apache-2.0, its text in
+    LICENSE-APACHE-2.0), and the writes are MLX's scatter on the pools'
+    block and offset axes, in place under `array/compile`'s `:donate`.
+    `p/IFused` gains `:paged-write` and `:paged-attention`.
+  - `gen.llm.paged`: a block allocator and block tables as values, forks
+    sharing blocks and copying a shared partial block on write.
+  - `gen.llm.models.qwen3`: `paged-pools`, `paged-step`,
+    `compile-paged-step`, `paged-cache`, `paged-entries`.
+  - `gen.llm.array-engine`: `:paged? true` runs one pool of blocks for all
+    branches (options `:block-size` 16, `:pool-blocks` 128, growing by
+    doubling, `:min-rows` 1), so token SMC's steps stack no rows; `stats`
+    reports its counts and `blocks` its books. A failed paged step loses
+    every branch (`:lost-slots`), its pools having been donated.
+
 - **Added (experimental): LoRA adapters, `gen.llm.lora`** (genclj-yc3b,
   genclj-p4mk): low-rank adapters trained beside a model's frozen, dense
   or quantized, weights, and served by llama.cpp.

@@ -27,7 +27,16 @@
    token SMC 325 against 940 (124 stacked steps of 8.5 rows on average).
    The array engine computes in gen.bench.dtype (float32, the backend's
    default float), with blocks of gen.bench.block positions (64).
-   gen.bench.sections (decode,smc) picks the rows."
+   gen.bench.sections (decode,smc) picks the rows.
+   Its paged mode (gen.bench.engines, of static, paged and llama;
+   gen.bench.block-size 16, gen.bench.pool-blocks, gen.bench.min-rows),
+   measured on the same Mac (2026-11-07, pool-blocks 128): float32 decode
+   485-488 tokens/s against the static 466 and llama.cpp's 810, token SMC
+   390-409 against 318 and 771; float16 decode 601 against 568, SMC 540
+   against 619 (two more synchronizations a step, the copy-on-write's
+   read and write, cost more there than the static engine's halved
+   copy). A pool of 512 blocks made the paged step 2.5 times as slow:
+   donated writes cost about 8 ms a GB of pool written."
   (:require [clojure.string :as str]
             [gen.array :as array]
             [gen.llm.array-engine :as ae]
@@ -51,7 +60,13 @@
    :runs (long-prop "runs" 3)
    :block (long-prop "block" 64)
    :dtype (keyword (prop "dtype" "float32"))
-   :sections (set (map keyword (str/split (prop "sections" "decode,smc") #",")))})
+   :sections (set (map keyword (str/split (prop "sections" "decode,smc") #",")))
+   ;; the engines: gen.bench.engines, of static, paged and llama
+   :engines (set (map keyword (str/split (prop "engines" "static,paged,llama") #",")))
+   ;; the paged mode's (genclj-1daf)
+   :block-size (long-prop "block-size" 16)
+   :pool-blocks (long-prop "pool-blocks" 128)
+   :min-rows (long-prop "min-rows" 1)})
 
 (defn- llama [sym] @(requiring-resolve (symbol "gen.llm.llama" (name sym))))
 
@@ -94,8 +109,13 @@
   (println "- settings:" (pr-str settings))
   (println "- os:" (System/getProperty "os.name") (System/getProperty "os.arch") "; java" (System/getProperty "java.version"))
   (let [{:keys [batch steps particles smc-tokens prompt]} settings
-        engines [["gen.array (MLX)" #(ae/engine {:model path :max-branches 64 :block (:block settings) :dtype (:dtype settings)})]
-                 ["llama.cpp" #((llama 'engine) {:model path :max-branches 64 :n-ctx 8192})]]]
+        engines (filterv (fn [[k]] ((:engines settings) k))
+                         [[:static "gen.array (MLX)" #(ae/engine {:model path :max-branches 64 :block (:block settings) :dtype (:dtype settings)})]
+                          [:paged (str "gen.array paged (MLX), min-rows " (:min-rows settings))
+                           #(ae/engine {:model path :max-branches 64 :dtype (:dtype settings) :paged? true
+                                        :block-size (:block-size settings) :pool-blocks (:pool-blocks settings)
+                                        :min-rows (:min-rows settings)})]
+                          [:llama "llama.cpp" #((llama 'engine) {:model path :max-branches 64 :n-ctx 8192})]])]
     (with-open [^java.io.Closeable v ((llama 'vocabulary) path)]
       (let [tok ((llama 'tokenizer) v)
             text (str/join " " (repeat 40 "The sea is calm tonight, and the tide is full."))
@@ -104,17 +124,17 @@
           (println "\n### Decode at batch" batch "," steps "steps after" prompt "tokens\n")
           (println "|                                              |        ms |  tokens/s |")
           (println "|---|---:|---:|")
-          (doseq [[label make] engines]
+          (doseq [[k label make] engines]
             (with-open [^java.io.Closeable e (make)]
               (row label (median-ms #(decode e prompt-tokens)) (* batch steps))
-              (when (= "gen.array (MLX)" label) (println "|" (pr-str (ae/stats e)) "| | |")))))
+              (when-not (= :llama k) (println "|" (pr-str (ae/stats e)) "| | |")))))
         (when ((:sections settings) :smc)
           (println "\n### Token SMC," particles "particles," smc-tokens "tokens each (bootstrap)\n")
           (println "|                                              |        ms |  tokens/s |")
           (println "|---|---:|---:|")
-          (doseq [[label make] engines]
+          (doseq [[k label make] engines]
             (with-open [^java.io.Closeable e (make)]
               (row label (median-ms #(smc-run e tok prompt-tokens)) (* particles smc-tokens))
-              (when (= "gen.array (MLX)" label) (println "|" (pr-str (ae/stats e)) "| | |"))))))))
+              (when-not (= :llama k) (println "|" (pr-str (ae/stats e)) "| | |"))))))))
   (println "\nMLX memory:" (pr-str ((requiring-resolve 'gen.backend.mlx.memory/memory))))
   (shutdown-agents))

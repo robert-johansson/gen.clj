@@ -88,3 +88,31 @@ src/gen/backend/mlx/gated_delta.clj (the var source: a Metal kernel)
             LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
             OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
             SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+src/gen/backend/mlx/paged_attention.clj (the vars header and body: Metal
+source)
+  Project:  kernels-community/paged-attention (Hugging Face's kernels,
+            https://huggingface.co/kernels-community/paged-attention), its
+            Metal paged attention kernel: vLLM's paged attention
+            (https://github.com/vllm-project/vllm, its CUDA kernels,
+            Apache-2.0) ported to Metal. The port was written by Eric
+            Buehler for mistral.rs (https://github.com/EricLBuehler/mistral.rs,
+            PR #1001, 2024-12-26, which labels it MIT and credits MLX at
+            commit f70764a for parts) and added to kernels-community by the
+            same author (2025-06-26, "Add metal paged attention"; it differs
+            from mistral.rs's 1ad6488 in about 100 lines). gen.clj ports
+            kernels-community's files, which keep vLLM's license.
+  Upstream: paged-attention-metal/attention/paged_attention.metal,
+            paged-attention-metal/utils.metal and
+            paged-attention-metal/float8.metal at commit
+            28a49f721313edf7c787f48a60c4eba9c4f6f9be,
+            https://huggingface.co/kernels-community/paged-attention/tree/28a49f721313edf7c787f48a60c4eba9c4f6f9be/paged-attention-metal
+  License:  Apache License 2.0 (the repository's license, apache-2.0;
+            Copyright 2024-2025 Eric Buehler and the kernels-community
+            contributors; vLLM's: Copyright contributors to the vLLM
+            project). Its text in LICENSE-APACHE-2.0. The files carry no
+            license header of their own, and neither kernels-community nor
+            vLLM has a NOTICE file (checked 2026-11-07).
+  Modified: yes, as the file's Changes line states (Apache License 2.0,
+            section 4(b)): the kernel's signature replaced by
+            mlx_fast_metal_kernel's, its body and helpers kept.
