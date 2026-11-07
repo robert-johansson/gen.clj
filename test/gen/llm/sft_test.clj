@@ -36,6 +36,7 @@
             [gen.llm.chat :as chat]
             [gen.llm.lora :as lora]
             [gen.llm.models.qwen3 :as qwen3]
+            [gen.llm.models.qwen35 :as qwen35]
             [gen.llm.sft :as sft]
             [gen.random :as rng]
             [gen.test-support :as ts])
@@ -325,6 +326,21 @@
                                                                 [l (array/tree-map array/negate g)]))}
                            held-out-nlls)]
     (is (not (< after (* 0.6 before))) "planted: the loss ascended")))
+
+(deftest qwen35-s-family-trains-too
+  ;; the tiny Qwen3.5 and Qwen3.6 MoE (gen.llm.models.qwen35): sft takes
+  ;; the family through the model (gen.llm.models/nll), LoRA on every
+  ;; target; measured 2026-11-07 (the JVM backend): the held-out NLL
+  ;; 5.61 → 1.99 (qwen35), 5.24 → 2.24 (qwen35moe)
+  (doseq [file ["test/fixtures/gguf/qwen35-tiny-f32.gguf" "test/fixtures/gguf/qwen35moe-tiny-f32.gguf"]
+          :let [m (qwen35/load file)
+                ad (lora/init m {:rank 4 :targets (vec (keys (lora/targets (get-in m [:config :arch]))))} (rng/key 1))
+                opt (learn/warmup-cosine (learn/clip-norm (learn/adamw {:lr 2e-2 :weight-decay 0.0}) {:max-norm 1.0}) {:warmup 1 :steps 9})
+                {:keys [evaluations history]} (sft/train m (sft/trainer ad opt (rng/key 2)) @examples
+                                                         {:steps 9 :batch-size 4 :held-out @held-out})
+                [before after] (mapv :nll evaluations)]]
+    (println (format "sft-test: %s, the held-out NLL %.3g → %.3g" (get-in m [:config :arch]) before after))
+    (is (< after (* 0.6 before)) (pr-str [file before after (mapv :loss history)]))))
 
 ;; ---------------------------------------------------------------------------
 ;; 10. Misuse
