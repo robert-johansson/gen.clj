@@ -22,7 +22,9 @@
    momentum (with :nesterov?), rmsprop, adagrad and adamw (GenFluxOptimizers'
    common set, as PyTorch's update rules, ascending); and clip-norm, which
    clips the gradients by their global norm before another optimizer's
-   step.
+   step. Experimental (outside the 1.x promise): clip-value, which clips
+   them elementwise, and warmup-cosine, a learning-rate schedule (linear
+   warmup, cosine decay) over any optimizer's steps.
 
    An optimizer is a map with a :kind, which -init and -step dispatch on,
    so any namespace adds one (Gen.jl's init_update_state and
@@ -291,6 +293,73 @@
 (defmethod -step :clip-norm [{:keys [max-norm optimizer]} state store grads]
   (let [scale (/ max-norm (array/maximum (global-norm grads) max-norm))]
     (-step optimizer state store (array/tree-map #(* scale %) grads))))
+
+(defn ^{:api :experimental} clip-value
+  "optimizer, with each step's gradients clipped elementwise to [-max-value,
+   max-value] first (PyTorch's clip_grad_value_, optax's clip). A wrapper
+   acts before the optimizer it wraps, so (clip-value (clip-norm opt …) …)
+   clips by value, then by the clipped gradients' global norm, as
+   mlx-node's trainers do. Its state is optimizer's. Experimental: outside
+   the 1.x promise (DESIGN §9)."
+  [optimizer {:keys [max-value] :as opts}]
+  (options/check `clip-value opts #{:max-value})
+  (checked "clip-value" {:kind :clip-value :max-value max-value :optimizer optimizer} {:max-value above-0}))
+
+(defmethod -init :clip-value [{:keys [optimizer]} store] (-init optimizer store))
+
+(defmethod -step :clip-value [{:keys [max-value optimizer]} state store grads]
+  (-step optimizer state store (array/tree-map #(array/clip % (clojure.core/- max-value) max-value) grads)))
+
+;; ---------------------------------------------------------------------------
+;; A learning-rate schedule
+;; ---------------------------------------------------------------------------
+
+(defn ^{:api :experimental} warmup-cosine
+  "optimizer, its steps scaled by a learning-rate schedule: linear warmup
+   for :warmup steps, then cosine decay to :final of the rate at step
+   :steps (Hugging Face's get_cosine_schedule_with_warmup, optax's
+   warmup_cosine_decay_schedule from 0). Step t (from 0, the steps taken
+   before it) moves each parameter by the factor
+     t / warmup                                       for t < warmup,
+     final + (1 - final)·(1 + cos(π·min(1, (t - warmup) / (steps - warmup))))/2
+                                                      after,
+   of the move optimizer's own step makes: θ + f·(θ' - θ), θ' its step from
+   θ, so every optimizer gets the schedule (for each built-in one, the same
+   as its :lr times f, but for rounding; θ' itself where f is 1). With a
+   warmup the first step's factor is 0: it moves nothing, while an
+   optimizer's state (Adam's moments) takes its gradients. Options:
+     :warmup  steps of linear warmup, an integer of at least 0 (0)
+     :steps   the step at which the decay reaches :final, above :warmup
+     :final   the factor from :steps on, in [0, 1] (0)
+   The state: {:t, the steps taken, :state, optimizer's}. Experimental:
+   outside the 1.x promise (DESIGN §9)."
+  [optimizer {:keys [warmup steps final] :or {warmup 0 final 0.0} :as opts}]
+  (options/check `warmup-cosine opts #{:warmup :steps :final})
+  (when-not (nat-int? warmup)
+    (throw (ex-info (str "warmup-cosine's :warmup is an integer of at least 0, not " (pr-str warmup)) {:option :warmup :value warmup})))
+  (when-not (and (int? steps) (clojure.core/> steps warmup))
+    (throw (ex-info (str "warmup-cosine's :steps is an integer above :warmup (" warmup "), not " (pr-str steps))
+                    {:option :steps :value steps})))
+  (when-not (and (number? final) (clojure.core/<= 0 final 1))
+    (throw (ex-info (str "warmup-cosine's :final is a number in [0, 1], not " (pr-str final)) {:option :final :value final})))
+  {:kind :warmup-cosine :optimizer optimizer :warmup warmup :steps steps :final (double final)})
+
+(defn- warmup-cosine-factor
+  "The schedule's factor at step t."
+  [{:keys [warmup steps final]} t]
+  (let [t (long t) warmup (long warmup) steps (long steps) final (double final)]
+    (if (clojure.core/< t warmup)
+      (clojure.core// (double t) warmup)
+      (let [p (Math/min 1.0 (clojure.core// (double (clojure.core/- t warmup)) (clojure.core/- steps warmup)))]
+        (clojure.core/+ final (clojure.core/* (clojure.core/- 1.0 final) 0.5 (clojure.core/+ 1.0 (Math/cos (clojure.core/* Math/PI p)))))))))
+
+(defmethod -init :warmup-cosine [{:keys [optimizer]} store] {:t 0 :state (-init optimizer store)})
+
+(defmethod -step :warmup-cosine [{:keys [optimizer] :as schedule} {:keys [t state]} store grads]
+  (let [f (warmup-cosine-factor schedule t)
+        [store' state'] (-step optimizer state store grads)]
+    [(if (clojure.core/== f 1.0) store' (update-given (fn [theta _ theta'] (+ theta (* f (- theta' theta)))) store grads store'))
+     {:t (inc t) :state state'}]))
 
 ;; ---------------------------------------------------------------------------
 ;; Training

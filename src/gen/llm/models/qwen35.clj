@@ -106,6 +106,7 @@
   (:require [clojure.core :as c]
             [clojure.string :as str]
             [gen.array :as array :refer [+ * /]]
+            [gen.llm.models :as models]
             [gen.llm.models.common :as common]))
 
 (set! *warn-on-reflection* true)
@@ -869,3 +870,15 @@
          (common/check-capacity who cache t)
          (let [[out layers positions] (f (:layers cache) (:positions cache) ids)]
            [out (advanced cache layers positions t)]))))))
+
+;; ---------------------------------------------------------------------------
+;; The family, by its architectures (gen.llm.models)
+;; ---------------------------------------------------------------------------
+
+(defmethod models/log-probs "qwen35" [m tokens & [opts]] (log-probs m tokens opts))
+
+(defmethod models/log-probs "qwen35moe" [m tokens & [opts]] (log-probs m tokens opts))
+
+(defmethod models/nll "qwen35" [m tokens & [opts]] (nll m tokens opts))
+
+(defmethod models/nll "qwen35moe" [m tokens & [opts]] (nll m tokens opts))

@@ -68,6 +68,7 @@
   (:require [clojure.core :as c]
             [gen.array :as array :refer [+ * /]]
             [gen.array.gguf :as gguf]
+            [gen.llm.models :as models]
             [gen.random :as rng]))
 
 (set! *warn-on-reflection* true)
@@ -144,13 +145,6 @@
   (when-not (and (number? dropout) (c/<= 0.0 (double dropout)) (c/< (double dropout) 1.0))
     (throw (invalid (str ":dropout is a number in [0, 1), not " (pr-str dropout)) {:dropout dropout})))
   config)
-
-(defn- architecture
-  "Model m's architecture, llama.cpp's general.architecture: its
-   config's :arch (Qwen3.5's), else its :architecture (Qwen3's)."
-  [m]
-  (let [config (:config m)]
-    (or (:arch config) (:architecture config))))
 
 (defn- family
   "The targets of the architecture arch (targets'): loud (:unsupported)
@@ -274,7 +268,7 @@
   (check-options :init opts #{:rank :alpha :dropout :targets :layers})
   (when-not (rng/key? key)
     (throw (invalid (str "init takes a key (gen.random/key), not " (pr-str key)))))
-  (let [arch (architecture m)
+  (let [arch (models/architecture m)
         family-targets (family arch)
         {:keys [rank alpha dropout layers] ts :targets} (c/merge defaults {:targets (default-targets arch)} opts)
         n (count (get-in m [:weights :layers]))
@@ -321,7 +315,7 @@
   ([m adapter] (adapt m adapter nil))
   ([m adapter {:keys [scale key] :or {scale 1.0} :as opts}]
    (check-options :adapt opts #{:scale :key})
-   (let [arch (architecture m)
+   (let [arch (models/architecture m)
          theirs (get-in adapter [:config :architecture])]
      (check-adapter adapter (family arch))
      (when (and theirs (not= theirs arch))

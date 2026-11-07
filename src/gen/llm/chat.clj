@@ -8,6 +8,8 @@
 
      (render messages)                 → text ending in the assistant's turn
      (render messages opts)
+     (segments messages opts)          → the same text in segments, each its
+                                         message and part (:content, :end, …)
      (continuation messages new opts)  → the text that extends (render
                                          messages opts) to (render (into
                                          messages new) opts): tool turns only
@@ -127,53 +129,90 @@
     (throw (ex-info (str "chat: :template is :qwen3.5 or :qwen3.8, not " (pr-str template))
                     {:reason :invalid-option :template template}))))
 
+(defn- seg
+  "A segment of a rendering: text, the part of the template it is, and the
+   message it renders, its index i and role (segments's)."
+  [text part i role]
+  {:text text :part part :message i :role role})
+
 (defn- system-turn
-  "The system turn: the reasoning sentence, the tools, the system message.
-   An empty system message makes an empty turn where empty-turn? (Qwen3.5's
-   rendering here), none otherwise (Qwen3.8's template)."
+  "The system turn's segments: the reasoning sentence, the tools, the
+   system message. An empty system message makes an empty turn where
+   empty-turn? (Qwen3.5's rendering here), none otherwise (Qwen3.8's
+   template)."
   [messages tools reasoning empty-turn?]
-  (let [system (when (= :system (:role (first messages))) (str/trim (:content (first messages))))
+  (let [i (when (= :system (:role (first messages))) 0)
+        system (when i (str/trim (:content (first messages))))
         system (when (or empty-turn? (seq system)) system)
-        opening (when reasoning (str reasoning "\n\n"))]
-    (cond (seq tools) (str "<|im_start|>system\n" opening tools-head (str/join (map #(str "\n" (tool-json %)) tools)) tools-tail
-                           (when (seq system) (str "\n\n" system)) "<|im_end|>\n")
-          (and reasoning (empty? system)) (str "<|im_start|>system\n" reasoning "<|im_end|>\n")
-          system (str "<|im_start|>system\n" opening system "<|im_end|>\n")
-          :else "")))
+        opening (when reasoning (str reasoning "\n\n"))
+        turn (fn [head content]
+               [(seg head :template i :system) (seg content :content i :system)
+                (seg "<|im_end|>" :end i :system) (seg "\n" :template i :system)])]
+    (cond (seq tools) (turn (str "<|im_start|>system\n" opening tools-head (str/join (map #(str "\n" (tool-json %)) tools)) tools-tail
+                                 (when (seq system) "\n\n"))
+                            (or system ""))
+          (and reasoning (empty? system)) (turn (str "<|im_start|>system\n" reasoning) "")
+          system (turn (str "<|im_start|>system\n" opening) system)
+          :else [])))
 
 (defn- turn
-  "Message i of messages, rendered (the tool turns' grouping by their
-   neighbours); an assistant turn keeps its think block after the last
-   user message lq, or always when preserve?."
+  "The segments of message i of messages (the tool turns' grouping by
+   their neighbours); an assistant turn keeps its think block after the
+   last user message lq, or always when preserve?."
   [messages i lq preserve?]
   (let [{:keys [role content reasoning]} (messages i)
         prev (when (pos? i) (messages (dec i)))
-        nxt (when (< (inc i) (count messages)) (messages (inc i)))]
+        nxt (when (< (inc i) (count messages)) (messages (inc i)))
+        s (fn [text part] (seg text part i role))
+        end [(s "<|im_end|>" :end) (s "\n" :template)]]
     (case role
-      :system ""
-      :user (str "<|im_start|>user\n" (str/trim content) "<|im_end|>\n")
-      :assistant (str "<|im_start|>assistant\n"
-                      (when (or preserve? (> i lq)) (str "<think>\n" (str/trim (or reasoning "")) "\n</think>\n\n"))
-                      (str/trim content) "<|im_end|>\n")
-      :tool (str (when-not (and prev (tool-response? prev)) "<|im_start|>user")
-                 "\n<tool_response>\n" (str/trim content) "\n</tool_response>"
-                 (when-not (and nxt (tool-response? nxt)) "<|im_end|>\n")))))
+      :system []
+      :user (into [(s "<|im_start|>user\n" :template) (s (str/trim content) :content)] end)
+      :assistant (into (if (or preserve? (> i lq))
+                         [(s "<|im_start|>assistant\n<think>\n" :template) (s (str/trim (or reasoning "")) :reasoning)
+                          (s "\n</think>\n\n" :template)]
+                         [(s "<|im_start|>assistant\n" :template)])
+                       (cons (s (str/trim content) :content) end))
+      :tool (cond-> [(s (str (when-not (and prev (tool-response? prev)) "<|im_start|>user") "\n<tool_response>\n") :template)
+                     (s (str/trim content) :content)
+                     (s "\n</tool_response>" :template)]
+              (not (and nxt (tool-response? nxt))) (into end)))))
 
 (defn- generation-prompt [thinking?]
-  (str "<|im_start|>assistant\n" (if thinking? "<think>\n" "<think>\n\n</think>\n\n")))
+  (seg (str "<|im_start|>assistant\n" (if thinking? "<think>\n" "<think>\n\n</think>\n\n")) :template nil nil))
 
-(defn render
-  "messages in Qwen's chat template. See the namespace's docstring."
-  ([messages] (render messages nil))
+(defn segments
+  "The rendering of messages (render's) in segments, in order: maps
+   {:text :part :message :role}, their texts render's text concatenated.
+   :message is the index of the message a segment renders and :role its
+   role (:message nil for text of no message: the generation prompt, whose
+   :role is nil too, and a system turn without a system message), :part
+   what the text is:
+     :content    a message's content (a system message's, trimmed, in the
+                 system turn)
+     :reasoning  an assistant turn's think block's text (when it keeps one)
+     :end        the end of a turn, <|im_end|> (a token of its own)
+     :template   the template's own text: the turn's opening, the newline
+                 after its end, the think block's tags, the tools section,
+                 the reasoning-effort sentence
+   Empty segments are left out. A model is trained on its replies by these
+   (gen.llm.sft): an assistant's :content and :end. opts are render's."
+  ([messages] (segments messages nil))
   ([messages opts]
    (let [{:keys [tools thinking? generation-prompt? reasoning preserve-thinking? empty-system-turn?] :or {generation-prompt? true}}
          (template-options opts)
          messages (vec messages)
          _ (check-messages messages)
          lq (last-query messages)]
-     (str (system-turn messages tools reasoning empty-system-turn?)
-          (str/join (map #(turn messages % lq preserve-thinking?) (range (count messages))))
-          (when generation-prompt? (generation-prompt thinking?))))))
+     (into [] (remove #(empty? (:text %)))
+           (concat (system-turn messages tools reasoning empty-system-turn?)
+                   (mapcat #(turn messages % lq preserve-thinking?) (range (count messages)))
+                   (when generation-prompt? [(generation-prompt thinking?)]))))))
+
+(defn render
+  "messages in Qwen's chat template. See the namespace's docstring."
+  ([messages] (render messages nil))
+  ([messages opts] (apply str (map :text (segments messages opts)))))
 
 (defn continuation
   "The text that extends (render messages opts) without its generation
