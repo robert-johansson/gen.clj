@@ -69,7 +69,10 @@
    :biases :bits :group-size}, multiplied by quantized-matmul (the weights
    frozen: a gradient is with respect to the dense weights and the
    activations). :output is nil for a tied output (Qwen3-0.6B's), which
-   multiplies by the embedding.
+   multiplies by the embedding. A projection adapted by gen.llm.lora/adapt
+   is {:base w :lora …}, its product w's plus a LoRA adapter's term: every
+   function here takes the adapted model, and log-probs and nll
+   differentiate it with respect to the adapter.
 
    The tensors' meaning is llama.cpp's (src/models/qwen3.cpp, v0.9.0),
    which wrote the GGUF; GenMLX's qwen3_forward.cljs gave the structure:
@@ -95,7 +98,8 @@
   (:refer-clojure :exclude [+ - * / < > <= >= == load])
   (:require [clojure.core :as c]
             [clojure.string :as str]
-            [gen.array :as array :refer [+ * <=]]))
+            [gen.array :as array :refer [+ * <=]]
+            [gen.llm.lora :as lora]))
 
 (set! *warn-on-reflection* true)
 
@@ -124,8 +128,8 @@
 
 (defn config
   "Qwen3's architecture from a GGUF's metadata (gen.array/load-gguf's
-   :metadata), llama.cpp's keys: {:hidden :layers :heads :kv-heads
-   :head-dim :ffn :eps :rope-base :context}. Loud (:unsupported) for
+   :metadata), llama.cpp's keys: {:architecture \"qwen3\" :hidden :layers
+   :heads :kv-heads :head-dim :ffn :eps :rope-base :context}. Loud (:unsupported) for
    another architecture than qwen3, RoPE scaling, RoPE over part of a head,
    or keys and values of different sizes, which llama.cpp's qwen3 graph
    does not compute either."
@@ -144,7 +148,8 @@
           heads (need "attention.head_count")
           head-dim (if (k "attention.key_length") (need "attention.key_length") (quot hidden heads))
           scaling (k "rope.scaling.type")
-          cfg {:hidden hidden
+          cfg {:architecture "qwen3"
+               :hidden hidden
                :layers (need "block_count")
                :heads heads
                :kv-heads (need "attention.head_count_kv")
@@ -254,11 +259,12 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- linear
-  "x·wᵀ for a weight w [out in]: dense, or quantized."
+  "x·wᵀ for a weight w [out in]: dense, quantized, or adapted (gen.llm.lora's:
+   its base's product plus the adapter's term)."
   [x w]
-  (if (map? w)
-    (array/quantized-matmul x (:wq w) (:scales w) (:biases w) (select-keys w [:bits :group-size]))
-    (array/matmul x (array/transpose w))))
+  (cond (lora/adapted? w) (+ (linear x (:base w)) (lora/delta x w))
+        (map? w) (array/quantized-matmul x (:wq w) (:scales w) (:biases w) (select-keys w [:bits :group-size]))
+        :else (array/matmul x (array/transpose w))))
 
 (defn- silu [x] (* x (array/sigmoid x)))
 
@@ -367,8 +373,9 @@
    whole: the output projection runs :chunk vocabulary entries at a time
    into gen.array/selective-log-softmax. Differentiable with respect to
    the dense weights (array/value-and-grad of a function that puts them
-   in the model); a quantized matrix is frozen, its gradient with respect
-   to the activations only. Options:
+   in the model) and a LoRA adapter's (gen.llm.lora/adapt's); a quantized
+   matrix is frozen, its gradient with respect to the activations only.
+   Options:
      :checkpoint?  true: every block, and every chunk of the output
                    projection, is checkpointed (array/checkpoint): its
                    activations are made again in the backward pass rather

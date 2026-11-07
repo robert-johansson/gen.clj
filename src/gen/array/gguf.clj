@@ -400,3 +400,150 @@
      :tensors tensors
      :types (into {} (map (juxt :name :type)) infos)
      :files (mapv :path hs)}))
+
+;; ---------------------------------------------------------------------------
+;; Writing (gen.llm.lora's adapters for llama.cpp)
+;; ---------------------------------------------------------------------------
+
+(def ^:private value-type-ids (into {} (map (fn [[id t]] [t id])) value-types))
+
+(def ^:private scalar-bytes
+  {:uint8 1 :int8 1 :uint16 2 :int16 2 :uint32 4 :int32 4 :float32 4 :bool 1 :uint64 8 :int64 8 :float64 8})
+
+(defn- bad-value [k t v]
+  (ex-info (str "write-gguf: the metadata value " (pr-str v) " of " k " is not a " (pr-str t))
+           {:reason :invalid-args :key k :value-type t :value v}))
+
+(defn- integer-in? [v lo hi]
+  (and (integer? v) (<= (bigint lo) (bigint v) (bigint hi))))
+
+(defn- put-scalar!
+  "A metadata scalar v of value type t into b, checked to fit."
+  [^ByteBuffer b k t v]
+  (let [ok? (case t
+              :uint8 (integer-in? v 0 255) :int8 (integer-in? v -128 127)
+              :uint16 (integer-in? v 0 65535) :int16 (integer-in? v -32768 32767)
+              :uint32 (integer-in? v 0 4294967295) :int32 (integer-in? v Integer/MIN_VALUE Integer/MAX_VALUE)
+              :uint64 (integer-in? v 0 18446744073709551615N) :int64 (integer-in? v Long/MIN_VALUE Long/MAX_VALUE)
+              (:float32 :float64) (number? v)
+              :bool (boolean? v))]
+    (when-not ok? (throw (bad-value k t v)))
+    (case t
+      (:uint8 :int8) (.put b (unchecked-byte (long v)))
+      (:uint16 :int16) (.putShort b (unchecked-short (long v)))
+      (:uint32 :int32) (.putInt b (unchecked-int (long v)))
+      :uint64 (.putLong b (.longValue ^Number (bigint v)))
+      :int64 (.putLong b (long v))
+      :float32 (.putFloat b (float v))
+      :float64 (.putDouble b (double v))
+      :bool (.put b (byte (if v 1 0))))))
+
+(defn- string-bytes ^bytes [s] (.getBytes (str s) StandardCharsets/UTF_8))
+
+(defn- value-size
+  "The bytes a metadata value v of value type t takes."
+  ^long [k t v]
+  (cond (= :string t) (if (string? v) (+ 8 (alength (string-bytes v))) (throw (bad-value k t v)))
+        (vector? t) (let [et (second t)]
+                      (when-not (and (= :array (first t)) (contains? value-type-ids et) (not= :array et) (sequential? v))
+                        (throw (bad-value k t v)))
+                      (+ 12 (long (reduce + 0 (map #(value-size k et %) v)))))
+        (scalar-bytes t) (long (scalar-bytes t))
+        :else (throw (ex-info (str "write-gguf: " (pr-str t) " is not a GGUF value type (" k ")")
+                              {:reason :invalid-args :key k :value-type t}))))
+
+(defn- put-string! [^ByteBuffer b s]
+  (let [bs (string-bytes s)]
+    (.putLong b (alength bs))
+    (.put b bs)))
+
+(defn- put-value! [^ByteBuffer b k t v]
+  (cond (= :string t) (put-string! b v)
+        (vector? t) (let [et (second t)]
+                      (.putInt b (unchecked-int (long (value-type-ids et))))
+                      (.putLong b (count v))
+                      (doseq [x v] (put-value! b k et x)))
+        :else (put-scalar! b k t v)))
+
+(defn- type-id ^long [t] (long (value-type-ids (if (vector? t) :array t))))
+
+(def ^:private writable
+  "The tensor types write-gguf writes: their GGML ids and bytes a value."
+  {:f32 {:id 0 :bytes 4}})
+
+(defn- padded ^long [^long n ^long align] (* align (quot (+ n (dec align)) align)))
+
+(defn- check-tensor [{:keys [name type shape data]}]
+  (let [n (reduce * 1 shape)]
+    (when-not (and (string? name) (seq name))
+      (throw (ex-info (str "write-gguf: a tensor's name is a non-empty string, not " (pr-str name)) {:reason :invalid-args :tensor name})))
+    (when-not (writable type)
+      (throw (ex-info (str "write-gguf: tensor " name " is " (pr-str type) ", a type not written (" (vec (keys writable)) " are)")
+                      {:reason :unsupported :tensor name :type type})))
+    (when-not (and (vector? shape) (<= 1 (count shape) 4) (every? pos-int? shape))
+      (throw (ex-info (str "write-gguf: tensor " name "'s shape is 1 to 4 positive sizes, not " (pr-str shape))
+                      {:reason :invalid-args :tensor name :shape shape})))
+    (when-not (and (instance? (Class/forName "[F") data) (= (long n) (alength ^floats data)))
+      (throw (ex-info (str "write-gguf: tensor " name "'s data is a float[] of its " n " values")
+                      {:reason :invalid-args :tensor name :shape shape})))))
+
+(defn write-gguf
+  "Writes a GGUF file (version 3) at path, as llama.cpp's gguf-py writes
+   one: the header, the metadata entries in their order, the tensors'
+   descriptions, then each tensor's data, every part aligned to 32 bytes.
+   metadata is a sequence of [key value-type value] entries, value-type a
+   keyword of value-types (:string, :float32, :uint32, …) or [:array
+   element-type]; tensors a sequence of {:name :type :shape :data}, :type
+   :f32, :shape gen.array's (outermost first; the file lists GGML's
+   reversed order), :data a float[] of the values, row-major. Loud
+   (:invalid-args) for a value that does not fit its type, a key or a
+   tensor named twice, or data of another size; another tensor type is
+   :unsupported. The file is written beside path and moved over it once
+   complete and forced to the disk, so a reader never sees it half
+   written. Returns path."
+  [path {:keys [metadata tensors]}]
+  (let [metadata (vec metadata)
+        tensors (vec tensors)
+        align 32]
+    (doseq [[k v] (frequencies (concat (map first metadata) (map :name tensors)))]
+      (when (> (long v) 1)
+        (throw (ex-info (str "write-gguf: " (pr-str k) " is named more than once") {:reason :invalid-args :name k}))))
+    (doseq [e metadata]
+      (when-not (and (vector? e) (= 3 (count e)) (string? (first e)))
+        (throw (ex-info (str "write-gguf: a metadata entry is [key value-type value], not " (pr-str e)) {:reason :invalid-args :entry e}))))
+    (run! check-tensor tensors)
+    (let [sizes (mapv (fn [{:keys [type shape]}] (* (long (:bytes (writable type))) (long (reduce * 1 shape)))) tensors)
+          offsets (vec (reductions (fn [^long o ^long n] (+ o (padded n align))) 0 sizes))
+          header-size (+ 24
+                         (long (reduce + 0 (map (fn [[k t v]] (+ 12 (alength (string-bytes k)) (value-size k t v))) metadata)))
+                         (long (reduce + 0 (map (fn [{:keys [name shape]}] (+ 8 (alength (string-bytes name)) 4 (* 8 (count shape)) 4 8))
+                                                tensors))))
+          head (doto (ByteBuffer/allocate (padded header-size align)) (.order ByteOrder/LITTLE_ENDIAN))
+          target (path-of path)
+          tmp (path-of (str path ".tmp"))]
+      (.putInt head 0x46554747)
+      (.putInt head 3)
+      (.putLong head (count tensors))
+      (.putLong head (count metadata))
+      (doseq [[k t v] metadata]
+        (put-string! head k)
+        (.putInt head (unchecked-int (type-id t)))
+        (put-value! head k t v))
+      (doseq [[{:keys [name type shape]} offset] (map vector tensors offsets)]
+        (put-string! head name)
+        (.putInt head (count shape))
+        (doseq [d (reverse shape)] (.putLong head (long d)))
+        (.putInt head (unchecked-int (long (:id (writable type)))))
+        (.putLong head (long offset)))
+      (.rewind head)
+      (with-open [ch (FileChannel/open tmp (into-array OpenOption [StandardOpenOption/CREATE StandardOpenOption/WRITE
+                                                                   StandardOpenOption/TRUNCATE_EXISTING]))]
+        (while (.hasRemaining head) (.write ch head))
+        (doseq [[{:keys [^floats data]} ^long size] (map vector tensors sizes)]
+          (let [b (doto (ByteBuffer/allocate (padded size align)) (.order ByteOrder/LITTLE_ENDIAN))]
+            (.put (.asFloatBuffer b) data)
+            (while (.hasRemaining b) (.write ch b))))
+        (.force ch true))
+      (Files/move tmp target (into-array java.nio.file.CopyOption [java.nio.file.StandardCopyOption/REPLACE_EXISTING
+                                                                   java.nio.file.StandardCopyOption/ATOMIC_MOVE]))
+      (str path))))
