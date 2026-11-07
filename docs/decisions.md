@@ -4873,3 +4873,45 @@ host path, not MLX: genclj-9y6y, which also covers two CUDA anomalies in the
 
 **The lead's recommendation stands:** keep MLX on NVIDIA. Its batched decode
 is now faster than llama.cpp's on the models gen.clj's research uses most.
+
+### LoRA for Qwen3.5/3.6
+
+(PROVISIONAL, owner to confirm; genclj-8h0l, 2026-11-07 night)
+
+**What was built.** gen.llm.lora covers qwen35 and qwen35moe on every
+projection:
+- attention q (with its output gate), k, v, o;
+- GatedDeltaNet's qkv, z, beta, alpha and out;
+- the feed-forward;
+- the MoE's shared expert;
+- the routed experts, as opt-in targets in llama.cpp's build_lora_mm_id
+  layout.
+
+qwen35 registers its log-probs and nll in gen.llm.models, so SFT trains it
+unchanged.
+
+**Checked on Metal against llama.cpp.**
+- Qwen3.5-0.8B with an adapter on every target: at most 0.0039 nats (band
+  0.035), with planted convention errors failing by 1.7-17.6 nats or refused.
+- Five AdamW steps took the NLL from 162 to 1.0, and llama.cpp serves the
+  result within 0.0053.
+
+**The lead's calls, on the implementing agent's recommendations:**
+1. **One lora/targets map by architecture**, with the model's weight keys as
+   target names.
+2. **qwen35's default targets are [:q :v :qkv].** [:q :v] would reach only
+   the attention layers, 6 of 24.
+3. **A target adapts the chosen layers that have it,** and is loud only when
+   none does.
+4. **Routed experts are opt-in.** A real MoE and the gathered term's memory
+   are genclj-wfv1.
+5. **adapt refuses an adapter of another architecture,** as llama.cpp does.
+6. **gen.llm.models.common requires gen.llm.lora.**
+7. **Site keys keep Qwen3's indices,** so its draws are unchanged.
+8. **The MoE's routing indices carry no gradient** (stop-gradient). MLX
+   refuses a gather's VJP with respect to its indices.
+9. **A custom VJP for gated-delta's chunked form is a draft** (genclj-oze3).
+   The rule takes 17-26% of a 0.8B LoRA step, so it is worth doing later,
+   not now.
+
+Not yet run on CUDA. Qwen3.5's off-Mac band is unmeasured.
