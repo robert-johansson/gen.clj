@@ -66,9 +66,10 @@
      shared expert; 256 experts, 8 used; 16 key and 32 value heads): 2.35
      on the general prompts, 6.13 on the digits (CUDA; the CPU build 1.87
      and 5.88), median 0.25 to 0.88; the argmax equal in 196 and 197 of
-     200. llama.cpp's own spread on CUDA is as large, 3.88 and 6.09. The
-     largest gaps are a runner-up's behind a top token of p ≈ 1 (llama.cpp
-     -10.9 nats, ours -17.0).
+     200. llama.cpp's own spread on CUDA is as large, 3.88 and 6.09, and
+     MLX's forward on its CPU gives the CUDA gaps to three digits (the
+     first 3 digit prompts). The largest gaps are a runner-up's behind a
+     top token of p ≈ 1 (llama.cpp -10.9 nats, ours -17.0).
    There the planted errors measured, the least and the median over the
    20 general prompts (0.8B on CUDA; the MoE): the conv state's oldest
    inputs 1.37 and 4.80, 2.34 and 5.92; the conv kernel reversed 8.21
