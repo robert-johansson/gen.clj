@@ -1,8 +1,10 @@
 (ns gen.backend.mlx.nn
   "The MLX backend's neural-network ops (gen.backend.mlx): MLX's fast
-   kernels for gen.array's composites rms-norm, rope and sdpa, and
-   mlx-lm's Metal kernel for gated-delta (gen.backend.mlx.gated-delta)
-   (p/IFused), and its quantized weights (p/IQuantized: mlx_quantize,
+   kernels for gen.array's composites rms-norm, rope and sdpa, mlx-lm's
+   Metal kernel for gated-delta (gen.backend.mlx.gated-delta), and vLLM's
+   paged attention for paged-attention (gen.backend.mlx.paged-attention
+   on Metal, gen.backend.mlx.paged-attention-cuda on CUDA) (p/IFused),
+   and its quantized weights (p/IQuantized: mlx_quantize,
    mlx_dequantize, mlx_quantized_matmul, mlx_gather_qmm).
 
    The fast kernels take float32 and the half floats. float64 (the CPU
@@ -28,6 +30,7 @@
             [gen.backend.mlx.gated-delta :as gated-delta]
             [gen.backend.mlx.paged :as paged]
             [gen.backend.mlx.paged-attention :as paged-attention]
+            [gen.backend.mlx.paged-attention-cuda :as paged-attention-cuda]
             [gen.backend.mlx.operands :refer [dtype-on operand scalar-handle shape-of with-operands with-temps]]
             [gen.backend.mlx.transforms :refer [*differentiating*]])
   (:import [gen.mlx Mlx MlxRuntime]))
@@ -116,10 +119,14 @@
       :paged-write (let [[k-pool v-pool k v slots] args] (paged/paged-write b k-pool v-pool k v slots))
       :put-blocks (let [[pool blocks dst] args] (paged/put-blocks b pool blocks dst))
       :paged-attention (let [[q k-pool v-pool tables lens opts] args]
-                         ;; kernels-community's paged_attention kernel:
-                         ;; Metal only, no VJP (applies? declines both)
-                         (when (paged-attention/applies? b q k-pool tables)
-                           (paged-attention/paged-attention b q k-pool v-pool tables lens opts)))
+                         ;; kernels-community's paged_attention kernel on
+                         ;; Metal, vLLM's on CUDA; no VJP (each applies?
+                         ;; declines it, and the other device)
+                         (cond
+                           (paged-attention/applies? b q k-pool tables)
+                           (paged-attention/paged-attention b q k-pool v-pool tables lens opts)
+                           (paged-attention-cuda/applies? b q k-pool tables)
+                           (paged-attention-cuda/paged-attention b q k-pool v-pool tables lens opts)))
       :sdpa (let [[q k v {:keys [mask] :as opts}] args]
               ;; a causal mask hides every key from the first Tq - Tk
               ;; queries, which MLX's fallback averages over; and under

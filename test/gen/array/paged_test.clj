@@ -12,10 +12,12 @@
       past several blocks, grouped heads, block sizes 8, 16 and 32;
    3. copy-blocks copies blocks, every one read before any is written,
       and leaves the others;
-   4. on MLX's Metal the kernel (gen.backend.mlx.paged-attention) is the
-      composite, in float32, float16 and bfloat16, head sizes 16 to 128;
-      and past v1's threadgroup memory, contexts to 32,768 positions,
-      v2 (partitions of 512, reduced) is the composite;
+   4. on MLX's GPU the kernel is the composite, in float32, float16 and
+      bfloat16, head sizes 16 to 128: kernels-community's on Metal
+      (gen.backend.mlx.paged-attention), vLLM's on CUDA
+      (gen.backend.mlx.paged-attention-cuda); and on Metal, past v1's
+      threadgroup memory, contexts to 32,768 positions, v2 (partitions of
+      512, reduced) is the composite;
    5. the pools are values: a write leaves the pools it was given as they
       were;
    6. misuse is loud.
@@ -26,10 +28,13 @@
    its blocks in reverse (3);
    a key's groups of x read in the other order (the D/x and x axes
    swapped in the layout, 1); the composite's mask one position short (2);
-   on Metal the kernel given each sequence's length one short (4), which
-   shows the kernel ran, and v2's source changed (4): every partition
-   reading the first one's blocks, the partitions' sums not rescaled to
-   the largest score, every partition's output the first's.
+   on MLX's GPU the kernel given each sequence's length one short (4),
+   which shows the kernel ran; on CUDA, bugs planted in the kernel's
+   source: a sequence reading the next one's block table, its keys read
+   one table entry on, and the scale dropped (4); on Metal, v2's source
+   changed (4): every partition reading the first one's blocks, the
+   partitions' sums not rescaled to the largest score, every partition's
+   output the first's.
    The bands: writes and copies are exact everywhere. Attention on the
    JVM backend (float64) 1e-12; on MLX float32's round-off, and the
    half floats' rounding of the output (below)."
@@ -224,7 +229,7 @@
               "planted: MLX's put given its blocks in reverse"))))))
 
 ;; ---------------------------------------------------------------------------
-;; 4. The kernel (MLX's Metal)
+;; 4. The kernels (MLX's Metal and CUDA)
 ;; ---------------------------------------------------------------------------
 
 (def ^:private kernel-cases
@@ -233,31 +238,93 @@
     {:lens [1 7 16 17 100 255 0 513] :hq hq :hk hk :d d :bs bs :dtype dtype :seed 5}))
 
 (def ^:private kernel-band
-  "max |Δ| between the kernel and the composite, by dtype (values about
-   1): float32's round-off, and a half float's rounding of the output (an
-   ulp at 1 is 2^-10 in float16, 2^-7 in bfloat16), four times the largest
-   measured on Metal (Mac mini M4, 2026-11-07)."
-  {:float32 1e-5 :float16 4e-3 :bfloat16 3e-2})
+  "max |Δ| between the kernel and the composite, by kernel and dtype
+   (values about 1, a few up to 4): float32's round-off, and a half
+   float's rounding of the output (an ulp at 1 is 2^-10 in float16, 2^-7
+   in bfloat16), four times the largest measured: on Metal (Mac mini M4,
+   2026-11-07), and on CUDA (fenrir's RTX PRO 6000, 2026-11-08: 2.9e-6,
+   2.0e-3 and 1.6e-2, the half floats' an output ulp in [2, 4))."
+  {'gen.backend.mlx.paged-attention {:float32 1e-5 :float16 4e-3 :bfloat16 3e-2}
+   'gen.backend.mlx.paged-attention-cuda {:float32 1.2e-5 :float16 8e-3 :bfloat16 6e-2}})
 
-(defn- kernel-runs? [] (and (= :mlx (ts/backend-name)) (= "Mac OS X" (System/getProperty "os.name"))
-                            (= :gpu ((requiring-resolve 'gen.backend.mlx.array/device) array/*backend*))))
+(defn- kernel-ns
+  "The namespace of the kernel MLX's GPU computes paged-attention by:
+   kernels-community's on Metal (macOS), vLLM's on CUDA (elsewhere); nil
+   off MLX's GPU."
+  []
+  (when (and (= :mlx (ts/backend-name)) (= :gpu ((requiring-resolve 'gen.backend.mlx.array/device) array/*backend*)))
+    (if (= "Mac OS X" (System/getProperty "os.name")) 'gen.backend.mlx.paged-attention 'gen.backend.mlx.paged-attention-cuda)))
+
+(defn- kernel-var [sym] (requiring-resolve (symbol (name (kernel-ns)) (name sym))))
+
+(def ^:private planted-source-bugs
+  "Bugs planted in the CUDA kernel's source (its vars header and body,
+   compiled anew): a sequence reads the next one's block table, the keys
+   are read from the next entry of the table (wrapping), and the scores
+   lose their scale. On fenrir's CUDA (2026-11-08) they moved the output
+   by 2.8-4.3, 0.47-1.6 and 2.1-3.7 over the twelve kernel cases."
+  {"the next sequence's block table"
+   ['header "const int* block_table = block_tables + seq_idx * max_num_blocks_per_seq;"
+    "const int* block_table = block_tables + ((seq_idx + 1) % gridDim.y) * max_num_blocks_per_seq;"]
+   "the keys' block read at the next table entry"
+   ['header "        static_cast<int64_t>(block_table[block_idx]);\n\n    // Load a key"
+    "        static_cast<int64_t>(block_table[(block_idx + 1) % num_seq_blocks]);\n\n    // Load a key"]
+   "the scale dropped"
+   ['body "num_kv_heads, scale[0]," "num_kv_heads, 1.0f,"]})
+
+(defn- planted-source
+  "A redefinition of the CUDA kernel's source var v with old replaced by
+   new (which must occur once)."
+  [v old new]
+  (let [src @v]
+    (assert (= 1 (count (re-seq (re-pattern (java.util.regex.Pattern/quote old)) src))) old)
+    {v (.replace ^String src ^CharSequence old ^CharSequence new)}))
 
 (deftest the-kernel-is-the-composite
-  (if-not (kernel-runs?)
-    (is true "MLX's Metal only")
+  (if-not (kernel-ns)
+    (is true "MLX's GPU only")
     (doseq [c kernel-cases]
       (testing (pr-str (dissoc c :seed))
         (let [[kp vp tables lens dn] (written c)
-              fused (array/paged-attention (:q dn) kp vp tables lens)
-              composite (with-redefs-fn {#'paged/fused-attention (fn [& _] nil)}
-                          #(array/eval! (array/paged-attention (:q dn) kp vp tables lens)))]
-          (is (<= (max-diff fused composite) (kernel-band (:dtype c))))
+              attend #(array/eval! (array/paged-attention (:q dn) kp vp tables lens))
+              fused (attend)
+              composite (with-redefs-fn {#'paged/fused-attention (fn [& _] nil)} attend)]
+          (is (<= (max-diff fused composite) (get-in kernel-band [(kernel-ns) (:dtype c)])))
           (when (= :float32 (:dtype c))
             (testing "a planted bug fails it: the kernel given each length one short"
-              (let [kernel @(requiring-resolve 'gen.backend.mlx.paged-attention/paged-attention)]
-                (is (< 0.1 (with-redefs-fn {(requiring-resolve 'gen.backend.mlx.paged-attention/paged-attention)
-                                            (fn [b q kp vp t l opts] (kernel b q kp vp t (array/maximum (array/- l 1) 0) opts))}
-                             #(max-diff (array/paged-attention (:q dn) kp vp tables lens) composite))))))))))))
+              (let [v (kernel-var 'paged-attention)
+                    kernel @v]
+                (is (< 0.1 (with-redefs-fn {v (fn [b q kp vp t l opts] (kernel b q kp vp t (array/maximum (array/- l 1) 0) opts))}
+                             #(max-diff (attend) composite)))))))
+          (when (and (= 'gen.backend.mlx.paged-attention-cuda (kernel-ns)) (= c (first kernel-cases)))
+            (doseq [[label [sym old new]] planted-source-bugs]
+              (testing (str "a bug planted in the CUDA kernel's source fails it: " label)
+                (is (< 0.1 (with-redefs-fn (planted-source (kernel-var sym) old new) #(max-diff (attend) composite))))))))))))
+
+(deftest the-cuda-kernel-reads-long-tables
+  ;; CUDA's kernel holds a sequence's scores in shared memory sized by
+  ;; tiers of positions: a table of 12,000 runs its largest (64,000
+  ;; bytes, past the 48 KB a launch gets without opting in), and one past
+  ;; 16,000 the composite
+  (if-not (= 'gen.backend.mlx.paged-attention-cuda (kernel-ns))
+    (is true "MLX's CUDA only")
+    (let [kernel-v (kernel-var 'paged-attention)
+          kernel @kernel-v
+          run (fn [c]
+                (let [[kp vp tables lens dn] (written c)
+                      attend #(array/eval! (array/paged-attention (:q dn) kp vp tables lens))]
+                  {:fused (attend)
+                   :composite (with-redefs-fn {#'paged/fused-attention (fn [& _] nil)} attend)
+                   :short (with-redefs-fn {kernel-v (fn [b q kp vp t l opts] (kernel b q kp vp t (array/maximum (array/- l 1) 0) opts))}
+                            attend)}))]
+      (testing "12,000 positions: the kernel"
+        (let [{:keys [fused composite short]} (run {:lens [12000 1 700] :hq 4 :hk 2 :d 32 :bs 16 :dtype :float32 :seed 9})]
+          (is (<= (max-diff fused composite) (get-in kernel-band [(kernel-ns) :float32])))
+          (is (< 0.1 (max-diff short composite)) "a planted bug fails it (the lengths one short), so the kernel ran")))
+      (testing "16,500 positions: the composite"
+        (let [{:keys [fused composite short]} (run {:lens [16500 3] :hq 4 :hk 2 :d 32 :bs 16 :dtype :float32 :seed 9})]
+          (is (== 0.0 (max-diff fused composite)))
+          (is (== 0.0 (max-diff short composite)) "the kernel not called"))))))
 
 (def ^:private long-cases
   "Contexts past v1's threadgroup memory (8,192 positions of float32
@@ -287,7 +354,7 @@
     "acc += float(tmp_out_ptr[j * HEAD_SIZE + i])" "acc += float(tmp_out_ptr[i])"]})
 
 (deftest past-v1-the-partitioned-kernel-is-the-composite
-  (if-not (kernel-runs?)
+  (if-not (= 'gen.backend.mlx.paged-attention (kernel-ns))
     (is true "MLX's Metal only")
     (doseq [c long-cases]
       (testing (pr-str (dissoc c :seed))

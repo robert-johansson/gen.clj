@@ -1492,13 +1492,15 @@
    are checked where readable (array/concrete?).
    A composite of gen.array's ops: each sequence's blocks gathered
    (take), then sdpa under a mask of its length, the reference that a
-   backend's kernel is checked against. MLX's Metal computes it by
-   kernels-community's paged_attention kernels (vLLM's, through
-   mlx_fast_metal_kernel; gen.backend.mlx.paged-attention, ported per
-   THIRD-PARTY-NOTICES), which read the blocks in place: v1, and past its
-   threadgroup memory (tables of about 8,000 positions) v2, by partitions
-   of 512 positions then a reduction; they compute the softmax in float32
-   and add 1e-6 to its normalizer, as vLLM's do.
+   backend's kernel is checked against. MLX's GPU computes it by vLLM's
+   paged attention kernels, which read the blocks in place. On Metal they
+   are kernels-community's port (through mlx_fast_metal_kernel;
+   gen.backend.mlx.paged-attention): v1, and past its threadgroup memory
+   (tables of about 8,000 positions) v2, by partitions of 512 positions
+   then a reduction. On CUDA it is vLLM's own v1 (through
+   mlx_fast_cuda_kernel; gen.backend.mlx.paged-attention-cuda), up to
+   16,000 positions. Each is ported per THIRD-PARTY-NOTICES; they compute
+   the softmax in float32 and add 1e-6 to its normalizer, as vLLM's do.
    Experimental: outside the 1.x promise (DESIGN §9)."
   ([q k-pool v-pool tables lens] (paged-attention q k-pool v-pool tables lens nil))
   ([q k-pool v-pool tables lens opts] ((:paged-attention @paged) q k-pool v-pool tables lens opts)))

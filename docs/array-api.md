@@ -398,7 +398,9 @@ each capability is an optional protocol of its own:
   mlx_fast_metal_kernel; gen.backend.mlx.paged-attention), which read
   the blocks in place: v1, and past its 32 KiB of threadgroup scores
   (tables of about 8,000 positions) v2, by partitions of 512 positions
-  and a reduction (genclj-6qb6). Indices
+  and a reduction (genclj-6qb6). MLX's CUDA runs vLLM's own v1 kernel
+  (through mlx_fast_cuda_kernel; gen.backend.mlx.paged-attention-cuda),
+  up to 16,000 positions, and the composite past them. Indices
   are checked where readable (`concrete?`); on MLX the kernel clamps
   block ids and lengths. The books (allocator, tables) are host values,
   gen.llm.paged's.

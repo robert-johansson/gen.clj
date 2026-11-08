@@ -40,6 +40,7 @@
             [gen.llm.branching-contract :as bc]
             [gen.llm.lm :as lm]
             [gen.llm.lm-contract :as lc]
+            [gen.llm.models.against-llama :as against]
             [gen.llm.slots :as slots]
             [gen.llm.token :as token]
             [gen.llm.token-contract :as tc]
@@ -56,8 +57,11 @@
   1e-4)
 
 (def ^:private llama-band
-  "Against llama.cpp on Metal: gen.llm.models.qwen3-llama-test's."
-  0.075)
+  "Against llama.cpp: gen.llm.models.qwen3-llama-test's, per platform
+   (against-llama/band: 0.075 on Metal, 2.4 against llama.cpp's CUDA and
+   x86 builds, which quantize the activations to 8 bits; on fenrir's CUDA
+   this test measured 0.19 to 0.32, 2026-11-08)."
+  (delay (against/band model-path)))
 
 (defn- llama
   "A function of gen.llm.llama, loaded only when the tests run (it imports
@@ -146,12 +150,12 @@
                     as (br/advance (br/fork a 4) top)
                     bs (br/advance (br/fork b 4) top)]]
         (testing (first pair)
-          (is (<= (bc/max-diff (br/logprobs b) (br/logprobs a) 64) llama-band) "read")
+          (is (<= (bc/max-diff (br/logprobs b) (br/logprobs a) 64) @llama-band) "read")
           (is (= (first (bc/top-tokens (br/logprobs b) 1)) (first (bc/top-tokens (br/logprobs a) 1))) "the argmax")
           (doseq [[x y] (map vector as bs)]
-            (is (<= (bc/max-diff (br/logprobs y) (br/logprobs x) 64) llama-band) "advanced together"))
+            (is (<= (bc/max-diff (br/logprobs y) (br/logprobs x) 64) @llama-band) "advanced together"))
           (is (<= (reduce max (map #(Math/abs (- (double %1) (double %2))) (br/score a continuation) (br/score b continuation)))
-                  llama-band)
+                  @llama-band)
               "scored"))
         (br/dispose! (cons a as))
         (br/dispose! (cons b bs))))))
