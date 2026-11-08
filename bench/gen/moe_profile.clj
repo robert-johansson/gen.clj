@@ -38,7 +38,7 @@
   {:rows (mapv parse-long (str/split (prop "rows" "1,8,16") #","))
    :dtype (keyword (prop "dtype" "float16"))
    :steps (parse-long (prop "steps" "48"))
-   :parts (set (map keyword (str/split (prop "parts" "moe,router,routing,experts,gate-up,down,shared") #",")))})
+   :parts (set (map keyword (str/split (prop "parts" "moe,router,routing,experts,gate-up,gate-up-4,gate-up-7,down,down-4,shared") #",")))})
 
 ;; ---------------------------------------------------------------------------
 ;; kprof's marks
@@ -57,7 +57,8 @@
   [label ^long calls]
   (when-let [^MethodHandle h @mark-handle]
     (with-open [arena (Arena/ofConfined)]
-      (.invokeWithArguments h ^java.util.List [(.allocateFrom arena ^String label) (int calls)]))))
+      (let [^java.util.List args [(.allocateFrom arena ^String label) (int calls)]]
+        (.invokeWithArguments h args)))))
 
 ;; ---------------------------------------------------------------------------
 
@@ -80,6 +81,23 @@
         (let [ms (/ (- (System/nanoTime) t0) 1e6 n)]
           (mark! label n)
           ms)))))
+
+(defn- chunked
+  "gathered's product of the quantized stack w for the pairs of experts
+   idx [N k] and x1's matrices lhs, in gather-qmm calls of at most c pairs
+   (MLX's CUDA gather_qmm takes its qmv kernel below 8 rows)."
+  [x1 w idx lhs ^long c]
+  (let [[n k] (array/shape idx)
+        b (* (long n) (long k))
+        fi (array/reshape idx [b])
+        fl (array/reshape (array/broadcast-to lhs [n k]) [b])
+        outs (mapv (fn [^long s]
+                     (let [e (min b (+ s c))]
+                       (array/gather-qmm x1 (:wq w) (:scales w) (:biases w)
+                                         (assoc (select-keys w [:bits :group-size])
+                                                :lhs-indices (array/slice fl 0 s e) :rhs-indices (array/slice fi 0 s e)))))
+                   (range 0 b c))]
+    (array/reshape (array/concatenate outs 0) [n k 1 -1])))
 
 (defn- parts
   "The feed-forward's parts at r rows over every layer: {part ms}."
@@ -111,6 +129,9 @@
                               es))
                       [x1 idx p]]
             :gate-up [(fn [x1 idx] (mapv (fn [{:keys [gate up]}] [(gathered x1 gate idx token) (gathered x1 up idx token)]) es)) [x1 idx]]
+            :gate-up-4 [(fn [x1 idx] (mapv (fn [{:keys [gate up]}] [(chunked x1 gate idx token 4) (chunked x1 up idx token 4)]) es)) [x1 idx]]
+            :gate-up-7 [(fn [x1 idx] (mapv (fn [{:keys [gate up]}] [(chunked x1 gate idx token 7) (chunked x1 up idx token 7)]) es)) [x1 idx]]
+            :down-4 [(fn [act idx] (mapv (fn [{:keys [down]}] (chunked act down idx flat 4)) es)) [act idx]]
             :down [(fn [act idx] (mapv (fn [{:keys [down]}] (gathered act down idx flat)) es)) [act idx]]
             :shared [(fn [xs] (mapv (fn [{:keys [shared shared-gate]}]
                                       (* (common/swiglu shared xs)
@@ -132,14 +153,11 @@
         stepper (batch-profile-var "stepper")
         start (batch-profile-var "start")
         res (profile-row m pool r :lane)
-        step (stepper m :lane)
-        c (start m r)
-        _ (floor-ms step c r 64 8)
-        _ (mark! "warm" 8)
+        _ (mark! "warm" 0)
         n (long (:steps settings))
-        floor (floor-ms step c r 72 n)]
+        floor (floor-ms (stepper m :lane) (start m r) r 64 n)]
     (mark! (str "step " r) n)
-    (assoc res :floor floor)))
+    (assoc res :floor-marked floor)))
 
 (defn -main [path & _]
   (when-not (= :mlx (array/backend-name array/*backend*))
@@ -151,10 +169,11 @@
     (println "## A mixture of experts' decode step (gen.moe-profile)\n")
     (println "- model:" path)
     (println "- settings:" (pr-str settings) "kprof:" (some? @mark-handle))
+    (println "- top-k by ranks:" (some? (resolve 'gen.llm.models.qwen35/ranked)))
     (println "- os:" (System/getProperty "os.name") (System/getProperty "os.arch") "; java" (System/getProperty "java.version"))
     (mark! "load" 0)
     (when-not (= "false" (prop "step" "true"))
-      (let [cols [:rows :step :host :mlx-call :encode :wait :read :normalize :draw :floor :traces :gc :mlx-gc]
+      (let [cols [:rows :step :host :mlx-call :encode :wait :read :normalize :draw :floor :floor-marked :traces :gc :mlx-gc]
             res (mapv #(step-row m pool %) rows)]
         (println "\n### The step (ms)\n")
         (println (str "| " (str/join " | " (map name cols)) " |"))
