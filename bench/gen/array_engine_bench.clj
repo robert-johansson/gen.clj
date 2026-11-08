@@ -114,7 +114,22 @@
    8 clients' first token at the median 319 → 249, 373 → 268, 447 → 317,
    556 → 340 ms, tokens/s within ±5% (102 → 97, 91 → 93, 78 → 77, 70 →
    73; Qwen3 float16 again, two JVMs each alternated: 101, 102 → 104,
-   104)."
+   104). Shapes bucketed and compiled when the engine opens
+   (genclj-i3fp, 2026-11-08; main → the branch, alternated, warm-runs 3,
+   runs 6; each engine's open time and its traces after open printed
+   after its rows, gen.bench.shapes=true listing its shapes): 8
+   continuous clients, traces after open 16-27 → 0 in every
+   configuration; Qwen3-0.6B float16 420 → 431 tokens/s, read p90 15.2
+   → 14.8 ms, largest read 475 → 326, time to first token p50 236 →
+   217; float32 283 → 279, 23.3 → 23.6, 433 → 464, 257 → 258;
+   Qwen3.5-0.8B float16 303 → 295, 21.9 → 22.5, 603 → 467, 270 →
+   281; float32 227 → 224, 29.9 → 30.1, 734 → 496, 322 → 341 (a mixed
+   forward's two calls read the weights twice). Token SMC, paged:
+   Qwen3 float16 859 → 845, float32 769 → 753; Qwen3.5 967 → 925, 786
+   → 757 (alternated again, float16: main 990, 984, the branch 939, 947,
+   without :precompile? 981, 967: the open-time compile costs Qwen3.5's
+   SMC about 4%). Open time 0.3-0.5 s → 1.8-2.6 s paged, 2.4-4.4 s
+   continuous (the compile 1.4-3.9 s, float32 the longer)."
   (:require [clojure.string :as str]
             [gen.array :as array]
             [gen.gfi :as gfi]
@@ -159,7 +174,11 @@
    :smc-clients (long-prop "smc-clients" 1)
    ;; false: the paged modes attend by gen.array's composite, the
    ;; backend's kernel declined (Metal's or CUDA's; genclj-6qb6)
-   :paged-kernel (parse-boolean (prop "paged-kernel" true))})
+   :paged-kernel (parse-boolean (prop "paged-kernel" true))
+   ;; the paged engines' :precompile?, when given (genclj-i3fp)
+   :precompile? (some-> (System/getProperty "gen.bench.precompile") parse-boolean)
+   ;; true: each paged engine's shapes listed after its rows (genclj-i3fp)
+   :shapes? (= "true" (prop "shapes" "false"))})
 
 (defn- llama [sym] @(requiring-resolve (symbol "gen.llm.llama" (name sym))))
 
@@ -222,10 +241,23 @@
 ;; of a longer read (the continuous mode's, and since genclj-6qb6 the
 ;; paged mode's runs; before it, its paged-read-run), timed by wrapping
 ;; the engine's (private) functions while the clients run;
-;; and the batched steps' traces (calls of the families' batch-forward,
-;; which a compiled step makes once per new shape).
+;; and the compiled calls' traces (calls of the families' batch-forward
+;; and paged-forward, which a compiled call makes once per new shape:
+;; the forwards' and, since genclj-i3fp, the paged steps' too), counted
+;; through all of -main (counting).
 (def ^:private admission-ns (atom 0))
 (def ^:private traces (atom 0))
+
+(defn- counting
+  "(f) with traces counting the calls of the families' batch-forward and
+   paged-forward."
+  [f]
+  (with-redefs-fn (into {} (for [ns ['gen.llm.models.qwen3 'gen.llm.models.qwen35]
+                                 fn-name ['batch-forward 'paged-forward]
+                                 :let [v (requiring-resolve (symbol (str ns) (str fn-name)))
+                                       g @v]]
+                             [v (fn [& args] (swap! traces inc) (apply g args))]))
+    f))
 
 (defn- admitting
   "(f) with admission-ns counting the ns of the engine's forwards that
@@ -238,11 +270,7 @@
                         (let [t0 (System/nanoTime)]
                           (try (apply g args)
                                (finally (swap! admission-ns + (- (System/nanoTime) t0)))))))]
-    (with-redefs-fn (cond-> {(requiring-resolve 'gen.llm.models.qwen3/batch-forward)
-                             (let [g @(requiring-resolve 'gen.llm.models.qwen3/batch-forward)] (fn [& args] (swap! traces inc) (apply g args)))
-                             (requiring-resolve 'gen.llm.models.qwen35/batch-forward)
-                             (let [g @(requiring-resolve 'gen.llm.models.qwen35/batch-forward)] (fn [& args] (swap! traces inc) (apply g args)))
-                             #'ae/batch-forward! (fn [ctx reads]
+    (with-redefs-fn (cond-> {#'ae/batch-forward! (fn [ctx reads]
                                                    (if (some #(< 1 (count (:tokens %))) reads)
                                                      ((timed forward) ctx reads)
                                                      (forward ctx reads)))}
@@ -270,11 +298,11 @@
         ;; every LM made before the clock starts
         _ (Thread/sleep 200)
         _ (reset! admission-ns 0)
-        _ (reset! traces 0)
+        traced @traces
         t0 (System/nanoTime)]
     (deliver go t0)
     (run! deref fs)
-    [(/ (- (System/nanoTime) t0) 1e6) @times (mapv deref firsts) (/ @admission-ns 1e6) @traces]))
+    [(/ (- (System/nanoTime) t0) 1e6) @times (mapv deref firsts) (/ @admission-ns 1e6) (- (long @traces) (long traced))]))
 
 (defn- percentile [xs q]
   (let [v (vec (sort xs))]
@@ -309,20 +337,42 @@
   "-main's rows, for the model at path."
   [path]
   (let [{:keys [batch steps particles smc-tokens prompt]} settings
+        ;; the engine's :precompile?, when given (genclj-i3fp)
+        pre #(cond-> % (some? (:precompile? settings)) (assoc :precompile? (:precompile? settings)))
         engines (filterv (fn [[k]] ((:engines settings) k))
-                         [[:static "gen.array (MLX)" #(ae/engine {:model path :max-branches 64 :block (:block settings) :dtype (:dtype settings)})]
+                         [[:static "gen.array (MLX)" #(ae/engine {:model path :max-branches 64 :block (:block settings) :dtype (:dtype settings) :paged? false})]
                           [:paged (str "gen.array paged (MLX), min-rows " (:min-rows settings) (when-not (:paged-kernel settings) ", composite"))
-                           #(ae/engine {:model path :max-branches 64 :dtype (:dtype settings) :paged? true
-                                        :block-size (:block-size settings) :pool-blocks (:pool-blocks settings)
-                                        :min-rows (:min-rows settings)})]
+                           #(ae/engine (pre {:model path :max-branches 64 :dtype (:dtype settings) :paged? true
+                                             :block-size (:block-size settings) :pool-blocks (:pool-blocks settings)
+                                             :min-rows (:min-rows settings)}))]
                           [:continuous (str "gen.array continuous (MLX), wait " (:wait settings) (when-not (:paged-kernel settings) ", composite"))
-                           #(ae/engine (cond-> {:model path :max-branches 64 :dtype (:dtype settings) :paged? true :continuous? true
-                                                :block-size (:block-size settings) :pool-blocks (:pool-blocks settings)
-                                                :min-rows (:min-rows settings) :wait (:wait settings)}
-                                         (:max-chunks settings) (assoc :max-chunks (:max-chunks settings))))]
+                           #(ae/engine (pre (cond-> {:model path :max-branches 64 :dtype (:dtype settings) :paged? true :continuous? true
+                                                     :block-size (:block-size settings) :pool-blocks (:pool-blocks settings)
+                                                     :min-rows (:min-rows settings) :wait (:wait settings)}
+                                              (:max-chunks settings) (assoc :max-chunks (:max-chunks settings)))))]
                           [:llama "llama.cpp" #((llama 'engine) {:model path :max-branches 64 :n-ctx 8192})]])
         stats (fn [k e] (when-not (= :llama k)
-                          (println "|" (pr-str (ae/stats e)) (if (= :continuous k) (pr-str (slots/schedule e)) "") "| | |")))]
+                          (println "|" (pr-str (ae/stats e)) (if (= :continuous k) (pr-str (slots/schedule e)) "") "| | |")))
+        ;; an engine made, its open time and the traces since printed after
+        ;; its rows (genclj-i3fp)
+        opened (fn [k make rows]
+                 (let [t0 (System/nanoTime)
+                       ^java.io.Closeable e (make)
+                       ms (/ (- (System/nanoTime) t0) 1e6)
+                       traced @traces]
+                   (with-open [e e]
+                     (rows e)
+                     (stats k e)
+                     (when-not (= :llama k)
+                       (println (format "| open %.0f ms (%s), %d traces after open | | |" ms
+                                        (pr-str (select-keys (:paged (br/info e)) [:precompiled :precompile-ms]))
+                                        (- (long @traces) (long traced))))
+                       ;; gen.bench.shapes=true: every shape its compiled
+                       ;; calls took, with their calls (0: compiled at open,
+                       ;; not called)
+                       (when (and (:shapes? settings) (:paged (br/info e)))
+                         (doseq [[sig n] (sort-by (comp - val) ((requiring-resolve 'gen.llm.array-engine/shapes) e))]
+                           (println (format "|   %6d %s | | |" n (pr-str sig)))))))))]
     (with-open [^java.io.Closeable v ((llama 'vocabulary) path)]
       (let [tok ((llama 'tokenizer) v)
             text (str/join " " (repeat 40 "The sea is calm tonight, and the tide is full."))
@@ -332,26 +382,20 @@
           (println "|                                              |        ms |  tokens/s |")
           (println "|---|---:|---:|")
           (doseq [[k label make] engines]
-            (with-open [^java.io.Closeable e (make)]
-              (row label (median-ms #(decode e prompt-tokens)) (* batch steps))
-              (stats k e))))
+            (opened k make #(row label (median-ms (fn [] (decode % prompt-tokens))) (* batch steps)))))
         (when ((:sections settings) :smc)
           (println "\n### Token SMC," (:smc-clients settings) "run(s) at once," particles "particles," smc-tokens "tokens each (bootstrap)\n")
           (println "|                                              |        ms |  tokens/s |")
           (println "|---|---:|---:|")
           (doseq [[k label make] engines]
-            (with-open [^java.io.Closeable e (make)]
-              (row label (median-ms #(smc-run e tok prompt-tokens)) (* (:smc-clients settings) particles smc-tokens))
-              (stats k e))))
+            (opened k make #(row label (median-ms (fn [] (smc-run % tok prompt-tokens))) (* (:smc-clients settings) particles smc-tokens)))))
         (doseq [[section n] [[:clients (:clients settings)] [:lone 1]]
                 :when ((:sections settings) section)]
           (println "\n###" n (if (= 1 n) "client" "clients at once") "," (:client-tokens settings) "tokens each, an LM each\n")
           (println "|                                              |   wall ms |  tokens/s | p50 ms  | p90 ms  | max ms  | TTFT p50 | TTFT max | admission | traces |")
           (println "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|")
           (doseq [[k label make] engines]
-            (with-open [^java.io.Closeable e (make)]
-              (clients-rows label e tok prompt-tokens n)
-              (stats k e))))))))
+            (opened k make #(clients-rows label % tok prompt-tokens n))))))))
 
 (defn -main [path & _]
   (when-not (= :mlx (array/backend-name array/*backend*))
@@ -361,6 +405,6 @@
   (println "- settings:" (pr-str settings))
   (println "- os:" (System/getProperty "os.name") (System/getProperty "os.arch") "; java" (System/getProperty "java.version"))
   (with-redefs-fn (if (:paged-kernel settings) {} {(requiring-resolve 'gen.array.paged/fused-attention) (fn [& _] nil)})
-    #(run path))
+    #(counting (fn [] (run path))))
   (println "\nMLX memory:" (pr-str ((requiring-resolve 'gen.backend.mlx.memory/memory))))
   (shutdown-agents))

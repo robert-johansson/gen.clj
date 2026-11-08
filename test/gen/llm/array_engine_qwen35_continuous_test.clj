@@ -19,7 +19,12 @@
    - a program calling from one thread gets the same bits, run again or
      on a new engine;
    - decode rows' states read three ways: a lane stepped in place, a
-     group's rows read in place by forks, and rows stacked.
+     group's rows read in place by forks, and rows stacked;
+   - the shapes (genclj-i3fp), as gen.llm.array-engine-continuous-test's:
+     bucketed forwards are those with nothing bucketed, the three planted
+     bugs of the padding failing it (the buckets rounded down throws on
+     the JVM backend, an index past a chunk's rows); the clients take
+     only shapes compiled when the engine opened.
    Planted bugs (planted-bugs-fail-the-clients) fail the concurrent
    clients: a decode row given another row's states, a chunk started
    from zeros where its read had states (a read split across forwards
@@ -31,6 +36,7 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gen.array :as array]
             [gen.llm.array-engine :as ae]
+            [gen.llm.array-engine-shapes :as shapes]
             [gen.llm.branching :as br]
             [gen.llm.branching-contract :as bc]
             [gen.llm.lm :as lm]
@@ -82,7 +88,7 @@
 (def ^:private continuous-opts
   "Small forwards, blocks and pools: reads take several chunks, steps
    cross blocks, forks share partial blocks, the pool grows."
-  {:paged? true :continuous? true :block-size 8 :pool-blocks 16 :n-batch 8})
+  {:continuous? true :block-size 8 :pool-blocks 16 :n-batch 8})
 
 (defn- engine
   "A new continuous engine of model k (close it)."
@@ -595,6 +601,49 @@
         (is (< 10 (:made w)) (pr-str w))
         (is (zero? (:read-after w)) (pr-str w))
         (is (zero? (:unreleased w)) (pr-str w))))))
+
+;; ---------------------------------------------------------------------------
+;; Shapes (genclj-i3fp)
+;; ---------------------------------------------------------------------------
+
+(def ^:private shapes-opts
+  "Forwards of 40 tokens: several prompts' chunks share one."
+  {:n-batch 40})
+
+(deftest bucketed-forwards-are-exact-sizes-forwards
+  ;; gen.llm.array-engine-continuous-test's, for Qwen3.5: forwards of
+  ;; decode rows beside several prompts' chunks, their states read in
+  ;; place, stacked and from zeros
+  (let [row (partial forward-row :dense)
+        exact-r (with-redefs-fn shapes/exact #(with-open [e (engine :dense (assoc shapes-opts :precompile? false))] (shapes/workload e)))
+        scratch-slots (with-open [e (engine :dense shapes-opts)]
+                        (let [[d r] (delta #(ae/stats e) #(shapes/workload e))]
+                          (is (= [] (shapes/failures r exact-r row band)))
+                          (is (pos? (:mixed-forwards d 0)) (str "decode rows beside chunks: " d))
+                          (* 8 (- (long (:size (ae/blocks e))) 16))))]
+    (testing "planted bugs fail it"
+      (doseq [[what plant] (shapes/planted)]
+        (testing what
+          (is (seq (with-redefs-fn (plant scratch-slots)
+                     #(try (with-open [e (engine :dense (assoc shapes-opts :precompile? false))]
+                             (shapes/failures (shapes/workload e) exact-r row band))
+                           (catch Throwable t [(str "threw " (ex-message t))]))))))))))
+
+(deftest the-shapes-compiled-at-open-cover-the-clients
+  ;; gen.llm.array-engine-continuous-test's, for Qwen3.5: no trace after
+  ;; open (its states read in place or stacked, chunks from zeros or
+  ;; their rows)
+  (let [traced (atom 0)
+        counting {#'qwen35/batch-forward (let [f @#'qwen35/batch-forward] (fn [& args] (swap! traced inc) (apply f args)))}]
+    (with-open [e (engine :dense {:pool-blocks 256})]
+      (let [[d] (delta #(ae/stats e) #(with-redefs-fn counting (fn [] (clients e 6))))]
+        (is (zero? (:traces (ae/stats e))) (pr-str (remove (comp zero? val) (ae/shapes e))))
+        (is (pos? (:mixed-forwards d 0)) "decode rows beside chunks")
+        (when-not (ts/jvm?)
+          (is (zero? @traced) "no trace on MLX"))))
+    (with-open [e (engine :dense {:pool-blocks 256 :precompile? false})]
+      (clients e 6)
+      (is (pos? (:traces (ae/stats e))) "without :precompile?"))))
 
 ;; ---------------------------------------------------------------------------
 ;; Misuse

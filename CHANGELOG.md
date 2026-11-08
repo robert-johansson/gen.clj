@@ -38,6 +38,34 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Changed (experimental): the array engine's paged mode is its default**
+  (genclj-17it, the owner's call of 2026-11-08). `gen.llm.array-engine/
+  engine` opens the paged mode unless given `:paged? false`, which opens
+  the static mode as the default did; `{:continuous? true}` alone now
+  opens the continuous mode (with `:paged? false` it stays an error).
+  The continuous mode stays opt-in, and serving several clients at once
+  needs it: the paged mode, as the static one, runs one caller's read at
+  a time (8 clients, Q8_0 in float16: Qwen3.5-0.8B on Metal 74 tokens/s
+  paged, 233 continuous, llama.cpp 69; Qwen3-0.6B on CUDA 219 paged, 555
+  continuous, llama.cpp 503). `ae/groups` is the static mode's, so it is
+  loud on a default engine; `:block` is the static mode's option.
+  **Draws**: an engine opened without `:paged?` gives the paged mode's
+  rows, which equal the static mode's within the engine's band (float
+  round-off: its kernels differ by shape), not bit for bit, so draws at
+  near-ties can change.
+- **Changed (experimental): the array engine's shapes bucketed, the
+  common ones compiled when it opens** (genclj-i3fp, the owner's call of
+  2026-11-08). In the paged and continuous modes, rows, chunks' lengths
+  and block tables' widths round up to powers of 2, the widths at least
+  256 positions', and a continuous forward's decode rows and chunks are
+  two compiled calls evaluated together, so that a compiled call's
+  shapes are few. The new option `:precompile?`
+  (default true) traces the common shapes when the engine opens (on
+  Metal 1.2-4 s for Qwen3-0.6B and Qwen3.5-0.8B); `ae/stats` counts
+  `:traces` (calls of a shape not compiled before) and `ae/shapes` lists
+  every shape called, with its calls. **Draws**: the paged and
+  continuous modes' rows move within float round-off (kernels differ by
+  shape), so draws at near-ties can change.
 - **Added (experimental): paged attention of a run, and several prompts
   in one continuous forward** (genclj-6qb6, PROVISIONAL).
   `gen.array/paged-attention` also takes T queries a sequence: q

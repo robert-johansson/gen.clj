@@ -1,6 +1,8 @@
 (ns gen.llm.array-engine-test
-  "gen.array's engine (gen.llm.array-engine) on the backend under test,
-   over the tiny random Qwen3 of test/fixtures/gguf (vocabulary 128, 3
+  "gen.array's engine (gen.llm.array-engine) in its static mode
+   (:paged? false; its paged mode, the default, is
+   gen.llm.array-engine-paged-test's) on the backend under test, over
+   the tiny random Qwen3 of test/fixtures/gguf (vocabulary 128, 3
    blocks; gen.llm.models.qwen3-test) as F32 and Q8_0, with the toy
    tokenizer's 128 tokens (printable ASCII, BOS 95, EOS 96):
    - the Branching contract (gen.llm.branching-contract) within the
@@ -78,7 +80,7 @@
    that capacities grow and reads take several forwards."
   [k]
   (or (@engines k)
-      (get (swap! engines assoc k (ae/engine {:model (@models k) :max-branches 80 :block 16 :n-batch 8})) k)))
+      (get (swap! engines assoc k (ae/engine {:model (@models k) :max-branches 80 :block 16 :n-batch 8 :paged? false})) k)))
 
 (use-fixtures :once (fn [f]
                       (try (f)
@@ -105,7 +107,7 @@
   (let [e (engine k)]
     {:engine e
      :lm #(lm/lm e tokenizer {:max-branches 12})
-     :fresh (fn [] (let [e (ae/engine {:model (@models k) :max-branches 16 :block 16 :n-batch 8})]
+     :fresh (fn [] (let [e (ae/engine {:model (@models k) :max-branches 16 :block 16 :n-batch 8 :paged? false})]
                      [e (lm/lm e tokenizer {:max-branches 12})]))}))
 
 (deftest the-lm-contract-holds-within-the-band
@@ -124,7 +126,7 @@
   ;; tiny model many particles end early, and their last rows would be
   ;; evicted with 255 branches.) The LM's cells are no bound of this
   ;; engine, whose branches share no pool of cells
-  (with-open [e (ae/engine {:model (:f32 @models) :max-branches 512 :block 16})]
+  (with-open [e (ae/engine {:model (:f32 @models) :max-branches 512 :block 16 :paged? false})]
     (let [{:keys [encode]} tokenizer
           opts {:prompt (encode "The capital of Sweden is" {}) :forced (encode " S" {:add-special? false})
                 :min-weight -40.0 :sea-prompt (encode "Write about the sea:" {})
@@ -235,7 +237,7 @@
 (deftest a-failed-normalization-leaves-the-slots-as-they-were
   ;; a read's or a step's rows failing to normalize, loudly: the branch
   ;; as it was, and it reads and steps on
-  (with-open [e (ae/engine {:model (:f32 @models) :max-branches 12 :block 16 :n-batch 8})]
+  (with-open [e (ae/engine {:model (:f32 @models) :max-branches 12 :block 16 :n-batch 8 :paged? false})]
     (let [p (:prompt contract-opts)
           more [5 6 7 8 9 10 11 12]
           failing {#'ae/host-rows (fn [& _] (throw (ex-info "planted" {:reason :planted})))}
@@ -300,7 +302,7 @@
 
 (deftest planted-bugs-fail-the-contract
   (doseq [[what [redefs caught-by]] planted]
-    (with-open [e (ae/engine {:model (:f32 @models) :max-branches 12 :block 16 :n-batch 8})]
+    (with-open [e (ae/engine {:model (:f32 @models) :max-branches 12 :block 16 :n-batch 8 :paged? false})]
       (doseq [c caught-by]
         (testing [what c]
           (let [failures (with-redefs-fn redefs #(bc/run-check (bc/checks c) e contract-opts))]
@@ -309,7 +311,7 @@
   (testing "a shared group stepped in place (a fork of one of its rows ignored): on MLX, whose step consumes it"
     ;; on the JVM backend a step consumes nothing (compile is the step
     ;; itself), so the values stay right there and the plant is invisible
-    (with-open [e (ae/engine {:model (:f32 @models) :max-branches 12 :block 16 :n-batch 8})]
+    (with-open [e (ae/engine {:model (:f32 @models) :max-branches 12 :block 16 :n-batch 8 :paged? false})]
       (is (= [] (bc/run-check shared-group-check e contract-opts)) "unplanted")
       (when-not (ts/jvm?)
         (is (seq (with-redefs-fn {#'ae/lane? (constantly true)} #(bc/run-check shared-group-check e contract-opts))))))))

@@ -244,7 +244,7 @@
 (defn- make-engine [path]
   (let [{:keys [engine dtype block-size pool-blocks]} settings]
     (case engine
-      :static (ae/engine {:model path :max-branches 64 :block 64 :dtype dtype})
+      :static (ae/engine {:model path :max-branches 64 :block 64 :dtype dtype :paged? false})
       :paged (ae/engine {:model path :max-branches 64 :dtype dtype :paged? true :block-size block-size :pool-blocks pool-blocks})
       :continuous (ae/engine {:model path :max-branches 64 :dtype dtype :paged? true :continuous? true
                               :block-size block-size :pool-blocks pool-blocks})

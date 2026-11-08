@@ -1,6 +1,6 @@
 (ns gen.llm.array-engine-paged-test
-  "gen.array's engine in its paged mode (gen.llm.array-engine's :paged?,
-   experimental; genclj-1daf) on the backend under test, over the tiny
+  "gen.array's engine in its paged mode (gen.llm.array-engine's default,
+   :paged?; genclj-1daf, genclj-17it) on the backend under test, over the tiny
    random Qwen3 of test/fixtures/gguf (vocabulary 128, 3 blocks; F32 and
    Q8_0), with the toy tokenizer's 128 tokens:
    - the Branching contract (gen.llm.branching-contract), the LM contract
@@ -29,6 +29,9 @@
      scored branches stayed live over emptied slots, the next step was
      given the pools the failed one had consumed, a read left its slot
      ahead of its branch;
+   - a run's shapes (prompts, 16 forks and their copies, subsets of
+     them, an extend, a score) are those compiled when the engine opened
+     (genclj-i3fp): no trace, on MLX no call of qwen3's forwards;
    - misuse is loud.
    Planted mutations fail the contract checks named in
    planted-bugs-fail-the-contract: copy-on-write skipped (a fork's step
@@ -65,7 +68,7 @@
 (def ^:private paged-opts
   "Small blocks and pools, so that steps cross blocks, forks share partial
    blocks, and the pool grows."
-  {:paged? true :block-size 8 :pool-blocks 16 :n-batch 8})
+  {:block-size 8 :pool-blocks 16 :n-batch 8})
 
 (defn- engine
   "The shared paged engine of model k (opened once)."
@@ -358,11 +361,49 @@
     [:fork-matches-fresh]]})
 
 (deftest planted-bugs-fail-the-contract
+  ;; the engine opened before the plant, so nothing compiled when it
+  ;; opened (:precompile?): on MLX a call compiled then would not trace the
+  ;; planted attention
   (doseq [[what [redefs caught-by]] planted]
-    (with-open [e (ae/engine (merge paged-opts {:model (:f32 @models) :max-branches 12}))]
+    (with-open [e (ae/engine (merge paged-opts {:model (:f32 @models) :max-branches 12 :precompile? false}))]
       (doseq [c caught-by]
         (testing [what c]
           (is (seq (with-redefs-fn redefs #(bc/run-check (bc/checks c) e contract-opts)))))))))
+
+;; ---------------------------------------------------------------------------
+;; Shapes (genclj-i3fp)
+;; ---------------------------------------------------------------------------
+
+(deftest the-shapes-compiled-at-open-cover-a-run
+  ;; prompts read (of one token, and of 15, with and without scores), 16
+  ;; forks of a partial block advanced together (15 of them copying it:
+  ;; copy-on-write), then 5 and 2 of them: only calls of the shapes the
+  ;; engine compiled when it opened (its pool large enough not to grow),
+  ;; no trace; on MLX no call of qwen3's forwards, which a compiled call
+  ;; makes when it traces. Without :precompile? they trace
+  (let [traced (atom 0)
+        counted (fn [v] (let [f @v] (fn [& args] (swap! traced inc) (apply f args))))
+        counting {#'qwen3/batch-forward (counted #'qwen3/batch-forward) #'qwen3/paged-forward (counted #'qwen3/paged-forward)}
+        run (fn [e]
+              (let [{:keys [prompt continuation]} contract-opts
+                    root (br/open e prompt)
+                    one (br/open e [95])
+                    s1 (br/advance (br/fork root 16) (vec (range 16)))
+                    s2 (br/advance (subvec s1 0 5) [1 2 3 4 5])
+                    s3 (br/advance (subvec s1 5 7) [6 7])
+                    {:keys [branch]} (br/extend one continuation)]
+                (br/score root continuation)
+                (br/dispose! (concat [root branch] s2 s3 (subvec s1 7)))))]
+    (with-open [e (ae/engine (merge paged-opts {:model (:f32 @models) :max-branches 64 :pool-blocks 256}))]
+      (let [before (ae/stats e)]
+        (with-redefs-fn counting #(run e))
+        (is (zero? (:traces (ae/stats e))) (pr-str (remove (comp zero? val) (ae/shapes e))))
+        (is (< (:copied-blocks before) (:copied-blocks (ae/stats e))) "copy-on-write")
+        (when-not (ts/jvm?)
+          (is (zero? @traced) "no trace on MLX"))))
+    (with-open [e (ae/engine (merge paged-opts {:model (:f32 @models) :max-branches 64 :pool-blocks 256 :precompile? false}))]
+      (run e)
+      (is (pos? (:traces (ae/stats e))) "without :precompile?"))))
 
 ;; ---------------------------------------------------------------------------
 ;; Misuse
@@ -372,5 +413,7 @@
   (let [reason #(:reason (ts/thrown-data (%)))]
     (is (= :invalid-option (reason #(ae/engine (merge paged-opts {:model (:f32 files) :block-size 12})))))
     (is (= :invalid-option (reason #(ae/engine (merge paged-opts {:model (:f32 files) :paged? 1})))))
-    (with-open [e (ae/engine {:model (:f32 @models)})]
-      (is (= :not-paged (reason #(ae/blocks e)))))))
+    (is (= :invalid-option (reason #(ae/engine (merge paged-opts {:model (:f32 files) :precompile? 1})))))
+    (with-open [e (ae/engine {:model (:f32 @models) :paged? false})]
+      (is (= :not-paged (reason #(ae/blocks e))))
+      (is (= :not-paged (reason #(ae/shapes e)))))))

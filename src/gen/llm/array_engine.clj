@@ -14,14 +14,33 @@
    (or given loaded), and every operation runs on the engine's thread on
    that backend. The tokenizer is not the engine's: llama.cpp's vocabulary
    of the same GGUF, loaded alone (gen.llm.llama/vocabulary), or any
-   tokenizer map of the model's vocabulary.
+   tokenizer map of the model's vocabulary. The family is the GGUF's
+   architecture (qwen3, qwen35, qwen35moe), or a loaded model's (its
+   config's :arch, qwen3 without one).
 
-   A branch's state is a row of a static cache (the family's
-   static-cache: qwen3's KV cache, or qwen35's, whose GatedDeltaNet
-   layers hold a recurrent state a row), a value: a slot holds a group, a
-   static cache of one or more rows, and its row there. The family is the
-   GGUF's architecture (qwen3, qwen35, qwen35moe), or a loaded model's
-   (its config's :arch, qwen3 without one).
+   It runs in one of three modes (engine's options):
+   - paged, the default (genclj-17it): every branch's keys and values in
+     one pool of blocks, a branch a block table, so forks share their
+     blocks and a step stacks no rows (below);
+   - continuous (:continuous? true, over the paged mode): concurrent
+     callers' reads gathered into shared forwards. Serving several
+     clients at once needs it: the paged mode, as the static one, runs
+     one caller's read at a time. 8 clients, tokens/s (2026-11-08, Q8_0,
+     float16): Qwen3.5-0.8B on Metal, paged 74, continuous 233,
+     llama.cpp 69; Qwen3-0.6B on CUDA, paged 219, continuous 555,
+     llama.cpp 503. It stays opt-in, since concurrent callers' results
+     then depend on how their reads were gathered, within the engine's
+     band;
+   - static (:paged? false): every branch a row of a static cache, as
+     below.
+   The paged mode's results equal the static one's within float round-off
+   (kernels differ by shape), not bit for bit.
+
+   The static mode. A branch's state is a row of a static cache (the
+   family's static-cache: qwen3's KV cache, or qwen35's, whose
+   GatedDeltaNet layers hold a recurrent state a row), a value: a slot
+   holds a group, a static cache of one or more rows, and its row
+   there.
    - A copy shares the group (a fork is free), and a clear drops the
      slot's hold on it; a group no slot holds is released at once
      (array/release!: on MLX its buffers go back for the next step's
@@ -66,8 +85,8 @@
    head-dim floats a position of their capacity, and a Qwen3.5's
    recurrent states), so keep its :max-branches to what a run needs.
 
-   The paged mode (:paged? true, Qwen3 and Qwen3.5; genclj-1daf,
-   genclj-6qb6) keeps every branch in one pool of blocks instead
+   The paged mode (the default, Qwen3 and Qwen3.5; genclj-1daf,
+   genclj-6qb6, genclj-17it) keeps every branch in one pool of blocks
    (gen.llm.models.qwen3/paged-pools, gen.array's paged operations), its
    books values on the host (gen.llm.paged): a slot holds a block table.
    Qwen3.5's attention layers are paged; its GatedDeltaNet layers' states
@@ -98,17 +117,16 @@
    - A step is one compiled decode of the slots' rows by paged attention
      over their tables (qwen3/compile-paged-step, consuming the pools):
      no row is stacked, whatever groups the slots came from, so token
-     SMC's resampled particles step without a copy. Rows are padded to a
-     power of 2 (at least :min-rows) and tables to a power of 2 of
-     blocks, so a step traces once per such shape; padding rows write
-     the pool's scratch blocks, and no row reads another's.
+     SMC's resampled particles step without a copy. Its shape is
+     bucketed (Shapes, below): padding rows write the pool's scratch
+     blocks, and no row reads another's.
    - A run reads its tokens in forwards of :n-batch tokens, each one
      compiled call of the family's batch step (compile-paged-batch-step,
      consuming the pools) whose rows are a prefill chunk: written into
      the slot's blocks, then attending over them (gen.array/
-     paged-attention of a run), padded to a power of 2 of rows, as the
-     continuous mode reads a lone caller's (genclj-6qb6; it was read
-     eagerly over a concatenating cache before).
+     paged-attention of a run), its rows bucketed, as the continuous
+     mode reads a lone caller's (genclj-6qb6; it was read eagerly over a
+     concatenating cache before).
    - The pool (:pool-blocks, of :block-size positions) doubles when its
      free blocks run out (a copy, and new traces). A donated write's
      cost does not grow with the pool (measured on Metal, 2026-11-08:
@@ -134,29 +152,29 @@
      run's slot when a forward after its first fails (it holds the
      tokens read so far).
 
-   The continuous mode (:paged? and :continuous? true; genclj-b3ow, for
-   Qwen3.5 genclj-6qb6) batches concurrent callers' reads (gen.llm.slots's
-   Batching: its scheduler gathers every advance, extend and open in
-   flight between forwards, see that namespace). A forward is one
-   compiled call (the family's compile-paged-batch-step, consuming the
-   pools) of rows of one token:
+   The continuous mode (:continuous? true, over the paged mode;
+   genclj-b3ow, for Qwen3.5 genclj-6qb6) batches concurrent callers'
+   reads (gen.llm.slots's Batching: its scheduler gathers every advance,
+   extend and open in flight between forwards, see that namespace). A
+   forward is the compiled calls (the family's compile-paged-batch-step,
+   consuming the pools) of its decode rows and of its chunks, evaluated
+   together (Shapes, below), of rows of one token:
    - every one-token read in flight (an advance's rows, a one-token open
      or extend, a long read's last token): decode rows, attending by
-     paged attention over their tables, padded to a power of 2 (at least
-     :min-rows);
+     paged attention over their tables, their count bucketed;
    - then a chunk of the oldest longer read (open, extend), as many of
      its tokens as the budget (:n-batch tokens a forward) leaves after
-     the decode rows, at least a block, padded to t rows, a power of 2
-     within the budget; and chunks of the next longer reads, at most t
-     tokens each, padded to t rows, while the budget holds them (at most
-     :max-chunks in all, and a power of 2 of them, so that forwards
-     trace for few shapes; genclj-6qb6). Each chunk's rows are written
-     into its blocks and attend over them (gen.array/paged-attention of
-     a run: its blocks gathered once, each row to its own position); a
-     chunk's padding rows sit at its last position. Longer reads past
-     the budget wait their turn, first come first served; their chunks
-     go on in the next forwards, between which other requests come and
-     go.
+     the decode rows, at least a block, padded to t rows (its tokens
+     bucketed); and chunks of the next longer
+     reads, at most t tokens each, padded to t rows, while the budget
+     holds them (at most :max-chunks in all, and a power of 2 of them,
+     so that forwards trace for few shapes; genclj-6qb6). Each chunk's
+     rows are written into its blocks and attend over them
+     (gen.array/paged-attention of a run: its blocks gathered once, each
+     row to its own position); a chunk's padding rows sit at its last
+     position. Longer reads past the budget wait their turn, first come
+     first served; their chunks go on in the next forwards, between
+     which other requests come and go.
    Under Qwen3.5 the GatedDeltaNet layers read a forward's decode rows as
    a paged step does (each its own sequence's next token, their states
    read as step-states says: in place, a lane, or stacked) and each
@@ -175,6 +193,30 @@
    fails has consumed the pools, every branch lost (:lost-slots), and one
    whose rows fail to normalize leaves its slots as they were (a read
    begun in an earlier forward is then lost, by gen.llm.slots's rule).
+
+   Shapes (genclj-i3fp). A compiled call traces once for each shape of
+   its operands (on Metal 10-160 ms for the 0.6B and 0.8B, and about 230
+   ms more for a table width new to the process: one paged-attention
+   kernel a width; 200-430 ms on the MoE), so the paged modes bucket
+   what varies: rows (a step's, a forward's decode rows; at least
+   :min-rows) and chunks' lengths (at least a block) round up to powers
+   of 2, block tables' widths too, at least 256 positions' (contexts up
+   to 256 share one), and the rows whose logits a forward computes
+   follow from its other shapes. The padding is masked or ignored:
+   padding rows write the scratch blocks, chunk padding rows sit at the
+   chunk's last position (and under Qwen3.5 past its :chunk-len), a
+   table's columns past a sequence's blocks are never read (each row
+   reads its own positions). A forward's decode rows and its chunks are
+   two compiled calls, evaluated together, so that their shapes do not
+   multiply (on Metal, 2026-11-08: 3-7 ms more a mixed forward than one
+   call, the weights read twice; 8 clients of Qwen3.5-0.8B lost 1-2% of
+   their tokens/s and 4% of their time to first token).
+   An engine compiles the common shapes when it opens (:precompile?,
+   precompiled): those short contexts take, a decode of up to 16 rows,
+   a lone read's chunk of each length, several prompts' chunks of up to
+   64 tokens (continuous), and copy-on-write's copies; its :traces stat
+   counts the calls of any other shape (shapes lists them). A pool that
+   grows makes every shape new.
 
    Results depend on batch shapes and capacities as llama.cpp's do (float
    round-off: MLX's kernels differ by shape); the same read from the same
@@ -514,6 +556,53 @@
 
 (defn- next-pow2 ^long [^long n] (loop [p 1] (if (c/< p n) (recur (c/* 2 p)) p)))
 
+;; Shapes (genclj-i3fp; the namespace's docstring, Shapes): what varies in
+;; a compiled call's operands is bucketed, so that its traces are few, and
+;; the common shapes are compiled when the engine opens.
+
+(defn- bucket
+  "n rounded up to a power of 2, at least floor: a compiled call's sizes
+   (its rows, its block tables' widths, its chunks' lengths), so that its
+   shapes, and so its traces, are few."
+  ^long [^long n ^long floor]
+  (max floor (next-pow2 n)))
+
+(def ^:private min-span
+  "The positions a block table spans at the least (its width in blocks a
+   power of 2): contexts up to it share one width. The paged kernels read
+   each decode row's own positions only, whatever the width (measured on
+   Metal, 2026-11-08: a step of 8 rows of Qwen3-0.6B 11.3 ms at 16
+   blocks, 11.7 at 128; v1 holds 4 bytes a position of the width in
+   threadgroup memory, 1 KiB here). A chunk's composite gathers and
+   attends over the width's blocks: four chunks of 64 tokens of
+   Qwen3-0.6B take 112 ms at 4 blocks and 120 at 16 in float16, 132 and
+   151 in float32 (Qwen3.5-0.8B, a quarter of whose layers attend, 163
+   and 165, 197 and 196). Unfloored, a chunk's width would follow its
+   context (a prompt's first chunk, a split prompt's next, an extend),
+   multiplying its shapes."
+  256)
+
+(defn- table-width
+  "The width of the block tables of seqs (blocks of bs): their most
+   blocks, bucketed, at least min-span positions' worth."
+  ^long [seqs ^long bs]
+  (bucket (reduce max 1 (map (comp count :blocks) seqs)) (paged/blocks-for min-span bs)))
+
+(defn- chunk-floor
+  "The fewest rows a chunk has: a block (bs), within a forward's budget of
+   n-batch tokens' bucket."
+  ^long [^long bs ^long n-batch]
+  (min bs (next-pow2 n-batch)))
+
+(defn- shape!
+  "A call of the compiled shape sig counted (the engine's :shapes, by
+   signature: the structure and shapes that key a compiled call's
+   traces), and as a trace (:traces) when the engine had not made one of
+   that shape before: on MLX, mlx_compile traces it then."
+  [state sig]
+  (when-not (contains? (:shapes @state) sig) (tally! state :traces 1))
+  (vswap! state update-in [:shapes sig] (fnil inc 0)))
+
 (defn- pools? [entry] (contains? entry :k))
 
 (defn- merged
@@ -709,9 +798,17 @@
    blocks), as many as there are, so that a step with copies traces once
    per power of 2."
   [a scratch copies]
-  (let [want (next-pow2 (count copies))
+  (let [want (bucket (count copies) 1)
         dsts (set (map second copies))]
     (into copies (map (fn [b] [b b])) (take (c/- want (count copies)) (remove dsts (concat (:free a) (range scratch)))))))
+
+(defn- copy-call!
+  "copy-blocks!'s two calls, of the block pairs all."
+  [{:keys [state gather-fn put-fn] :as ctx} all]
+  (shape! state [:copy (count all) (:size (:alloc @state))])
+  (let [blocks (doto (gather-fn (:pools @state) (i32 (map first all))) array/eval!)
+        pools (donating ctx #(doto (put-fn (:pools @state) blocks (i32 (map second all))) array/eval!))]
+    (vswap! state assoc :pools pools)))
 
 (defn- copy-blocks!
   "The block copies [[from to] …] made in the pools (copy-on-write), a
@@ -721,13 +818,10 @@
    mean nothing). In one call MLX copies each pool instead of writing it
    in place, its read still holding it (measured on Metal, 2026-11-07: 14
    to 120 ms a copy as the pools grew from 0.6 to 3.8 GB)."
-  [{:keys [state gather-fn put-fn] :as ctx} a copies]
+  [{:keys [state] :as ctx} a copies]
   (when (seq copies)
-    (let [all (padded a (:scratch @state) copies)
-          blocks (doto (gather-fn (:pools @state) (i32 (map first all))) array/eval!)
-          pools (donating ctx #(doto (put-fn (:pools @state) blocks (i32 (map second all))) array/eval!))]
-      (vswap! state assoc :pools pools)
-      (tally! state :copied-blocks (count copies)))))
+    (copy-call! ctx (padded a (:scratch @state) copies))
+    (tally! state :copied-blocks (count copies))))
 
 (declare paged-rows! continuous-run)
 
@@ -742,7 +836,7 @@
   [{:keys [state min-rows] :as ctx} slots positions tokens]
   (doseq [[slot pos] (map vector slots positions)] (check-paged-position state slot pos "advance"))
   (let [n (count slots)
-        r (max (long min-rows) (next-pow2 n))]
+        r (bucket n min-rows)]
     (if-not (contains? @state :rows)
       (paged-rows! ctx slots tokens r nil)
       (let [{:keys [order fresh] :as states} (step-states ctx slots r)
@@ -753,48 +847,74 @@
         (reduce (fn [out [i k]] (assoc out k (rows i))) (vec (repeat n nil)) (map-indexed vector order))))))
 
 (defn- normalized
-  "The rows of logits normalized on the host (host-rows), where a
-   failure after a step that consumed a lane's states (lane, its slots)
-   loses those slots: named in the error's :lost-slots."
+  "The rows of logits (a vector of arrays, nil for none), in order,
+   normalized on the host (host-rows), where a failure after a step that
+   consumed a lane's states (lane, its slots) loses those slots: named in
+   the error's :lost-slots."
   [pool logits lane]
-  (try (host-rows pool logits "advance")
+  (try (into [] (mapcat #(host-rows pool % "advance")) (remove nil? logits))
        (catch Throwable t
          (throw (if (seq lane) (exhausted t lane) t)))))
+
+(defn- pad-slot
+  "The slot padding row i of a call writes: slot i of the scratch blocks
+   (the first :scratch blocks, which no sequence holds)."
+  ^long [^long i]
+  i)
+
+(defn- pad-table
+  "Padding row i's block table, of width: it writes pad-slot's slot i
+   (its position 0) and reads that slot's block."
+  [^long i ^long bs ^long width]
+  (vec (cons (quot i bs) (repeat (dec width) 0))))
+
+(defn- step-call!
+  "One compiled decode step (the family's compile-paged-step, consuming
+   the pools and the fresh states) of r rows, width wide: host vectors
+   of the rows' positions, block tables, write slots and tokens, and
+   their states ({:fresh :held}, nil without recurrent layers); its
+   shape counted (shape!). [logits states'], the pools it wrote stored
+   at once (it consumed those it was given)."
+  [{:keys [state step-fn] :as ctx} r width positions tables slots tokens {:keys [fresh held] :as states}]
+  (shape! state [:step r width (cond fresh :fresh (seq held) :held) (:size (:alloc @state))])
+  (let [pos (i32 positions)
+        tables (i32 tables)
+        sl (i32 slots)
+        [logits layers] (donating ctx #(let [out (if states
+                                                   (step-fn (merged (:pools @state) fresh) pos tables sl tokens held)
+                                                   (step-fn (:pools @state) pos tables sl tokens))]
+                                         (array/eval! out)
+                                         out))
+        [pools states'] (split-layers state layers)]
+    (vswap! state assoc :pools pools)
+    [logits states']))
 
 (defn- paged-rows!
   "paged-decode-step's step of slots (in the step's row order), padded
    to r rows, with the rows' states (step-states' {:fresh :held :lane}
    of r rows; nil for a family without recurrent layers), the fresh ones
    consumed by the step: the rows, in order."
-  [{:keys [state pool step-fn] :as ctx} slots tokens r {:keys [fresh held lane] :as states}]
+  [{:keys [state pool] :as ctx} slots tokens r {:keys [lane] :as states}]
   (let [n (count slots)
         r (long r)
         bs (long (:block-size @state))
         seqs (mapv #(or (entry state %) paged/empty-sequence) slots)
         [a seqs' write-slots copies] (prepared ctx seqs (repeat n 1))
         _ (copy-blocks! ctx a copies)
-        width (next-pow2 (reduce max 1 (map (comp count :blocks) seqs')))
-        ;; padding row i writes slot i of the scratch blocks, and reads it
-        pad-row (fn [^long i] (vec (cons (quot i bs) (repeat (dec width) 0))))
-        tables (i32 (into (mapv #(paged/table-row % width 0) seqs') (map pad-row) (range n r)))
-        pos (i32 (into (mapv :len seqs) (repeat (c/- r n) 0)))
-        all-slots (into (mapv first write-slots) (range n r))
-        sl (i32 all-slots)
-        toks (into (mapv #(vector (tokens %)) (range n)) (repeat (c/- r n) [0]))
-        [logits layers] (donating ctx #(let [out (if states
-                                                   (step-fn (merged (:pools @state) fresh) pos tables sl toks held)
-                                                   (step-fn (:pools @state) pos tables sl toks))]
-                                         (array/eval! out)
-                                         out))
-        [pools states'] (split-layers state layers)
-        ;; the step's pools at once (it consumed those it was given), the
-        ;; rest of the books once its rows are normalized: a failure then
-        ;; leaves every slot as it was, since what the step wrote lies past
-        ;; each sequence's end or in blocks the books still hold free (but
-        ;; a lane's, whose states it consumed: lost)
-        _ (vswap! state assoc :pools pools)
+        width (table-width seqs' bs)
+        ;; the step's pools are stored at once (step-call!), the rest of
+        ;; the books once its rows are normalized: a failure then leaves
+        ;; every slot as it was, since what the step wrote lies past each
+        ;; sequence's end or in blocks the books still hold free (but a
+        ;; lane's, whose states it consumed: lost)
+        [logits states'] (step-call! ctx r width
+                                     (into (mapv :len seqs) (repeat (c/- r n) 0))
+                                     (into (mapv #(paged/table-row % width 0) seqs') (map #(pad-table % bs width)) (range n r))
+                                     (into (mapv first write-slots) (map pad-slot) (range n r))
+                                     (into (mapv #(vector (tokens %)) (range n)) (repeat (c/- r n) [0]))
+                                     states)
         g (when states (new-states-group! state states' r))
-        rows (normalized pool (array/slice logits 0 0 n) lane)
+        rows (normalized pool [(array/slice logits 0 0 n)] lane)
         old (when g (groups-of state slots))]
     (vswap! state (fn [st] (cond-> (-> st
                                        (assoc :alloc a)
@@ -871,44 +991,50 @@
 
 (defn- forward-plan
   "Which of reads (gen.llm.slots/slots-forward's) a forward reads, and
-   its rows: every one-token read (decode rows, in order, padded to a
-   power of 2, at least min-rows), and chunks of the longer reads, first
+   its rows: every one-token read (decode rows, in order, their count
+   bucketed, at least min-rows), and chunks of the longer reads, first
    come first served: the first one's next chunk of what the budget
-   (n-batch tokens) leaves, at least a block (bs), its rows t padded to
-   a power of 2 within the budget; then the next longer reads' chunks of
-   at most t tokens each, padded to t rows, while the budget holds them,
-   at most max-chunks in all, and a power of 2 of them, so that a
-   forward's shapes are few (the rest wait a forward; genclj-6qb6).
-   {:decode [indices] :d-rows :chunks [indices] :cs [their tokens] :t}."
+   (n-batch tokens) leaves, at least a block (bs), its rows t bucketed
+   (genclj-i3fp: at least chunk-floor, and up, past what the budget
+   leaves when its tokens do); then the next longer reads' chunks of at
+   most t tokens each, t rows each, while the budget holds them, at most
+   max-chunks in all, and a power of 2 of them (the rest wait a forward;
+   genclj-6qb6). {:decode [indices] :d-rows :chunks [indices] :cs [their
+   tokens] :t}."
   [reads min-rows n-batch bs max-chunks]
   (let [decode (filterv #(one-token? (reads %)) (range (count reads)))
         d (count decode)
-        d-rows (if (pos? d) (max (long min-rows) (next-pow2 d)) 0)
+        d-rows (if (pos? d) (bucket d min-rows) 0)
         longer (remove #(one-token? (reads %)) (range (count reads)))
-        left (max (long bs) (c/- (long n-batch) d-rows))
         n-of #(count (:tokens (reads %)))
+        left (max (long bs) (c/- (long n-batch) d-rows))
         c (when (seq longer) (min (long (n-of (first longer))) left))
-        t (when c (min (next-pow2 c) (max (long c) left)))
-        k (when t (min (long max-chunks) (quot left (long t)) (count longer)))
+        t (when c (bucket c (chunk-floor bs n-batch)))
+        k (when t (min (long max-chunks) (max 1 (quot left (long t))) (count longer)))
         chunks (when t (vec (take (Long/highestOneBit k) longer)))]
     {:decode decode :d-rows d-rows :chunks (or chunks []) :t t
-     :cs (mapv #(min (long (n-of %)) (long t)) chunks)}))
+     :cs (into (if c [c] []) (map #(min (long (n-of %)) (long t))) (rest chunks))}))
+
+(defn- chunked
+  "States (by layer) as a chunk's: a GatedDeltaNet layer's {:chunk-conv
+   :chunk-state}."
+  [states]
+  (mapv #(if (contains? % :state) {:chunk-conv (:conv %) :chunk-state (:state %)} {}) states))
 
 (defn- chunk-states
   "{:fresh :held} the states (by layer, a row a chunk, a GatedDeltaNet
    layer's {:chunk-conv :chunk-state}) the chunks read into slots start
-   from. One chunk: zeros when it has none yet (fresh, the forward's
-   own), else its row's, read in place (held). Several: their rows
+   from. One chunk: its row's, read in place, or zeros when it has none
+   yet (held: one structure, so one trace a shape). Several: their rows
    stacked (stacked: a copy, zeros for a slot with none yet; fresh)."
   [{:keys [state] :as ctx} slots]
-  (let [chunked (fn [states] (mapv #(if (contains? % :state) {:chunk-conv (:conv %) :chunk-state (:state %)} {}) states))]
-    (cond
+  (cond
       (c/< 1 (count slots))
       {:fresh (chunked (stacked ctx (mapv #(when-let [e (nth (:rows @state) %)] [(:group e) (:row e)]) slots) (count slots)))}
       (nth (:rows @state) (first slots))
       {:held (chunked (row-states state (first slots)))}
       :else
-      {:fresh (chunked (zero-states ctx 1))})))
+      {:held (chunked (zero-states ctx 1))}))
 
 (defn- batch-layers
   "A forward's [pools decode-states chunk-states] of its layers (the
@@ -922,19 +1048,64 @@
      (mapv #(select-keys % [:conv :state]) layers)
      (mapv #(if (contains? % :chunk-state) {:conv (:chunk-conv %) :state (:chunk-state %)} {}) layers)]))
 
+(defn- states-kind
+  "How a call is given states ({:fresh :held}): :fresh, :held, or nil
+   (none): what its structure, and so its traces, depend on."
+  [{:keys [fresh held]}]
+  (cond fresh :fresh (seq held) :held))
+
+(defn- forward-call!
+  "One compiled forward (the family's compile-paged-batch-step, consuming
+   the pools and the fresh states) of batch's host vectors (:tokens, a
+   vector of [id] a row, :positions :slots :out, and when present
+   :tables, :chunk, :targets and :chunk-len, a vector a row each) and
+   the decode rows' and chunks' states ({:fresh :held}; nil for none),
+   its shape counted (shape!), not evaluated: [result decode-states'
+   chunk-states'], the pools it wrote stored at once (it consumed those
+   it was given), for the next call."
+  [{:keys [state batch-fn]} batch dstates cstates]
+  (let [{:keys [tokens out tables chunk targets]} batch
+        _ (shape! state [:forward (count tokens) (count out) (count tables) (count (first tables)) (count chunk)
+                         (count (first chunk)) (some? targets) (states-kind dstates) (states-kind cstates)
+                         (:size (:alloc @state))])
+        batch (update-vals batch i32)
+        res (if (contains? @state :rows)
+              (batch-fn (reduce merged (:pools @state) (keep :fresh [dstates cstates])) batch
+                        (reduce (fn [h s] (if (seq s) (if (seq h) (mapv merge h s) s) h)) [] (map :held [dstates cstates])))
+              (batch-fn (:pools @state) batch))
+        [pools dstates' cstates'] (batch-layers state res)]
+    (vswap! state assoc :pools pools)
+    [res dstates' cstates']))
+
+(defn- forward-calls!
+  "The compiled forwards of calls ([batch dstates cstates] each,
+   forward-call!'s), in order, each given the pools the last wrote,
+   evaluated together: their [result decode-states' chunk-states'], the
+   pools the last wrote stored. On failure every slot is lost
+   (donating)."
+  [ctx calls]
+  (donating ctx #(let [outs (mapv (fn [[batch ds cs]] (forward-call! ctx batch ds cs)) calls)]
+                   ;; the pools each call but the last wrote, the next
+                   ;; consumed: not evaluated (read) here
+                   (array/eval! (conj (mapv (fn [[res ds cs]] [(select-keys res [:logits :scores]) ds cs]) (pop outs))
+                                      (peek outs)))
+                   outs)))
+
 (defn- batch-forward!
   "slots-forward's body in the continuous mode (see the namespace's
-   docstring): the plan's reads made ready (copy-on-write), one compiled
-   forward of their rows (the family's compile-paged-batch-step,
-   consuming the pools, and the states it was given fresh), its pools
-   kept, its rows read and normalized on the host, then the rest of the
-   books written: a forward whose rows fail to normalize leaves its slots
-   as they were (but a lane's, whose states it consumed: lost). A family
-   with recurrent layers (Qwen3.5) reads its decode rows' states as a
-   paged step does (step-states, in their order) and the chunks' from
-   their rows (chunk-states), each chunk's padding rows past its
-   :chunk-len."
-  [{:keys [state pool batch-fn min-rows n-batch max-chunks] :as ctx} reads]
+   docstring): the plan's reads made ready (copy-on-write), the compiled
+   forwards of their rows (the family's compile-paged-batch-step,
+   consuming the pools, and the states they were given fresh): one of
+   the decode rows, one of the chunks, evaluated together, so that their
+   shapes are the decode rows' and the chunks' apart, not every pair
+   (genclj-i3fp). Their pools kept, their rows read and normalized on the
+   host, then the rest of the books written: a forward whose rows fail
+   to normalize leaves its slots as they were (but a lane's, whose
+   states it consumed: lost). A family with recurrent layers (Qwen3.5)
+   reads its decode rows' states as a paged step does (step-states, in
+   their order) and the chunks' from their rows (chunk-states), each
+   chunk's padding rows past its :chunk-len."
+  [{:keys [state pool min-rows n-batch max-chunks] :as ctx} reads]
   (let [bs (long (:block-size @state))
         {:keys [decode d-rows chunks cs t]} (forward-plan reads min-rows n-batch bs (or max-chunks 1))
         rows? (contains? @state :rows)
@@ -952,74 +1123,66 @@
         t (long (or t 0))
         nk (count chunks)
         read-c (long (reduce c/+ 0 cs))
-        r (c/+ d-rows (c/* nk t))
         dseqs (subvec seqs' 0 d)
         cseqs (subvec seqs' d)
-        width (next-pow2 (reduce max 1 (map (comp count :blocks) dseqs)))
-        cwidth (next-pow2 (reduce max 1 (map (comp count :blocks) cseqs)))
-        ;; a padding row writes the scratch slot of its row's index, and a
-        ;; padding decode row reads that slot's block
-        pad-table (fn [^long i] (vec (cons (quot i bs) (repeat (dec width) 0))))
-        ;; chunk j's rows (row i of it at (at j i)): its c tokens, then
-        ;; padding to t rows at its last position (seeing what that sees:
-        ;; within its table)
-        at (fn [j i] (c/+ d-rows (c/* (long j) t) (long i)))
+        ;; the decode rows' call: a token a row, padding rows after them
+        ;; (row i writing the scratch slot i), the logits of every row
+        dbatch (when (pos? d)
+                 (let [width (table-width dseqs bs)]
+                   {:tokens (into (mapv #(vector (first (:tokens (reads %)))) decode) (repeat (c/- d-rows d) [0]))
+                    :positions (into (mapv #(:pos (reads %)) decode) (repeat (c/- d-rows d) 0))
+                    :slots (into (mapv first (subvec write-slots 0 d)) (map pad-slot) (range d d-rows))
+                    :out (vec (range d-rows))
+                    :tables (into (mapv #(paged/table-row % width 0) dseqs) (map #(pad-table % bs width)) (range d d-rows))}))
+        ;; the chunks' call: chunk j's rows (row i of it at (at j i)), its
+        ;; c tokens, then padding to t rows at its last position (seeing
+        ;; what that sees: within its table), writing the scratch slots
+        ;; after the decode rows'
+        at (fn [j i] (c/+ (c/* (long j) t) (long i)))
         per-chunk (fn [f] (into [] (mapcat f) (map vector (range) chunks cs)))
-        tokens (-> []
-                   (into (map #(vector (first (:tokens (reads %))))) decode)
-                   (into (repeat (c/- d-rows d) [0]))
-                   (into (per-chunk (fn [[_ i c]]
-                                      (concat (map vector (subvec (:tokens (reads i)) 0 c)) (repeat (c/- t (long c)) [0]))))))
-        positions (-> []
-                      (into (map #(:pos (reads %))) decode)
-                      (into (repeat (c/- d-rows d) 0))
-                      (into (per-chunk (fn [[_ i c]]
-                                         (let [p (long (:pos (reads i))) c (long c)]
-                                           (concat (range p (c/+ p c)) (repeat (c/- t c) (c/+ p (dec c)))))))))
-        slots (-> []
-                  (into (map first) (subvec write-slots 0 d))
-                  (into (range d d-rows))
-                  (into (mapcat (fn [j sl c] (concat sl (range (at j (long c)) (at j t))))
-                                (range) (subvec write-slots d) cs)))
-        ;; the rows read: each decode row, each chunk's last when it ends
-        ;; its read, then the chunks' scored rows
-        ends (mapv (fn [i c] (c/== (long c) (count (:tokens (reads i))))) chunks cs)
-        ended (filterv ends (range nk))
-        lp-rows (into (vec (range d)) (map #(at % (dec (long (cs %))))) ended)
-        ;; each chunk's scored rows: those of its targets among its tokens
+        ;; the chunks' rows read: each chunk's last when it ends its read,
+        ;; then their scored rows (those of its targets among its tokens)
+        ended (filterv (fn [j] (c/== (long (cs j)) (count (:tokens (reads (chunks j)))))) (range nk))
         ks (mapv (fn [i c] (if-let [tg (:targets (reads i))] (min (long c) (count tg)) 0)) chunks cs)
-        out (into lp-rows (mapcat (fn [j k] (map #(at j (long %)) (range k))) (range) ks))
-        o (next-pow2 (count out))
-        targets (when (some pos? ks)
-                  (-> (vec (repeat (count lp-rows) 0))
-                      (into (mapcat (fn [i k] (when (pos? (long k)) (subvec (:targets (reads i)) 0 k))) chunks ks))
-                      (into (repeat (c/- o (count out)) 0))))
-        batch (cond-> {:tokens (i32 tokens) :positions (i32 positions) :slots (i32 slots)
-                       :out (i32 (into out (repeat (c/- o (count out)) 0)))}
-                (pos? d) (assoc :tables (i32 (into (mapv #(paged/table-row % width 0) dseqs) (map pad-table) (range d d-rows))))
-                (pos? nk) (assoc :chunk (i32 (mapv #(paged/table-row % cwidth 0) cseqs)))
-                targets (assoc :targets (i32 targets))
-                (and rows? (pos? nk)) (assoc :chunk-len (i32 cs)))
-        {:keys [logits scores] :as res}
-        (donating ctx #(let [res (if rows?
-                                   (batch-fn (reduce merged (:pools @state) (keep :fresh [dstates cstates])) batch
-                                             (reduce (fn [h s] (if (seq s) (if (seq h) (mapv merge h s) s) h)) [] (map :held [dstates cstates])))
-                                   (batch-fn (:pools @state) batch))]
-                         (array/eval! res)
-                         res))
-        [pools dstates' cstates'] (batch-layers state res)
-        ;; the forward's pools at once (it consumed those it was given),
-        ;; the rest of the books once its rows are read and normalized: a
+        scored? (some pos? ks)
+        cbatch (when (pos? nk)
+                 (let [cwidth (table-width cseqs bs)
+                       out (-> (mapv #(at % (dec (long (cs %)))) ended)
+                               (into (mapcat (fn [j k] (map #(at j (long %)) (range k))) (range) ks)))
+                       ;; the rows whose logits are computed, as many as
+                       ;; its other shapes allow at most: with scores,
+                       ;; each chunk's rows and its last; else its last
+                       o (long (if scored? (c/* nk (inc t)) nk))]
+                   (cond-> {:tokens (per-chunk (fn [[_ i c]]
+                                                 (concat (map vector (subvec (:tokens (reads i)) 0 c)) (repeat (c/- t (long c)) [0]))))
+                            :positions (per-chunk (fn [[_ i c]]
+                                                    (let [p (long (:pos (reads i))) c (long c)]
+                                                      (concat (range p (c/+ p c)) (repeat (c/- t c) (c/+ p (dec c)))))))
+                            :slots (vec (mapcat (fn [j sl c] (concat sl (map pad-slot (range (c/+ d-rows (long (at j c))) (c/+ d-rows (long (at j t)))))))
+                                                (range) (subvec write-slots d) cs))
+                            :out (into out (repeat (c/- o (count out)) 0))
+                            :chunk (mapv #(paged/table-row % cwidth 0) cseqs)}
+                     scored? (assoc :targets (-> (vec (repeat (count ended) 0))
+                                                 (into (mapcat (fn [i k] (when (pos? (long k)) (subvec (:targets (reads i)) 0 k))) chunks ks))
+                                                 (into (repeat (c/- o (count out)) 0))))
+                     rows? (assoc :chunk-len cs))))
+        ;; the forwards' pools are stored at once (forward-calls!), the
+        ;; rest of the books once their rows are read and normalized: a
         ;; failure then leaves every slot as it was, as a paged step's
-        ;; does, since what the forward wrote lies past each sequence's end
-        ;; or in blocks the books still hold free (but a lane's, whose
+        ;; does, since what the forwards wrote lies past each sequence's
+        ;; end or in blocks the books still hold free (but a lane's, whose
         ;; states it consumed: lost)
-        _ (vswap! state assoc :pools pools)
+        outs (forward-calls! ctx (cond-> []
+                                   dbatch (conj [dbatch dstates nil])
+                                   cbatch (conj [cbatch nil cstates])))
+        [dres dstates'] (when dbatch (first outs))
+        [cres _ cstates'] (when cbatch (peek outs))
         gd (when (and dstates (pos? d)) (new-states-group! state dstates' d-rows))
         gc (when (and rows? (pos? nk)) (new-states-group! state cstates' nk))
-        rows (when (seq lp-rows)
-               (normalized pool (if (c/== o (count lp-rows)) logits (array/slice logits 0 0 (count lp-rows))) (:lane dstates)))
-        sc (when targets (mapv double (array/->floats scores)))
+        rows (normalized pool [(when dres (array/slice (:logits dres) 0 0 d))
+                               (when (seq ended) (array/slice (:logits cres) 0 0 (count ended)))]
+                         (:lane dstates))
+        sc (when scored? (mapv double (array/->floats (:scores cres))))
         old (when rows? (groups-of state (mapv #(:slot (reads %)) chosen)))]
     (vswap! state (fn [st] (cond-> (-> st
                                        (assoc :alloc a)
@@ -1033,14 +1196,14 @@
     (tally! state :decode-rows d)
     (tally! state :chunk-rows read-c)
     (tally! state :chunks nk)
-    (tally! state :padded-rows (c/- r d read-c))
+    (tally! state :padded-rows (c/- (c/+ d-rows (c/* nk t)) d read-c))
     (when (and (pos? d) (pos? nk)) (tally! state :mixed-forwards 1))
     (let [by (zipmap decode (range))
           cj (zipmap chunks (range))
-          ;; chunk j's logits row among the rows read (when it ends its
-          ;; read), and its scores' offset in sc
-          lp-of (zipmap ended (range d (count lp-rows)))
-          sc-of (vec (reductions c/+ (count lp-rows) ks))]
+          ;; chunk j's row among the rows read (when it ends its read),
+          ;; and its scores' offset in sc
+          lp-of (zipmap ended (range d (c/+ d (count ended))))
+          sc-of (vec (reductions c/+ (count ended) ks))]
       (mapv (fn [i]
               (let [{:keys [targets]} (reads i)]
                 (if-let [j (cj i)]
@@ -1103,12 +1266,111 @@
   (toString [_] (str "#<ContinuousSlots " (:path (:model info)) ">")))
 
 ;; ---------------------------------------------------------------------------
+;; Shapes compiled when the engine opens (genclj-i3fp)
+;; ---------------------------------------------------------------------------
+
+(defn- warm!
+  "A compiled call of shape (shape! 's signature) made once, every row
+   padding: rows at position 0 writing the scratch blocks (row i its slot
+   i) and reading them, tables of block 0 and the scratch blocks, tokens
+   and targets 0, states zeros; its outputs released, the pools it wrote
+   kept. On MLX it traces the call and makes its kernels."
+  [{:keys [state] :as ctx} [kind & dims]]
+  (let [bs (long (:block-size @state))
+        z (fn [n] (zero-states ctx n))]
+    (case kind
+      :step (let [[r width skind] dims
+                  r (long r)
+                  states (case skind :fresh {:fresh (z r) :held []} :held {:held (z r)} nil)]
+              (array/release!
+               [(step-call! ctx r width (vec (repeat r 0)) (mapv #(pad-table % bs width) (range r)) (mapv pad-slot (range r))
+                            (vec (repeat r [0])) states)
+                (:held states)]))
+      :forward (let [[r o d width k cwidth targets? dkind ckind] dims
+                     r (long r)
+                     d (long d)
+                     k (long k)
+                     dstates (case dkind :fresh {:fresh (z d) :held []} :held {:held (z d)} nil)
+                     cstates (case ckind :fresh {:fresh (chunked (z k))} :held {:held (chunked (z k))} nil)
+                     [[res ds cs]] (forward-calls!
+                                    ctx
+                                    [[(cond-> {:tokens (vec (repeat r [0])) :positions (vec (repeat r 0))
+                                               :slots (mapv pad-slot (range r)) :out (vec (repeat o 0))}
+                                        (pos? d) (assoc :tables (mapv #(pad-table % bs width) (range d)))
+                                        (pos? k) (assoc :chunk (vec (repeat k (vec (repeat cwidth 0)))))
+                                        targets? (assoc :targets (vec (repeat o 0)))
+                                        (and (contains? @state :rows) (pos? k)) (assoc :chunk-len (vec (repeat k (quot (c/- r d) k)))))
+                                      dstates cstates]])]
+                 ;; the pools it wrote are the engine's (in :pools, and in
+                 ;; a Qwen3.5's :layers): not released
+                 (array/release! [(select-keys res [:logits :scores]) ds cs (:held dstates) (:held cstates)]))
+      ;; self-copies of blocks whose contents mean nothing (padded's)
+      :copy (let [[n] dims] (copy-call! ctx (mapv (fn [b] [b b]) (take n (concat (range (:scratch @state)) (:free (:alloc @state))))))))
+    nil))
+
+(defn- forward-shape
+  "A forward's shape (forward-call!'s signature but the pools' size): d
+   decode rows over tables of width, k chunks of t rows over tables of
+   cwidth, its logits' rows following (batch-forward!), with targets or
+   not, its decode rows' and chunks' states given as dkind and ckind."
+  [d width k t cwidth targets? dkind ckind]
+  (let [d (long d) k (long k) t (long t)]
+    [:forward (c/+ d (c/* k t)) (if targets? (c/+ d (c/* k (inc t))) (c/+ d k)) d (if (pos? d) width 0) k (if (pos? k) cwidth 0)
+     (boolean targets?) dkind ckind]))
+
+(defn- pow2s
+  "The powers of 2 from lo to hi."
+  [^long lo ^long hi]
+  (take-while #(c/<= (long %) hi) (iterate #(c/* 2 (long %)) lo)))
+
+(defn- precompiled
+  "The shapes an engine compiles when it opens (:precompile?), as
+   forward-shape's, [:step rows width states] and [:copy pairs]: the
+   shapes contexts up to min-span positions take (tables of its width),
+   most common first: a decode of each row count up to 16 (or the
+   slots'); a lone read's chunk of each length up to the budget, with
+   scores (an LM's extend) and without (an open); in the continuous
+   mode, several prompts' chunks of up to 64 tokens, with scores; and
+   copy-on-write's first pair counts. A forward's decode rows and chunks
+   are separate calls (batch-forward!), so these are its shapes."
+  [{:keys [continuous? min-rows n-batch max-chunks]} rows? ^long bs ^long n-slots]
+  (let [w (paged/blocks-for min-span bs)
+        n-batch (long n-batch)
+        rs (pow2s (bucket 1 min-rows) (min 16 (bucket n-slots min-rows)))
+        ts (pow2s (chunk-floor bs n-batch) (next-pow2 n-batch))
+        dkinds (if rows? [:fresh :held] [nil])]
+    (vec (concat (if continuous?
+                   (for [r rs, k dkinds] (forward-shape r w 0 0 0 false k nil))
+                   (concat (for [r rs, k dkinds] [:step r w k])
+                           ;; a run of one token (an LM's first)
+                           (for [k dkinds] (forward-shape 1 w 0 0 0 false k nil))))
+                 (for [t ts, targets? [false true]] (forward-shape 0 0 1 t w targets? nil (when rows? :held)))
+                 (when continuous?
+                   (for [t ts
+                         :while (c/<= (long t) 64)
+                         k (pow2s 2 (min (long max-chunks) (quot n-batch (long t))))]
+                     (forward-shape 0 0 k t w true nil (when rows? :fresh))))
+                 (for [n (pow2s 1 16)] [:copy n])))))
+
+(defn- precompile!
+  "shapes (precompiled's) compiled, each by one call (warm!): the
+   engine's :shapes then hold them, counting no call (nor :traces).
+   [shapes ms]."
+  [{:keys [state] :as ctx} shapes]
+  (let [t0 (System/nanoTime)]
+    (run! #(warm! ctx %) shapes)
+    (vswap! state (fn [s] (-> s
+                              (update :shapes update-vals (constantly 0))
+                              (assoc-in [:stats :traces] 0))))
+    [(count (:shapes @state)) (c// (double (c/- (System/nanoTime) t0)) 1e6)]))
+
+;; ---------------------------------------------------------------------------
 ;; Opening
 ;; ---------------------------------------------------------------------------
 
 (def ^:private defaults {:max-branches 32 :n-ctx 4096 :n-batch 256 :block 128
-                         :paged? false :block-size 16 :pool-blocks 128 :min-rows 1
-                         :continuous? false :wait 0.25 :max-chunks 16})
+                         :paged? true :block-size 16 :pool-blocks 128 :min-rows 1
+                         :continuous? false :wait 0.25 :max-chunks 16 :precompile? true})
 
 (def ^:private option-checks
   {:model #(or (and (string? %) (.isFile (java.io.File. ^String %)))
@@ -1116,7 +1378,8 @@
    :dtype #{:float16 :bfloat16 :float32 :float64}
    :max-branches pos-int? :n-ctx pos-int? :n-batch pos-int? :block pos-int?
    :paged? boolean? :block-size #{8 16 32} :pool-blocks pos-int? :min-rows pos-int?
-   :continuous? boolean? :wait #(and (number? %) (c/<= 0.0 (double %) 10.0)) :max-chunks pos-int?})
+   :continuous? boolean? :wait #(and (number? %) (c/<= 0.0 (double %) 10.0)) :max-chunks pos-int?
+   :precompile? boolean?})
 
 (defn- check-options
   "opts with their defaults, checked: a loud error for an unknown, missing
@@ -1138,8 +1401,8 @@
       (throw (ex-info "array-engine/engine: :dtype is for a GGUF file the engine loads; a model computes in its own"
                       {:reason :invalid-option :dtype (:dtype opts)})))
     (when (and (:continuous? opts) (not (:paged? opts)))
-      (throw (ex-info "array-engine/engine: :continuous? batches over the paged mode: give :paged? true too"
-                      {:reason :invalid-option :continuous? true})))
+      (throw (ex-info "array-engine/engine: :continuous? batches over the paged mode, which :paged? false turns off"
+                      {:reason :invalid-option :continuous? true :paged? false})))
     opts))
 
 (defn- model-backend
@@ -1151,17 +1414,17 @@
   "PagedSlots (with :continuous?, ContinuousSlots) for checked opts
    (:paged?), the model m loaded on backend b, its family's functions
    fam: the pools made, the step compiled."
-  [{:keys [model max-branches n-ctx n-batch block-size pool-blocks min-rows continuous? wait max-chunks]} m b fam]
+  [{:keys [model max-branches n-ctx n-batch block-size pool-blocks min-rows continuous? wait max-chunks precompile?] :as opts} m b fam]
   (when-not (:paged-pools fam)
     (throw (ex-info (str "array-engine/engine: the paged mode runs Qwen3 and Qwen3.5, not " (pr-str (arch-of model)))
                     {:reason :unsupported :architecture (arch-of model)})))
   (let [{:keys [vocab context] :as cfg} (:config m)
         n-ctx (long (if context (min (long n-ctx) (long context)) n-ctx))
         n-slots (inc (long max-branches))
-        ;; scratch blocks: a slot each for the most padding rows a step or
-        ;; forward has: its decode rows' and its chunks', which are at most
-        ;; the budget, or a block
-        scratch (paged/blocks-for (c/+ (next-pow2 (max (long min-rows) n-slots)) (max (long n-batch) (long block-size)))
+        ;; scratch blocks: a slot each for the most rows a step or forward
+        ;; has: its decode rows' and its chunks', which are at most the
+        ;; budget's bucket, or a block
+        scratch (paged/blocks-for (c/+ (bucket n-slots min-rows) (max (next-pow2 n-batch) (long block-size)))
                                   block-size)
         size (c/+ scratch (long pool-blocks))
         ;; a forward of decode rows and chunks (the continuous mode's, and a
@@ -1177,6 +1440,29 @@
                                         (if (pools? e) {:k (gpaged/put-blocks k (:k b) dst) :v (gpaged/put-blocks v (:v b) dst)} e))
                                       pools blocks))
                               {:donate #{0}})
+        state (volatile! (cond-> {:table (vec (repeat n-slots nil)) :family fam :block-size block-size :scratch scratch
+                                  :alloc (paged/allocator size scratch) :pools ((:paged-pools fam) m size block-size)
+                                  :shapes {}
+                                  :stats (if continuous?
+                                           (cond-> {:forwards 0 :decode-rows 0 :chunk-rows 0 :chunks 0 :padded-rows 0
+                                                    :mixed-forwards 0 :copied-blocks 0 :pool-grows 0 :traces 0}
+                                             (:paged-states fam) (assoc :lane-forwards 0 :held-forwards 0 :stacked-forwards 0))
+                                           (cond-> {:runs 0 :steps 0 :rows 0 :padded-rows 0 :copied-blocks 0
+                                                    :pool-grows 0 :forwards 0 :decode-rows 0 :chunk-rows 0 :chunks 0
+                                                    :mixed-forwards 0 :traces 0}
+                                             (:paged-states fam) (assoc :stacked-steps 0 :held-steps 0
+                                                                        :lane-forwards 0 :held-forwards 0 :stacked-forwards 0)))}
+                           ;; recurrent layers' states, a row each (Qwen3.5)
+                           (:paged-states fam) (assoc :rows (vec (repeat n-slots nil)) :next 0)))
+        pool (host/pool "gen.llm array rows-" (host/default-threads))
+        ctx (cond-> {:model m :state state :pool pool :n-batch n-batch :min-rows min-rows :gather-fn gather-fn :put-fn put-fn
+                     :batch-fn batch-fn :max-chunks max-chunks}
+              (not continuous?) (assoc :step-fn step-fn))
+        [n ms] (when precompile?
+                 (try (precompile! ctx (precompiled opts (contains? @state :rows) block-size n-slots))
+                      (catch Throwable t
+                        (.shutdown ^ExecutorService pool)
+                        (throw t))))
         info {:engine :gen.array
               :backend (array/backend-name b)
               :n-vocab vocab
@@ -1184,28 +1470,13 @@
               :n-ctx n-ctx
               :n-batch n-batch
               :paged (cond-> {:block-size block-size :pool-blocks pool-blocks :min-rows min-rows}
-                       continuous? (assoc :continuous? true :max-chunks max-chunks))
+                       continuous? (assoc :continuous? true :max-chunks max-chunks)
+                       precompile? (assoc :precompiled n :precompile-ms ms))
               :model (merge {:path (when (string? model) model) :arch (arch-of model)}
-                            (select-keys cfg [:layers :hidden :heads :kv-heads :head-dim :dtype :context]))}
-        state (volatile! (cond-> {:table (vec (repeat n-slots nil)) :family fam :block-size block-size :scratch scratch
-                                  :alloc (paged/allocator size scratch) :pools ((:paged-pools fam) m size block-size)
-                                  :stats (if continuous?
-                                           (cond-> {:forwards 0 :decode-rows 0 :chunk-rows 0 :chunks 0 :padded-rows 0
-                                                    :mixed-forwards 0 :copied-blocks 0 :pool-grows 0}
-                                             (:paged-states fam) (assoc :lane-forwards 0 :held-forwards 0 :stacked-forwards 0))
-                                           (cond-> {:runs 0 :steps 0 :rows 0 :padded-rows 0 :copied-blocks 0
-                                                    :pool-grows 0 :forwards 0 :decode-rows 0 :chunk-rows 0 :chunks 0
-                                                    :mixed-forwards 0}
-                                             (:paged-states fam) (assoc :stacked-steps 0 :held-steps 0
-                                                                        :lane-forwards 0 :held-forwards 0 :stacked-forwards 0)))}
-                           ;; recurrent layers' states, a row each (Qwen3.5)
-                           (:paged-states fam) (assoc :rows (vec (repeat n-slots nil)) :next 0)))
-        pool (host/pool "gen.llm array rows-" (host/default-threads))
-        ctx {:model m :state state :pool pool :n-batch n-batch :min-rows min-rows :gather-fn gather-fn :put-fn put-fn
-             :batch-fn batch-fn :max-chunks max-chunks}]
+                            (select-keys cfg [:layers :hidden :heads :kv-heads :head-dim :dtype :context]))}]
     (if continuous?
       (ContinuousSlots. m b ctx pool (assoc info :batching {:wait wait}) state)
-      (PagedSlots. m b (assoc ctx :step-fn step-fn) pool info state))))
+      (PagedSlots. m b ctx pool info state))))
 
 (defn- open-slots
   "ArraySlots (or with :paged?, PagedSlots) for checked opts, on the
@@ -1261,24 +1532,34 @@
      :n-ctx         the most tokens a branch holds (default 4096, at most
                     the model's context)
      :n-batch       tokens a forward of a read (default 256)
-     :block         positions a branch's capacity grows by (default 128)
-     :paged?        true: the paged mode (see the namespace's docstring;
-                    Qwen3 and Qwen3.5), with
-       :block-size  positions a block (8, 16 or 32; default 16)
-       :pool-blocks the pool's blocks at first (default 128), doubled
+     :paged?        the mode (see the namespace's docstring): true, the
+                    default, the paged mode; false, the static mode,
+                    with
+       :block       positions a branch's capacity grows by (default 128)
+     the paged mode's (Qwen3 and Qwen3.5):
+     :block-size    positions a block (8, 16 or 32; default 16)
+     :pool-blocks   the pool's blocks at first (default 128), doubled
                     when they run out
-       :min-rows    the fewest rows a step computes (default 1): rows
-                    are padded to a power of 2 at least this
-       :continuous? true: concurrent callers' reads batched (continuous
-                    batching; see the namespace's docstring), :n-batch
-                    then the tokens a forward reads at most (its long
-                    reads' chunks), with
-         :wait      how long a forward waits for the callers the last
+     :min-rows      the fewest rows a step computes (default 1): rows
+                    are bucketed, at least this
+     :precompile?   true (the default): the common shapes of its
+                    compiled calls compiled when it opens (Shapes, in
+                    the namespace's docstring; on Metal 1.2-2.2 s for
+                    the 0.6B and 0.8B in the paged mode, 2-4 s in the
+                    continuous mode, float32 the longer), so that serving
+                    does not stall on their traces; false for none
+     :continuous?   true: concurrent callers' reads batched (continuous
+                    batching, over the paged mode; see the namespace's
+                    docstring), which serving several clients at once
+                    needs; :n-batch then the tokens a forward reads at
+                    most (its long reads' chunks), with
+       :wait        how long a forward waits for the callers the last
                     one answered, at most, as a fraction of its time
                     (default 0.25; 0 never waits)
-         :max-chunks the most longer reads (prompts) a forward reads a
+       :max-chunks  the most longer reads (prompts) a forward reads a
                     chunk of (default 16; 1 reads one at a time), within
-                    :n-batch"
+                    :n-batch
+   :continuous? with :paged? false is an error."
   ^java.io.Closeable [opts]
   (let [opts (check-options opts)
         b array/*backend*]
@@ -1289,14 +1570,17 @@
    :steps :lane-steps (a lane group stepped in place) :stacked-steps
    (rows stacked into a new cache) :stacked-rows :grows (capacities
    grown)}; in the paged mode {:runs :steps :rows :padded-rows
-   :copied-blocks (copy-on-write) :pool-grows}, its runs' forwards
+   :copied-blocks (copy-on-write) :pool-grows :traces (calls of a shape
+   the engine had not called or compiled when it opened: on MLX, each a
+   trace; shapes has them)}, its runs' forwards
    counted as the continuous mode's (their padding in :padded-rows
    too), and for Qwen3.5
    :stacked-steps (steps whose rows' recurrent states were stacked, a
    copy) and :held-steps (read in place from a group others hold); in
    the continuous mode {:forwards :decode-rows :chunk-rows (prefill
    chunks' tokens) :chunks (prefill chunks) :padded-rows :mixed-forwards
-   (forwards of decode rows and chunks) :copied-blocks :pool-grows},
+   (forwards of decode rows and chunks) :copied-blocks :pool-grows
+   :traces},
    for Qwen3.5 with :lane-forwards :held-forwards :stacked-forwards (how
    the forwards with decode rows
    read their states), and gen.llm.slots/schedule the scheduler's
@@ -1318,6 +1602,24 @@
                     (let [{:keys [alloc table]} @(if (instance? PagedSlots s) (.-state ^PagedSlots s) (.-state ^ContinuousSlots s))]
                       {:free (paged/free-count alloc) :size (:size alloc)
                        :table (mapv #(when % [(:blocks %) (:len %)]) table)})
+                    (throw (ex-info "Not a paged gen.array engine (:paged?)" {:reason :not-paged :engine e}))))))
+
+(defn shapes
+  "Diagnostics of the paged modes (:paged?): the shapes of the engine's
+   compiled calls, {signature calls}, those compiled when it opened
+   (:precompile?) among them, each counting the calls since. A
+   signature is what keys a compiled call's traces (on MLX, mlx_compile
+   traces each once): [:forward rows logits-rows decode-rows width chunks
+   chunk-width targets? decode-states chunk-states pool-blocks] (the
+   continuous mode's forwards, the paged mode's runs), [:step rows width
+   states pool-blocks] (the paged mode's steps) or [:copy pairs
+   pool-blocks] (copy-on-write), the states :fresh (consumed), :held
+   (read in place) or nil (none). Its :traces stat counts the calls of a
+   shape the engine had not made."
+  [e]
+  (slots/call e (fn [s]
+                  (if (or (instance? PagedSlots s) (instance? ContinuousSlots s))
+                    (:shapes @(if (instance? PagedSlots s) (.-state ^PagedSlots s) (.-state ^ContinuousSlots s)))
                     (throw (ex-info "Not a paged gen.array engine (:paged?)" {:reason :not-paged :engine e}))))))
 
 (defn groups

@@ -1,6 +1,6 @@
 (ns gen.llm.array-engine-qwen35-paged-test
-  "gen.array's engine in its paged mode (:paged?, genclj-6qb6) running
-   Qwen3.5's family: its gated attention layers' keys and values in the
+  "gen.array's engine in its paged mode (the default, :paged?;
+   genclj-6qb6) running Qwen3.5's family: its gated attention layers' keys and values in the
    pool of blocks, its GatedDeltaNet layers' states a row each, shared by
    forks as the static mode's groups are. On the tiny random Qwen3.5 and
    Qwen3.5-MoE of test/fixtures/gguf (3 GatedDeltaNet blocks, then a
@@ -56,7 +56,7 @@
 (def ^:private paged-opts
   "Small blocks and pools, so that steps cross blocks, forks share partial
    blocks, and the pool grows."
-  {:paged? true :block-size 8 :pool-blocks 16 :n-batch 8})
+  {:block-size 8 :pool-blocks 16 :n-batch 8})
 
 (def ^:private engines (atom {}))
 
