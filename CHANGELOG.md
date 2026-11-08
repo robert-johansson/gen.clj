@@ -430,7 +430,7 @@ other values for the same key, from the same distribution.
   (`:unsupported`). Its info's `:model` gains `:arch`.
 
 - **Fixed (experimental): gen.llm.array-engine after a failed call**
-  (genclj-5t5l).
+  (genclj-5t5l, genclj-8ni2).
   - A score whose read fails in a call that consumes the paged pools
     (the paged and continuous modes) now loses every branch the pools
     held, loudly: its error names them (`:lost-slots`) and they are no
@@ -445,6 +445,15 @@ other values for the same key, from the same distribution.
     one that fails leaves its slot as it was. It used to leave the slot
     ahead of its branch, so that the branch's next operation failed as an
     engine bug.
+  - A continuous forward whose rows fail to normalize keeps its branches,
+    as a paged step does (genclj-8ni2). It used to lose every branch it
+    read (`:lost-slots`). A read begun in an earlier forward is still
+    lost.
+  - In the continuous mode, a score that loses every branch while other
+    callers' requests are in flight fails those requests too, as lost
+    (`:lost-slots`, their branches freed), and the operations waiting
+    for their branches run (genclj-8ni2). Their next forward used to fail
+    them as an engine bug (`:internal`).
 - **Fixed: `gen.llm.trie/insert` loops down a path** (gen.llm.trie,
   experimental; genclj-gn5i). insert recursed once for each node on the
   path it walked, so a trie with an entry at each of a few thousand
