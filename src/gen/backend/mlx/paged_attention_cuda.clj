@@ -2074,7 +2074,8 @@ __device__ void paged_attention_kernel(
 
 #undef MAX
 #undef MIN
-#undef DIVIDE_ROUND_UP")
+#undef DIVIDE_ROUND_UP
+")
 
 ;; /*
 ;;  * Adapted from

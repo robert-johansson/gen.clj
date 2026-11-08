@@ -232,11 +232,14 @@
     {:lens [1 7 16 17 100 255 0 513] :hq hq :hk hk :d d :bs bs :dtype dtype :seed 5}))
 
 (def ^:private kernel-band
-  "max |Δ| between the kernel and the composite, by dtype (values about
-   1): float32's round-off, and a half float's rounding of the output (an
-   ulp at 1 is 2^-10 in float16, 2^-7 in bfloat16), four times the largest
-   measured on Metal (Mac mini M4, 2026-11-07)."
-  {:float32 1e-5 :float16 4e-3 :bfloat16 3e-2})
+  "max |Δ| between the kernel and the composite, by kernel and dtype
+   (values about 1, a few up to 4): float32's round-off, and a half
+   float's rounding of the output (an ulp at 1 is 2^-10 in float16, 2^-7
+   in bfloat16), four times the largest measured: on Metal (Mac mini M4,
+   2026-11-07), and on CUDA (fenrir's RTX PRO 6000, 2026-11-08: 2.9e-6,
+   2.0e-3 and 1.6e-2, the half floats' an output ulp in [2, 4))."
+  {'gen.backend.mlx.paged-attention {:float32 1e-5 :float16 4e-3 :bfloat16 3e-2}
+   'gen.backend.mlx.paged-attention-cuda {:float32 1.2e-5 :float16 8e-3 :bfloat16 6e-2}})
 
 (defn- kernel-ns
   "The namespace of the kernel MLX's GPU computes paged-attention by:
@@ -275,7 +278,7 @@
               attend #(array/eval! (array/paged-attention (:q dn) kp vp tables lens))
               fused (attend)
               composite (with-redefs-fn {#'paged/fused-attention (fn [& _] nil)} attend)]
-          (is (<= (max-diff fused composite) (kernel-band (:dtype c))))
+          (is (<= (max-diff fused composite) (get-in kernel-band [(kernel-ns) (:dtype c)])))
           (when (= :float32 (:dtype c))
             (testing "a planted bug fails it: the kernel given each length one short"
               (let [v (kernel-var 'paged-attention)

@@ -27,7 +27,9 @@
    token SMC 325 against 940 (124 stacked steps of 8.5 rows on average).
    The array engine computes in gen.bench.dtype (float32, the backend's
    default float), with blocks of gen.bench.block positions (64).
-   gen.bench.sections (decode,smc) picks the rows.
+   gen.bench.sections (decode,smc) picks the rows; gen.bench.paged-kernel
+   false makes the paged modes attend by gen.array's composite, the
+   backend's kernel (Metal's or CUDA's) declined.
    Its paged mode (gen.bench.engines, of static, paged and llama;
    gen.bench.block-size 16, gen.bench.pool-blocks, gen.bench.min-rows),
    measured on the same Mac (2026-11-07, pool-blocks 128): float32 decode
@@ -97,7 +99,10 @@
    :wait (parse-double (prop "wait" 0.25))
    :clients (long-prop "clients" 8)
    :client-tokens (long-prop "client-tokens" 64)
-   :smc-clients (long-prop "smc-clients" 1)})
+   :smc-clients (long-prop "smc-clients" 1)
+   ;; false: the paged modes attend by gen.array's composite, the
+   ;; backend's kernel declined (Metal's or CUDA's; genclj-6qb6)
+   :paged-kernel (parse-boolean (prop "paged-kernel" true))})
 
 (defn- llama [sym] @(requiring-resolve (symbol "gen.llm.llama" (name sym))))
 
@@ -193,21 +198,17 @@
 (defn- row [label ms tokens]
   (println (format "| %-44s | %9.1f | %9.1f |" label ms (/ (* 1000.0 tokens) ms))))
 
-(defn -main [path & _]
-  (when-not (= :mlx (array/backend-name array/*backend*))
-    (throw (ex-info "Run on MLX: -J-Dgen.backend=mlx" {})))
-  (println "## gen.array's engine against llama.cpp's, through the protocols\n")
-  (println "- model:" path)
-  (println "- settings:" (pr-str settings))
-  (println "- os:" (System/getProperty "os.name") (System/getProperty "os.arch") "; java" (System/getProperty "java.version"))
+(defn- run
+  "-main's rows, for the model at path."
+  [path]
   (let [{:keys [batch steps particles smc-tokens prompt]} settings
         engines (filterv (fn [[k]] ((:engines settings) k))
                          [[:static "gen.array (MLX)" #(ae/engine {:model path :max-branches 64 :block (:block settings) :dtype (:dtype settings)})]
-                          [:paged (str "gen.array paged (MLX), min-rows " (:min-rows settings))
+                          [:paged (str "gen.array paged (MLX), min-rows " (:min-rows settings) (when-not (:paged-kernel settings) ", composite"))
                            #(ae/engine {:model path :max-branches 64 :dtype (:dtype settings) :paged? true
                                         :block-size (:block-size settings) :pool-blocks (:pool-blocks settings)
                                         :min-rows (:min-rows settings)})]
-                          [:continuous (str "gen.array continuous (MLX), wait " (:wait settings))
+                          [:continuous (str "gen.array continuous (MLX), wait " (:wait settings) (when-not (:paged-kernel settings) ", composite"))
                            #(ae/engine {:model path :max-branches 64 :dtype (:dtype settings) :paged? true :continuous? true
                                         :block-size (:block-size settings) :pool-blocks (:pool-blocks settings)
                                         :min-rows (:min-rows settings) :wait (:wait settings)})]
@@ -242,6 +243,16 @@
           (doseq [[k label make] engines]
             (with-open [^java.io.Closeable e (make)]
               (clients-rows label e tok prompt-tokens n)
-              (stats k e)))))))
+              (stats k e))))))))
+
+(defn -main [path & _]
+  (when-not (= :mlx (array/backend-name array/*backend*))
+    (throw (ex-info "Run on MLX: -J-Dgen.backend=mlx" {})))
+  (println "## gen.array's engine against llama.cpp's, through the protocols\n")
+  (println "- model:" path)
+  (println "- settings:" (pr-str settings))
+  (println "- os:" (System/getProperty "os.name") (System/getProperty "os.arch") "; java" (System/getProperty "java.version"))
+  (with-redefs-fn (if (:paged-kernel settings) {} {(requiring-resolve 'gen.array.paged/fused-attention) (fn [& _] nil)})
+    #(run path))
   (println "\nMLX memory:" (pr-str ((requiring-resolve 'gen.backend.mlx.memory/memory))))
   (shutdown-agents))
