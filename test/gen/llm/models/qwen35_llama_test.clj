@@ -154,7 +154,9 @@
    12.3 on every one); llama.cpp's 8-bit activations keep the rest inside
    it, as they keep Qwen3.5's dense errors inside 7.1. So off the Mac the
    forced planted errors are asserted past mutation-nats, as unforced,
-   and Metal's forced band is the check of the conventions."
+   and Metal's forced band is the check of the conventions. This test's
+   prompts there: forced 0.11 to 0.24, unforced 0.29 to 0.91; RoPE's
+   pairs forced 1.05 on the 44 tokens."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gen.llm.branching :as br]
             [gen.llm.models.against-llama :as against]
