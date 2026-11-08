@@ -144,6 +144,11 @@ the appendices (`060-appendices.md`):
 - `;=> value ; float64` for a sampled value: a key draws other values in
   float32 (MLX). Results of chains and importance samplers, which can
   differ across precisions, are either marked so or stated as checks.
+  The mark also covers the last bits of the JVM's exp, log, pow, tanh and
+  sin, which HotSpot rounds by platform: a chaotic run (NUTS's warmup, a
+  network's training) ends elsewhere on x86-64, so the values are checked
+  only where they were recorded (`gen.book/reference-math?`), and its
+  claims must be checks with bands.
 - **A statistical claim is a check with a band from its standard error**
   (five standard errors, or an exact value from theory), written in the
   code and shown as `;=> true`. Choose thresholds that hold on every

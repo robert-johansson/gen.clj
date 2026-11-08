@@ -27,8 +27,12 @@ and its code is verified for real (DESIGN.md §9).
     two values must agree up to rounding (a score and its sum by hand),
     state it so: `(array/allclose? a b)` and `;=> true`.
   - `;=> value ; float64` is checked only where the default float is
-    float64. Sampled values carry it, since a key draws other values in
-    float32.
+    float64, and the JVM rounds exp, log, pow, tanh and sin as where the
+    values were recorded (`gen.book/reference-math?`: aarch64, not
+    x86-64). Sampled values carry it, since a key draws other values in
+    float32, and a chaotic computation (a NUTS run's adaptation, a
+    network's training) follows those functions' last bits. The figures
+    are compared where they are.
   - A statistical claim is a check in the code, with a band from the
     estimator's standard error, shown as `;=> true`.
   - `;; error: message` as a region's first line shows a loud error. Its
