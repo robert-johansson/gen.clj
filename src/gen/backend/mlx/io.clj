@@ -173,6 +173,8 @@
       (libc-call path :mincore segment (long size) v)
       {:path path :segment segment :page page :vector v})))
 
+;; read by gen.array.gguf-test's file-cache check
+#_{:clj-kondo/ignore [:unused-private-var]}
 (defn- cached-bytes
   "The bytes of the file at path in the file cache now (whole pages)."
   ^long [path]
