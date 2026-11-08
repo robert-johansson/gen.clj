@@ -6437,3 +6437,60 @@ its 34 shapes in 10–18.5 s. No traces after open, so the set stays as it is.
    the gen.array hook for clearing MLX's buffer cache after the open-time
    warm-up ("The paged default and shapes compiled at open, as built",
    choice 3).
+
+### The open-time compile gives back MLX's buffer cache: gen.array/release-cache!
+
+(The owner's call of 2026-11-08, item 3, built; the choices inside it
+PROVISIONAL, owner to confirm; genclj-v1kg)
+
+**The cause is confirmed.**
+- The open-time compile's warm calls leave 1.9 GB of buffers in MLX's buffer
+  cache, against a limit of 2.1 GB (ram/16).
+- So the steps' freed buffers find the cache full. MLX frees them and makes
+  new ones, each new one costing a Metal buffer and a residency-set commit.
+- The cost is 2–3%, not 4%. Qwen3.5-0.8B paged SMC at 16 particles,
+  tokens/s (4–5 JVMs a setting, the medians):
+
+  | Setting | f16 | f32 |
+  |---|---:|---:|
+  | no precompile | 964 | 770 |
+  | precompile | 939 | 753 |
+  | precompile, the cache cleared after open | 964 | 775 |
+
+**The hook.** `gen.array/release-cache! [b]` (experimental), behind the
+optional protocol ICaching.
+- MLX clears its buffer cache under the evaluation lock (on CUDA, on its
+  evaluation thread). The JVM backend does nothing, and a wrapping backend
+  passes the call on, as device does.
+- Its docstring says it's for runtimes, never semantics code (rule 3).
+- The engine's precompile! calls it once, after the warm calls.
+- Tests:
+  - mlx-test's the-buffer-cache-is-released covers MLX, the batch tracer and
+    the JVM backend;
+  - array-engine-paged-test's the-compile-at-open-gives-back-its-cache checks
+    the call is made once, on the model's backend, never without
+    `:precompile?`, and that MLX's cache is empty after open.
+- Planted bugs: MLX's release freeing nothing fails 3 checks; the wrapping
+  branch removed fails 1; the engine's call removed fails 2.
+
+**Measured against main** (alternated, three JVMs each):
+- Qwen3.5-0.8B SMC 16: f16 933–941 → 954–971; f32 705–758 → 772–778.
+- 8 clients: unchanged.
+- Qwen3-0.6B: unchanged, within noise. Its steps hold only 0.5–0.6 GB of
+  cache.
+- Open times and time to first token: unchanged.
+
+**The choices, for the owner:**
+1. **The name** release-cache!, with ICaching: release is gen.array.memory's
+   verb. Not taken: clear-cache! (MLX's name, which could read as a memo
+   cache); trim-cache!; a second method on IReleasing.
+2. **Clear once after the compile.** Not taken: raising MLX's default cache
+   limit (6 GB also worked, but every MLX JVM could then hold 4 GB more);
+   warming up with the limit at 0 (needs a set-limit hook); a smaller set;
+   `:precompile?` false by default.
+3. **It runs on every backend,** CUDA included, where it's unmeasured.
+   cudaFree synchronizes, but only once at open. Not taken: Metal only.
+4. **A finding:** Qwen3.5's SMC steps alone fill the 2.1 GB default. On a
+   16 GB Mac the limit is 1 GB, so its steps would likely miss the cache even
+   without the warm-up. Unmeasured; whether ram/16 should change is the
+   owner's call.
