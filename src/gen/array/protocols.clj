@@ -156,6 +156,10 @@
        :paged-write [k-pool v-pool k v slots]
                                   k and v of the pools' dtype; the value
                                   [k-pool' v-pool']
+       :put-blocks [pool blocks dst]
+                                  blocks [M …] of pool's dtype written at
+                                  its blocks dst [M] (gen.array.paged's,
+                                  internal); the value pool'
        :paged-attention [q k-pool v-pool tables lens opts]
                                   opts {:scale}, a host number; q and the
                                   pools of one dtype; tables and lens int

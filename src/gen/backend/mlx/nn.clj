@@ -114,6 +114,7 @@
                      (when (and (not *differentiating*) (= :gpu (device b)) @mac? (gated-delta/applies? b q))
                        (gated-delta/gated-delta b q k v g beta state)))
       :paged-write (let [[k-pool v-pool k v slots] args] (paged/paged-write b k-pool v-pool k v slots))
+      :put-blocks (let [[pool blocks dst] args] (paged/put-blocks b pool blocks dst))
       :paged-attention (let [[q k-pool v-pool tables lens opts] args]
                          ;; kernels-community's paged_attention kernel:
                          ;; Metal only, no VJP (applies? declines both)

@@ -256,34 +256,20 @@
   [entry]
   (contains? entry :k))
 
+
 (defn copied
   "A layer's entry with a step's copy written first (layer i's), when it
-   is pools: the rows :rows (int32 [M]) of the layer's :blocks ({:k :v},
-   each [S …] blocks of the pools' layouts) at the blocks :dst (int32
-   [M], distinct). The blocks are an input of the step, read before it (a
-   previous step's tails, or paged-blocks evaluated alone): a call that
-   read its pools' blocks and then wrote the pools would copy each pool
-   on MLX, the read still holding it (genclj-6qb6)."
+   is pools: the layer's :blocks ({:k :v}, each [M …] blocks of the pools'
+   layouts) at the blocks :dst (int32 [M], distinct). The blocks are an
+   input of the step, read (and evaluated) before it (paged-blocks): a
+   call that read its pools' blocks and then wrote the pools would copy
+   each pool on MLX, the read still holding it (genclj-6qb6)."
   [entry copy i]
-  (if-let [{:keys [blocks rows dst]} (when (pool? entry) copy)]
+  (if-let [{:keys [blocks dst]} (when (pool? entry) copy)]
     (let [{bk :k bv :v} (nth blocks i)]
-      {:k (paged/put-blocks (:k entry) (array/take bk rows 0) dst)
-       :v (paged/put-blocks (:v entry) (array/take bv rows 0) dst)})
+      {:k (paged/put-blocks (:k entry) bk dst)
+       :v (paged/put-blocks (:v entry) bv dst)})
     entry))
-
-(defn with-tails
-  "An attention layer's pools {:k :v} after a step's writes, with their
-   blocks tails (int32 [T]) as :tails {:k [T …] :v [T …]} when given."
-  [{:keys [k v] :as entry} tails]
-  (cond-> entry
-    tails (assoc :tails {:k (array/take k tails 0) :v (array/take v tails 0)})))
-
-(defn split-tails
-  "[layers tails] of a step's entries: the layers, and their :tails by
-   layer ({} for a layer without), nil when the step read none."
-  [entries]
-  [(mapv #(dissoc % :tails) entries)
-   (when (some :tails entries) (mapv #(or (:tails %) {}) entries))])
 
 (defn paged-blocks
   "The blocks ids (int32 [M]) of a step's layers' pools, by layer: {:k
@@ -291,35 +277,28 @@
   [layers ids]
   (mapv (fn [{:keys [k v] :as e}] (if (pool? e) {:k (array/take k ids 0) :v (array/take v ids 0)} {})) layers))
 
-(defn- int-vector? [x]
-  (and (array/array? x) (= 1 (array/ndim x)) (= :int (array/dtype-kind (array/dtype x)))))
-
-(defn check-extra
-  "A step's :copy and :tails (a paged step's options, a batch's keys)
-   against its layers; bad (a fn of a message and data) throws."
-  [layers {:keys [copy tails]} bad]
+(defn check-copy
+  "A step's :copy (a paged step's option, a batch's key) against its
+   layers; bad (a fn of a message and data) throws."
+  [layers copy bad]
   (when copy
-    (when-not (and (map? copy) (= #{:blocks :rows :dst} (set (keys copy))))
-      (bad ":copy is a map {:blocks :rows :dst}" {:copy (if (map? copy) (vec (keys copy)) copy)}))
-    (let [{:keys [blocks rows dst]} copy
-          block-shape (fn [x] (rest (array/shape x)))]
-      (doseq [[what x] [[:rows rows] [:dst dst]]]
-        (when-not (int-vector? x)
-          (bad (str ":copy's " what " must be an int array [M]") {what (when (array/array? x) (array/shape x))})))
-      (when-not (= (array/shape rows) (array/shape dst))
-        (bad ":copy's :rows and :dst must be [M] alike" {:rows (array/shape rows) :dst (array/shape dst)}))
+    (when-not (and (map? copy) (= #{:blocks :dst} (set (keys copy))))
+      (bad ":copy is a map {:blocks :dst}" {:copy (if (map? copy) (vec (keys copy)) copy)}))
+    (let [{:keys [blocks dst]} copy
+          block-shape (fn [x] (rest (array/shape x)))
+          m (when (array/array? dst) (first (array/shape dst)))]
+      (when-not (and (array/array? dst) (= 1 (array/ndim dst)) (= :int (array/dtype-kind (array/dtype dst))))
+        (bad ":copy's :dst must be an int array [M]" {:dst (when (array/array? dst) (array/shape dst))}))
       (when-not (and (vector? blocks) (= (count layers) (count blocks))
                      (every? (fn [[e {:keys [k v] :as b}]]
                                (if (pool? e)
                                  (and (array/array? k) (array/array? v)
                                       (= (block-shape (:k e)) (block-shape k)) (= (block-shape (:v e)) (block-shape v))
-                                      (= (first (array/shape k)) (first (array/shape v))))
+                                      (= m (first (array/shape k)) (first (array/shape v))))
                                  (= {} b)))
                              (map vector layers blocks)))
-        (bad ":copy's :blocks must be a vector, by layer, of {:k :v}: blocks of the pools' layouts ({} for a layer without)"
-             {:blocks (if (vector? blocks) (count blocks) blocks)}))))
-  (when (and tails (not (int-vector? tails)))
-    (bad ":tails must be an int array [T] of block ids" {:tails (when (array/array? tails) (array/shape tails))})))
+        (bad ":copy's :blocks must be a vector, by layer, of {:k :v}: M blocks of the pools' layouts ({} for a layer without)"
+             {:blocks (if (vector? blocks) (count blocks) blocks)})))))
 
 (defn present
   "opts without its nil values: a tree of arrays alone (compile's

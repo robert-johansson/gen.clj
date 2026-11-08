@@ -89,23 +89,38 @@ other values for the same key, from the same distribution.
     llama.cpp (175 against 82 and 92 in float32); a lone caller as
     before.
 
-- **Changed (experimental): copy-on-write inside the paged step**
-  (genclj-6qb6). **Breaking** for callers of the paged steps:
-  - `gen.llm.models.qwen3/paged-step` and `compile-paged-step`'s
-    function return `[logits pools' tails]`. They take options `:copy`
-    `{:blocks :rows :dst}` (blocks written into the pools before the
-    step's keys and values, read before the step) and `:tails` (block
-    ids [T], read back after the step's writes: the third value).
-    `paged-batch-step` takes `:copy` and `:tails` in its batch and gives
-    `:tails`.
-  - New: `qwen3/paged-blocks` (a copy's blocks, gathered) and
-    `qwen3/paged-write-entries` (a run's writes after its copy).
-  - `gen.llm.array-engine`'s paged and continuous modes write a step's
-    copies in the step itself. A step that copies reads back the blocks
-    it wrote, and the next step's copies come from there: token SMC's
-    steps make no call but the step. Other copies' blocks are gathered
-    first, one call (`stats`' new `:copy-reads`). The values are the
-    same.
+- **Changed (experimental): the paged mode copies a block only for a
+  second writer, inside its step; Qwen3.5 runs paged** (genclj-6qb6,
+  genclj-1ovd).
+  - `gen.llm.paged`: an allocator records each block's written offsets
+    (`:written`, `paged/written`). `prepare` appends to a shared block
+    filled in part in place when no holder has written past the
+    sequence's end, and copies it only otherwise: an LM's kept entry and
+    the fork that goes on from it share the block, and only a second
+    writer (a resampled duplicate, or the entry itself written later)
+    copies. The values read are the same; the copies, and `stats`'
+    `:copied-blocks`, are fewer.
+  - `gen.llm.models.qwen3`: `paged-step`, `compile-paged-step`'s
+    function and `paged-batch-step` take `:copy {:blocks :dst}`, blocks
+    (gathered before the step: the new `paged-blocks`) written into the
+    pools before the step's keys and values. New: `paged-write-entries`,
+    a run's writes after its copy. The engine's copies go there, so a
+    copy-on-write is a gather and the step, not three calls.
+  - `gen.llm.models.qwen35`: `paged-pools`, `paged-states`,
+    `paged-cache`, `paged-entries`, `paged-write-entries`,
+    `paged-blocks`, `paged-step` and `compile-paged-step`: the attention
+    layers' keys and values in paged pools, the GatedDeltaNet layers'
+    states a row each, the step's layers the two merged by layer.
+  - `gen.llm.array-engine`: `:paged? true` runs Qwen3.5 and Qwen3.6
+    (`:continuous?` stays Qwen3's, loud otherwise). A branch's recurrent
+    states are a row of a group, as the static mode's: a lane steps in
+    place, any other step stacks its rows' states (`stats`'
+    `:stacked-steps`).
+  - `p/IFused` gains `:put-blocks` (gen.array.paged's block write): on
+    MLX one scatter of the blocks as slices.
+  - The donated writes' cost of 8 ms a GB (genclj-1daf) was the GC that
+    genclj-c7uf removed: on Metal a write into pools of 0.14 to 3 GB now
+    takes 0.3-0.7 ms whatever their size.
 
 - **Added (experimental): LoRA adapters, `gen.llm.lora`** (genclj-yc3b,
   genclj-p4mk): low-rank adapters trained beside a model's frozen, dense

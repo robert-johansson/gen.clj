@@ -907,7 +907,7 @@
    value-heads value-dim key-dim]} and an attention layer's {}: zeros
    (the start) with rows, or a concatenating cache's (one after a read,
    paged-cache's)."
-  [{:keys [config] :as m} rows-or-cache]
+  [m rows-or-cache]
   (if (integer? rows-or-cache)
     (mapv #(select-keys % [:conv :state]) (:layers (static-cache m rows-or-cache 1)))
     (mapv #(select-keys % [:conv :state]) (:layers rows-or-cache))))
@@ -975,8 +975,8 @@
    over layer i's pools: the step's copy written, each row's key and value
    written at its slot (at its position, rotated there), then attention
    over each row's blocks (tables) to its position, gated: [its output,
-   the pools after x, with their :tails when asked]."
-  [{:keys [heads kv-heads head-dim] :as cfg} w x {:keys [positions tables slots copy tails]} i entry]
+   the pools after x]."
+  [{:keys [heads kv-heads head-dim] :as cfg} w x {:keys [positions tables slots copy]} i entry]
   (let [r (first (array/shape x))
         [q k v gate] (gated-qkv cfg w x positions)
         e (common/copied entry copy i)
@@ -986,21 +986,20 @@
     [(-> (array/reshape o [r 1 (c/* (long heads) (long head-dim))])
          (* (array/sigmoid gate))
          (common/linear (:o w)))
-     (common/with-tails {:k kp :v vp} tails)]))
+     {:k kp :v vp}]))
 
 (defn- paged-forward
-  "[logits [R 1 vocab], the layers after the tokens, the tails (or nil)]
-   of one token a row (paged-step's): arrays in and arrays out, the step
-   compile-paged-step compiles."
+  "[logits [R 1 vocab], the layers after the tokens] of one token a row
+   (paged-step's): arrays in and arrays out, the step compile-paged-step
+   compiles."
   [{:keys [kinds] :as cfg} weights layers positions tables slots ids extra]
-  (let [at (merge {:positions positions :tables tables :slots slots} (select-keys extra [:copy :tails]))
-        [logits entries] (logits-of cfg weights ids
-                                    (fn [i w x]
-                                      (if (= :attention (kinds i))
-                                        (paged-attention cfg w x at i (nth layers i))
-                                        (delta-net cfg w x (nth layers i))))
-                                    :last)]
-    (into [logits] (common/split-tails entries))))
+  (let [at {:positions positions :tables tables :slots slots :copy (:copy extra)}]
+    (logits-of cfg weights ids
+               (fn [i w x]
+                 (if (= :attention (kinds i))
+                   (paged-attention cfg w x at i (nth layers i))
+                   (delta-net cfg w x (nth layers i))))
+               :last)))
 
 (defn- check-paged
   "The paged step's operands: layers of the model's kinds, R rows, and
@@ -1023,18 +1022,18 @@
         (throw (invalid (str (name what) " must be [R] " shape ", not " (array/shape x)) {what (array/shape x)}))))
     (when-not (and (= 2 (array/ndim tables)) (= r (first (array/shape tables))))
       (throw (invalid (str "tables must be [R MB] for " r " rows, not " (array/shape tables)) {:tables (array/shape tables)})))
-    (common/check-extra layers extra #(throw (invalid (str "paged-step: " %1) %2)))))
+    (common/check-copy layers (:copy extra) #(throw (invalid (str "paged-step: " %1) %2)))))
 
-(def ^:private step-options #{:copy :tails})
+(def ^:private step-options #{:copy})
 
 (defn paged-step
-  "[logits layers' tails]: qwen3/paged-step's, the logits [R 1 vocab] of
+  "[logits layers']: qwen3/paged-step's, the logits [R 1 vocab] of
    one token a row, for Qwen3.5's layers: layers is a vector by layer,
    each attention layer's paged pools (paged-pools'), each GatedDeltaNet
    layer's states of the step's R rows, in row order (paged-states', or
    a step's), merged; layers' the same after the tokens: the pools
    written, the states the rows' next. positions, tables, slots, tokens
-   and the options (:copy, :tails) are qwen3/paged-step's, for the
+   and the options (:copy) are qwen3/paged-step's, for the
    attention layers. Its logits are a static cache's within float
    round-off; the layers are values (compile-paged-step's :donate?
    consumes them instead)."
@@ -1049,7 +1048,7 @@
 (defn compile-paged-step
   "paged-step compiled by array/compile, as qwen3/compile-paged-step: a
    function (f layers positions tables slots tokens) or (… opts) →
-   [logits layers' tails]. Options: :donate? true, each call consumes the
+   [logits layers']. Options: :donate? true, each call consumes the
    layers it steps (the pools written in place on MLX, the states'
    buffers reused)."
   ([m] (compile-paged-step m nil))

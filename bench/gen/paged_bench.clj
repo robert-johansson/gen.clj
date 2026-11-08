@@ -16,13 +16,18 @@
    - static: qwen3's compiled, donating static step at gen.bench.rows (8)
      rows by capacity (gen.bench.capacities, 256,1024,2048);
    - cow: one paged decode step of 16 rows over the model's pools
-     (gen.bench.pool-blocks a layer, 256), every row's last block shared
-     (copy-on-write) and copied by each form: none (no copy), two-calls
+     (gen.bench.pool-blocks a layer, 256), m of them (16, 2) copying their
+     last block (copy-on-write) by each form: none (no copy), two calls
      (the blocks gathered and evaluated, put by a donating call, then the
-     step: 1daf's), gathered (the blocks gathered and evaluated, then the
-     step with its :copy), tails (the step's :copy from the last step's
-     :tails, and its own :tails read) and tails-only (no copy, :tails
-     read: the tails' own cost).
+     step: 1daf's), the same by put-along-axis (1daf's put, before the
+     fused scatter of gen.backend.mlx.paged/put-blocks), and in the step
+     (the blocks gathered and evaluated, then the step with its :copy).
+   Measured on the Mac mini M4 (2026-11-08, Qwen3-0.6B-Q8_0, MLX 0.32.4):
+   - write: 0.33-0.65 ms into one pair of 0.14 to 3 GB, 1.2-1.9 ms into
+     28 pairs, no collections: flat in the pools' size;
+   - static: 27.6, 27.9, 29.1 ms at 0.47, 1.9, 3.8 GB;
+   - cow (before the fused put, every row copying, float32): none 21.9
+     ms, two calls 25.7, in the step 27.0.
    The model computes in gen.bench.dtype (float32)."
   (:require [clojure.string :as str]
             [gen.array :as array]
@@ -143,32 +148,46 @@
         dst (vec (for [i (range r)] (+ (* r per-row) i)))
         tables (fn [last-blocks] (i32 (for [i (range r)] (conj (vec (range (* i per-row) (dec (* (inc i) per-row)))) (last-blocks i)))))
         own (tables src)
-        copied (tables dst)
         positions (i32 (repeat r len))
         slots-at (fn [blocks] (i32 (map #(+ (* (long %) bs) (rem len bs)) blocks)))
         toks (vec (repeat r [7]))
-        tails (atom nil)
         run (fn [opts tbl sl]
-              (let [[logits p t] (step @pools positions tbl sl toks opts)]
-                (array/eval! (cond-> [logits p] t (conj t)))
-                (reset! pools p)
-                (when t (reset! tails t))))]
-    (println "\n### A paged step of" r "rows, each copying its last block, by the copy's form\n")
+              (let [[logits p] (step @pools positions tbl sl toks opts)]
+                (array/eval! [logits p])
+                (reset! pools p)))
+        ;; the put-along-axis composite, the put before the fused scatter
+        put-composite (array/compile (fn [pools blocks dst]
+                                       (mapv (fn [{:keys [k v]} b]
+                                               (let [put (fn [pool x]
+                                                           (let [s (array/shape x)]
+                                                             (array/put-along-axis pool (array/broadcast-to (array/reshape dst (into [(first s)] (repeat (dec (count s)) 1))) s)
+                                                                                   x 0)))]
+                                                 {:k (put k (:k b)) :v (put v (:v b))}))
+                                             pools blocks))
+                                     {:donate #{0}})]
+    (println "\n### A paged step of" r "rows, m of them copying their last block, by the copy's form\n")
     (println "- pools:" nb "blocks a layer," (:dtype settings))
     (header)
     (row "none (the rows' own blocks, no copy)" (timed #(run nil own (slots-at src))))
-    (row "two-calls (gather, evaluated; donated put; step)"
-         (timed #(let [b (doto (gather @pools (i32 src)) array/eval!)
-                       p (doto (put @pools b (i32 dst)) array/eval!)]
-                   (reset! pools p)
-                   (run nil copied (slots-at dst)))))
-    (row "gathered (gather, evaluated; the step's :copy)"
-         (timed #(let [b (doto (gather @pools (i32 src)) array/eval!)]
-                   (run {:copy {:blocks b :rows (i32 (range r)) :dst (i32 dst)}} copied (slots-at dst)))))
-    (run {:tails (i32 dst)} copied (slots-at dst))
-    (row "tails (the step's :copy from the last :tails, and its own)"
-         (timed #(run {:copy {:blocks @tails :rows (i32 (range r)) :dst (i32 dst)} :tails (i32 dst)} copied (slots-at dst))))
-    (row "tails-only (no copy; :tails read)" (timed #(run {:tails (i32 src)} own (slots-at src))))))
+    (doseq [m [r 2]]
+      (let [mixed (fn [xs ys] (into (subvec ys 0 m) (subvec xs m)))
+            tbl (tables (mixed src dst))
+            sl (slots-at (mixed src dst))
+            from (i32 (subvec src 0 m))
+            to (i32 (subvec dst 0 m))]
+        (row (str "m " m ": two calls, put-along-axis (gather; donated put; step)")
+             (timed #(let [b (doto (gather @pools from) array/eval!)
+                           p (doto (put-composite @pools b to) array/eval!)]
+                       (reset! pools p)
+                       (run nil tbl sl))))
+        (row (str "m " m ": two calls (gather; donated put; step)")
+             (timed #(let [b (doto (gather @pools from) array/eval!)
+                           p (doto (put @pools b to) array/eval!)]
+                       (reset! pools p)
+                       (run nil tbl sl))))
+        (row (str "m " m ": in the step (gather; the step's :copy)")
+             (timed #(let [b (doto (gather @pools from) array/eval!)]
+                       (run {:copy {:blocks b :dst to}} tbl sl))))))))
 
 (defn -main [path & _]
   (when-not (= :mlx (array/backend-name array/*backend*))

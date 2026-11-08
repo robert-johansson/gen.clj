@@ -43,3 +43,17 @@
               ;; mlx-test's every-handle-made-is-registered-wrapped-or-returned)
               ko (wrap b (Mlx/mlx_scatter hkp idx ku axes s))]
           [ko (wrap b (Mlx/mlx_scatter hvp idx vu axes s))])))))
+
+(defn put-blocks
+  "pool' of gen.array.paged/put-blocks's operands (MlxArrays of backend
+   b, blocks [M …] of pool's dtype, dst [M]): one scatter on axis 0, each
+   block a slice, in place under array/compile's :donate as paged-write's
+   (put-along-axis's composite indexes every element on every axis)."
+  [b pool blocks dst]
+  (let [s (stream b)
+        upd-shape (int-array (into [(first (shape-of blocks)) 1] (rest (shape-of blocks))))]
+    (with-operands b :put-blocks [hp pool nil hb blocks nil hd dst nil]
+      (with-temps [tmp]
+        (let [idx (tmp :vector (MlxRuntime/vectorOf (long-array [(tmp (Mlx/mlx_astype hd (int (code :int32)) s))])))
+              upd (tmp (Mlx/mlx_reshape hb upd-shape s))]
+          (wrap b (Mlx/mlx_scatter hp idx upd (int-array [0]) s)))))))

@@ -116,6 +116,13 @@
   [hk d f]
   (array/array [(vec (for [h (range hk)] (vec (for [i (range d)] (f h i)))))] {:dtype :int32}))
 
+(defn- fused
+  "op's value by backend b's fused kernel (p/IFused), or nil where b has
+   none or declines: then the composite runs."
+  [b op args]
+  (when (instance? gen.array.protocols.IFused b)
+    (p/-fused b op args)))
+
 (defn- fused-write
   "paged-write's value by backend b's fused write (p/IFused), or nil where
    b has none: then the composite runs."
@@ -166,18 +173,21 @@
 
 (defn put-blocks
   "pool with blocks ([M …], each a block of pool's) written at its blocks
-   dst (an int array [M], distinct): put-along-axis on axis 0, on MLX a
-   scatter that writes the pool in place when nothing else holds it
-   (array/compile's :donate). copy-blocks's write; a step that copies
-   blocks it read before (gen.llm.models.qwen3's paged steps' :copy)
-   writes them by it. Unchecked: its callers check."
+   dst (an int array [M], distinct): put-along-axis on axis 0, its
+   reference; on MLX one scatter of the blocks as slices (p/IFused's
+   :put-blocks, gen.backend.mlx.paged), which writes the pool in place
+   when nothing else holds it (array/compile's :donate). copy-blocks's
+   write; a step that copies blocks it read before (gen.llm.models.qwen3's
+   paged steps' :copy) writes them by it. Unchecked: its callers check."
   [pool blocks dst]
   (let [s (array/shape blocks)
         m (first s)]
     (if (zero? (long m))
       pool
-      (array/put-along-axis pool (array/broadcast-to (array/reshape (array/astype dst :int32) (into [m] (repeat (dec (count s)) 1))) s)
-                            blocks 0))))
+      (let [args [pool (array/astype blocks (array/dtype pool)) dst]]
+        (or (fused (array/backend-of :put-blocks args) :put-blocks args)
+            (array/put-along-axis pool (array/broadcast-to (array/reshape (array/astype dst :int32) (into [m] (repeat (dec (count s)) 1))) s)
+                                  (second args) 0))))))
 
 (defn copy-blocks
   "gen.array/copy-blocks's body."
