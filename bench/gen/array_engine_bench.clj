@@ -114,7 +114,22 @@
    8 clients' first token at the median 319 → 249, 373 → 268, 447 → 317,
    556 → 340 ms, tokens/s within ±5% (102 → 97, 91 → 93, 78 → 77, 70 →
    73; Qwen3 float16 again, two JVMs each alternated: 101, 102 → 104,
-   104)."
+   104). Shapes bucketed and compiled when the engine opens
+   (genclj-i3fp, 2026-11-08; main → the branch, alternated, warm-runs 3,
+   runs 6; each engine's open time and its traces after open printed
+   after its rows, gen.bench.shapes=true listing its shapes): 8
+   continuous clients, traces after open 16-27 → 0 in every
+   configuration; Qwen3-0.6B float16 420 → 431 tokens/s, read p90 15.2
+   → 14.8 ms, largest read 475 → 326, time to first token p50 236 →
+   217; float32 283 → 279, 23.3 → 23.6, 433 → 464, 257 → 258;
+   Qwen3.5-0.8B float16 303 → 295, 21.9 → 22.5, 603 → 467, 270 →
+   281; float32 227 → 224, 29.9 → 30.1, 734 → 496, 322 → 341 (a mixed
+   forward's two calls read the weights twice). Token SMC, paged:
+   Qwen3 float16 859 → 845, float32 769 → 753; Qwen3.5 967 → 925, 786
+   → 757 (alternated again, float16: main 990, 984, the branch 939, 947,
+   without :precompile? 981, 967: the open-time compile costs Qwen3.5's
+   SMC about 4%). Open time 0.3-0.5 s → 1.8-2.6 s paged, 2.4-4.4 s
+   continuous (the compile 1.4-3.9 s, float32 the longer)."
   (:require [clojure.string :as str]
             [gen.array :as array]
             [gen.gfi :as gfi]
