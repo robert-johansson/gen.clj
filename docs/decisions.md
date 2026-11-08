@@ -5276,6 +5276,23 @@ llama.cpp's path through gen.clj by 10-35%, and is never worse for MLX's.
   - device-side normalization, the owner's call under the engine's
     decision 2.
 
+**Addendum (the lead, 2026-11-08 morning, after a side agent's note): the
+NVIDIA leads hold in float16 only.** Every lead over llama.cpp on fenrir
+measured overnight is float16. The engine computes in float32 by default
+there.
+- Qwen3-0.6B Q8_0, continuous, 8 clients: 555 against 503 in float16; 409
+  against 502 in float32 ("Paged attention on CUDA").
+- The MoE loses more in float32: qmm_sm80 takes half floats only, so
+  float32 falls back to qmm_naive, 21.7 against 17.3 ms a step at batch 1
+  ("The MoE on CUDA").
+- On the Mac the lead holds in either: 8 clients, Qwen3 287 against 99 and
+  Qwen3.5 217 against 70 in float32 ("Paged multi-token reads").
+- So this decision goes with the default precision for quantized models on
+  CUDA. The lead recommends float16 there: the weights are already 8 or 4
+  bits, and llama.cpp's CUDA path rounds activations to 8 bits. Defaults are
+  a numerics call, so it is the owner's. With float32 kept, MLX on NVIDIA is
+  about 20% behind llama.cpp with 8 clients.
+
 ### Paged follow-ups: copy only for a second writer; Qwen3.5 paged
 
 (PROVISIONAL, owner to confirm; genclj-6qb6, genclj-1ovd, 2026-11-08)
