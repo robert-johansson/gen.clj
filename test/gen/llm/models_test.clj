@@ -19,6 +19,7 @@
     (is (= "qwen3" (models/architecture m)))
     (is (= "qwen35" (models/architecture (assoc-in m [:config :arch] "qwen35"))) ":arch first")
     (is (= (ts/host (qwen3/log-probs m tokens {:chunk 48})) (ts/host (models/log-probs m tokens {:chunk 48}))))
+    (is (= (ts/host (qwen3/log-probs m tokens {:temperature 0.7})) (ts/host (models/log-probs m tokens {:temperature 0.7}))))
     (is (= (ts/host (qwen3/nll m tokens {:mask mask})) (ts/host (models/nll m tokens {:mask mask}))))
     (is (= (ts/host (qwen3/nll m tokens)) (ts/host (models/nll m tokens))))
     (is (= {:reason :unsupported :fn 'nll :architecture "llama"}
@@ -31,5 +32,8 @@
                 mask (array/array [[0.0 1.0 1.0 0.0 1.0 1.0 1.0 1.0]])]]
     (is (= arch (models/architecture m)))
     (is (= (ts/host (qwen35/log-probs m tokens {:chunk 48})) (ts/host (models/log-probs m tokens {:chunk 48}))) arch)
+    (is (= (ts/host (qwen35/log-probs m tokens {:chunk 48 :temperature 0.7}))
+           (ts/host (models/log-probs m tokens {:chunk 48 :temperature 0.7})))
+        (str arch ": at a temperature"))
     (is (= (ts/host (qwen35/nll m tokens {:mask mask :checkpoint? true})) (ts/host (models/nll m tokens {:mask mask :checkpoint? true})))
         arch)))

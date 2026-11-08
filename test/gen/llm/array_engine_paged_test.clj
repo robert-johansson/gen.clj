@@ -15,6 +15,15 @@
    - a step pads its rows to a power of 2 (:min-rows at least), and the
      padding changes no row;
    - the pool grows when its blocks run out, keeping every branch;
+   - a score whose read fails in a call consuming the pools loses every
+     branch, loudly, in the paged and the continuous modes; a step or
+     read whose rows fail to normalize leaves its branch and its blocks
+     as they were, and the next step is given the pools the failed one
+     wrote (steps consuming their pools as MLX's do, on any backend:
+     donation-checked). Each failed before its fix (genclj-5t5l): the
+     scored branches stayed live over emptied slots, the next step was
+     given the pools the failed one had consumed, a read left its slot
+     ahead of its branch;
    - misuse is loud.
    Planted mutations fail the contract checks named in
    planted-bugs-fail-the-contract: copy-on-write skipped (a fork's step
@@ -167,6 +176,86 @@
       (is (pos? (:pool-grows d 0)))
       (is (<= (bc/max-diff (forward-row :f32 ctx) (br/logprobs b) 128) band))
       (br/dispose! b))))
+
+;; ---------------------------------------------------------------------------
+;; Failures (genclj-5t5l)
+;; ---------------------------------------------------------------------------
+
+(def ^:private failing-donations
+  "Every call that consumes the pools fails (lose-all! then runs, as after
+   a real failure): the redefs."
+  {#'ae/donating (let [donating @#'ae/donating]
+                   (fn [ctx _] (donating ctx #(throw (ex-info "planted" {:reason :planted})))))})
+
+(deftest a-failed-score-loses-every-branch-the-pools-held
+  ;; a score's read failing in a call that consumes the pools, in the
+  ;; paged mode and its continuous mode: every branch is lost, loudly
+  ;; (:lost-slots, the branches freed), and the engine reads on from new
+  ;; pools
+  (doseq [opts [paged-opts (assoc paged-opts :continuous? true)]]
+    (with-open [e (ae/engine (merge opts {:model (:f32 @models) :max-branches 12}))]
+      (testing (if (:continuous? opts) "continuous" "paged")
+        (let [p (:prompt contract-opts)
+              b (br/open e p)
+              other (br/open e [1 2 3])
+              data (with-redefs-fn failing-donations #(ts/thrown-data (br/score b [4 5 6])))]
+          (is (= :planted (:reason data)))
+          (is (seq (:lost-slots data)) "named lost")
+          (is (not (br/live? b)) "the scored branch is lost")
+          (is (not (br/live? other)) "as is every other")
+          (is (= :not-live (bc/reason #(br/advance [b] [4]))))
+          (is (zero? (:live (br/info e))))
+          (let [c (br/open e p)]
+            (is (<= (bc/max-diff (forward-row :f32 p) (br/logprobs c) 128) band) "a new branch, from new pools")
+            (br/dispose! c)))))))
+
+(defn- donation-checked
+  "compile-paged-step whose steps consume their pools as MLX's donation
+   does, on any backend: a step given pools an earlier step consumed is
+   loud (:donated)."
+  [compile-step]
+  (fn [m opts]
+    (let [step (compile-step m opts)
+          consumed (java.util.Collections/newSetFromMap (java.util.IdentityHashMap.))]
+      (fn [pools & args]
+        (let [leaves (array/tree-leaves pools)]
+          (when (some #(.contains consumed %) leaves)
+            (throw (ex-info "a step given consumed pools" {:reason :donated})))
+          (.addAll consumed leaves)
+          (apply step pools args))))))
+
+(def ^:private failing-rows
+  "The rows' normalization fails: the redefs."
+  {#'ae/host-rows (fn [& _] (throw (ex-info "planted" {:reason :planted})))})
+
+(deftest a-failed-normalization-leaves-the-slots-as-they-were
+  ;; a step's or read's rows fail to normalize after it has written the
+  ;; pools (consuming those it was given): loud, the branch and its blocks
+  ;; as they were, and the next step given the pools written, not those
+  ;; consumed
+  (with-open [e (with-redefs-fn {#'qwen3/compile-paged-step (donation-checked qwen3/compile-paged-step)}
+                  #(ae/engine (merge paged-opts {:model (:f32 @models) :max-branches 12})))]
+    (let [p (:prompt contract-opts)
+          more [5 6 7 8 9 10 11 12]
+          failed (fn [f]
+                   (let [b (br/open e p)
+                         free (:free (ae/blocks e))
+                         data (with-redefs-fn failing-rows #(ts/thrown-data (f b)))]
+                     (is (= :planted (:reason data)))
+                     (is (nil? (:lost-slots data)))
+                     (is (br/live? b) "the branch as it was")
+                     (is (= free (:free (ae/blocks e))) "its blocks as they were")
+                     b))]
+      (testing "a step"
+        (let [[s] (br/advance [(failed #(br/advance [%] [4]))] [4])]
+          (is (<= (bc/max-diff (forward-row :f32 (conj p 4)) (br/logprobs s) 128) band) "it steps on")
+          (br/dispose! s)))
+      (testing "a read"
+        (let [{x :branch} (br/extend (failed #(br/extend % more)) more)
+              [s] (br/advance [x] [4])]
+          (is (<= (bc/max-diff (forward-row :f32 (into p more)) (br/logprobs x) 128) band) "it reads on")
+          (is (<= (bc/max-diff (forward-row :f32 (conj (into p more) 4)) (br/logprobs s) 128) band) "and steps on")
+          (br/dispose! s))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Planted bugs

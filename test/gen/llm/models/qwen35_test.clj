@@ -16,14 +16,18 @@
       norms through the quantized products (Q8_0);
    4. a cache is a value: continued twice with one token it gives the same
       logits, with another token others, and stays as it was;
-   5. on MLX, the JVM backend's logits within float32's band (below).
+   5. on MLX, the JVM backend's logits within float32's band (below);
+   6. training's log-probs are the forward's log-softmax at the next
+      tokens, plain, chunked and checkpointed, and at a temperature its
+      logits divided by it (temperature 1 the model's own, bit for bit).
    Each of 1-4 fails under a planted bug, run here as a negative control
    (with-redefs-fn, asserted as more than 0.01): a cached read's positions
    shifted by one, its KV cache dropped, its recurrent state dropped, the
    conv state keeping its oldest inputs (not its newest), the mask not
    causal (1); the norm reading the batch's other rows (2); a step's
    token ignored (another token's logits then differ by 0) (4); a
-   gradient against another entry's difference (3).
+   gradient against another entry's difference (3); the temperature
+   ignored (6).
    A wrong convention is self-consistent: the conv kernel applied newest
    input first, the query and the output gate swapped, KV heads tiled
    pass 1-4, so the real model's logits are checked against llama.cpp's
@@ -42,7 +46,8 @@
    cache dropped 1.2, the recurrent state dropped 3.8, the conv state's
    oldest inputs 5.5, not causal 0.32 (1); a long read's triangular
    inverse dropped 2.8 (1); the norm across rows 5.1 (2); gradients'
-   relative errors measured ≤ 1.7e-8 (3)."
+   relative errors measured ≤ 1.7e-8 (3); the temperature ignored 1.9
+   (6)."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
             [gen.array.nn]
@@ -342,6 +347,41 @@
           (is (<= (gap #(qwen35/forward % [long-ctx])) chunk-band) (str (name k) ": a long read")))))))
 
 ;; ---------------------------------------------------------------------------
+;; 6. Training's log-probs
+;; ---------------------------------------------------------------------------
+
+(defn- log-probs-gap
+  "max |Δ| between log-probs of [ctx other] under opts and the forward's
+   log-softmax (its logits divided by the temperature t) at the next
+   tokens."
+  [m opts t]
+  (let [ids (array/array [ctx other] {:dtype :int32})
+        want (array/pick (array/log-softmax (array// (array/slice (qwen35/forward m [ctx other]) 1 0 8) t))
+                         (array/slice ids 1 1 9))
+        lp (qwen35/log-probs m [ctx other] opts)]
+    (is (= [2 8] (array/shape lp)))
+    (max-diff lp want)))
+
+(def ^:private log-probs-band
+  "log-probs against the forward's log-softmax: float64's round-off on
+   the JVM backend (one softmax by chunks, the other whole), float32's
+   band on MLX (the namespace's docstring)."
+  (if (ts/jvm?) 1e-12 band))
+
+(deftest log-probs-are-the-forward-s
+  (let [training {:checkpoint? true :chunk 48}]
+    (doseq [[k m] @models]
+      (doseq [opts [nil {:chunk 48} training {:checkpoint? true}]]
+        (is (<= (log-probs-gap m opts 1.0) log-probs-band) (str (name k) " " opts)))
+      (doseq [opts [{:temperature 0.7} (assoc training :temperature 0.7)]]
+        (is (<= (log-probs-gap m opts 0.7) log-probs-band) (str (name k) " " opts ": the logits divided by the temperature")))
+      (is (= (host (qwen35/log-probs m [ctx other] training)) (host (qwen35/log-probs m [ctx other] (assoc training :temperature 1.0))))
+          (str (name k) ": temperature 1 is the model's own, bit for bit")))
+    (testing "a planted bug fails it: the temperature ignored"
+      (is (< 0.01 (with-redefs-fn {#'common/tempered-head (fn [_] common/head-logits)}
+                    #(log-probs-gap (:f32 @models) {:temperature 0.7} 0.7)))))))
+
+;; ---------------------------------------------------------------------------
 ;; Loud errors
 ;; ---------------------------------------------------------------------------
 
@@ -357,4 +397,7 @@
     (is (= :unknown-options (reason #(qwen35/prefill m [[1 2]] {:last? true}))))
     (is (= :unknown-options (reason #(qwen35/model (array/load-gguf (:q8_0 files)) {:dtpye :float32}))))
     (is (= :invalid-args (reason #(qwen35/step m (second (qwen35/prefill m [[1 2]])) [[3] [4]]))) "a cache of other rows")
+    (is (= :invalid-args (reason #(qwen35/log-probs m [ctx] {:temperature 0}))))
+    (is (= :invalid-args (reason #(qwen35/log-probs m [ctx] {:temperature ##Inf}))))
+    (is (= :unknown-options (reason #(qwen35/nll m [ctx] {:temperature 0.7}))) "nll is at the model's own temperature")
     (is (= [2 3 128] (array/shape (qwen35/forward m (array/array [[1 2 3] [4 5 6]] {:dtype :int32})))) "an int array")))
