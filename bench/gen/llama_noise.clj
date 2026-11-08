@@ -11,7 +11,8 @@
 
    The prompts are a set (-Dgen.bench.prompts): general (the default,
    prompts), digits (digit-prompts: numbers and arithmetic, GRPO's chat
-   prompts among them) or all (each set's noise printed apart).
+   prompts among them) or all (each set's noise printed apart), the first
+   -Dgen.bench.prompt-limit of each.
 
    Run (with native/build-llama.sh's libraries):
      clojure -M:bench -m gen.llama-noise model.gguf          the noise and the costs
@@ -76,10 +77,13 @@
 (defn prompt-sets
   "The prompt sets -Dgen.bench.prompts names (general, the default;
    digits; all): [[name items]], an item {:text :tokens}, the tokens by
-   e's tokenizer (digit-prompts' special tokens read as themselves)."
+   e's tokenizer (digit-prompts' special tokens read as themselves); the
+   first -Dgen.bench.prompt-limit of each (all by default)."
   [e]
-  (let [general ["general" (mapv (fn [t] {:text t :tokens (llama/tokenize e t)}) prompts)]
-        digits ["digits" (mapv (fn [t] {:text t :tokens (llama/tokenize e t {:parse-special? true})}) digit-prompts)]]
+  (let [limit (some-> (System/getProperty "gen.bench.prompt-limit") parse-long)
+        some-of (fn [ps] (if limit (take limit ps) ps))
+        general ["general" (mapv (fn [t] {:text t :tokens (llama/tokenize e t)}) (some-of prompts))]
+        digits ["digits" (mapv (fn [t] {:text t :tokens (llama/tokenize e t {:parse-special? true})}) (some-of digit-prompts))]]
     (case (System/getProperty "gen.bench.prompts" "general")
       "general" [general]
       "digits" [digits]
