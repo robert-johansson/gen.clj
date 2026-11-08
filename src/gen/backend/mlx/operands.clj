@@ -5,7 +5,6 @@
    call, and arrays from host data and read back."
   {:api :internal}
   (:require [gen.array.dtype :as dt]
-            [gen.array.host :as host]
             [gen.array.shape :as sh]
             [gen.backend.mlx.array :refer [aux-stream check-dtype code defaults device fence handle mlx-array? stream wrap]]
             [gen.backend.mlx.memory :refer [at-buffer-limit evaluating]])
@@ -330,24 +329,46 @@
           (catch MlxException e (throw (mlx-error :->clj [x] e)))
           (finally (fence x)))))))
 
+(def ^:private prefetch-bytes
+  "The bytes from which a host read on MLX's CUDA moves its pages in one
+   go (prefetched): reads of rows of logits; the system property
+   gen.mlx.prefetch-bytes (0 turns it off; default 1 MiB)."
+  (delay (let [n (Long/getLong "gen.mlx.prefetch-bytes" (* 1024 1024))]
+           (when (and (pos? (long n)) (MlxRuntime/canPrefetch)) (long n)))))
+
+(defn- host-segment
+  "The data segment (bytes long) of the evaluated handle h, whose pointer
+   p MLX gave: on CUDA, at least prefetch-bytes long, its pages moved to
+   the host in one transfer first. MLX's CUDA allocator moves a buffer the
+   host reads into managed memory, where the host's reads would fault its
+   pages over one at a time (genclj-4acj)."
+  ^MemorySegment [^MemorySegment p ^long bytes]
+  (let [seg (data-segment p bytes)]
+    (when-let [from @prefetch-bytes]
+      (when (<= (long from) bytes)
+        (MlxRuntime/prefetchToHost seg)))
+    seg))
+
 (defn- read-floats
   "The n float32 elements of the evaluated, row-contiguous handle h, as a
-   float array."
+   float array (MlxRuntime/readFloats: a large read copied in parallel)."
   ^floats [^long h ^long n]
   (if (zero? n)
     (float-array 0)
-    (.toArray (data-segment (Mlx/mlx_array_data_float32 h) (* 4 n)) ValueLayout/JAVA_FLOAT)))
+    (MlxRuntime/readFloats (host-segment (Mlx/mlx_array_data_float32 h) (* 4 n)) (int n))))
 
 (defn- read-halves
   "The n float16 or bfloat16 (dtype) elements of the evaluated,
    row-contiguous handle h, widened to floats on the host, exactly
-   (gen.array.host/halves->floats): their bit patterns read (mlx-c's
-   uint16 accessor, which any 16-bit dtype's buffer answers; its float16
-   one is absent where its compiler lacks _Float16)."
+   (gen.array.host/halves->floats's floats, bit for bit): their bit
+   patterns read (mlx-c's uint16 accessor, which any 16-bit dtype's
+   buffer answers; its float16 one is absent where its compiler lacks
+   _Float16) and widened from the buffer in place by
+   MlxRuntime/widenHalves (a large read in parallel; genclj-4acj)."
   ^floats [^long h ^long n dtype]
   (if (zero? n)
     (float-array 0)
-    (host/halves->floats (.toArray (data-segment (Mlx/mlx_array_data_uint16 h) (* 2 n)) ValueLayout/JAVA_SHORT) dtype)))
+    (MlxRuntime/widenHalves (host-segment (Mlx/mlx_array_data_uint16 h) (* 2 n)) (int n) (= :bfloat16 dtype))))
 
 ;; A float16 or bfloat16 array is read as its own bits, widened on the
 ;; host, rather than cast to float32 on the device first (genclj-9y6y). On

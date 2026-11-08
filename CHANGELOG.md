@@ -38,6 +38,18 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Changed (internal): MLX reads float16 and bfloat16 by a Java loop
+  from the buffer, and on CUDA prefetches a large read's pages**
+  (genclj-4acj). `->floats` of a 16-bit float array widens its bit
+  patterns from MLX's buffer in place (`MlxRuntime/widenHalves`), with no
+  copy of its own, bit for bit as before. On MLX's CUDA backend a host
+  read of at least `gen.mlx.prefetch-bytes` bytes (a system property,
+  default 1 MiB; 0 turns it off) moves its managed pages to the host in
+  one `cudaMemPrefetchAsync` (the CUDA runtime MLX links,
+  libcudart.so.13) rather than page by page as the host faults on them.
+  Values are unchanged. A float16 read of 8 to 16 rows of Qwen3's
+  logits took 2.9-3.1 ms a step on fenrir, now 1.1-1.8.
+
 - **Changed (experimental): paged attention runs a kernel on MLX's CUDA**
   (genclj-6qb6, genclj-1daf; **Draws**, the paged and continuous modes
   on CUDA). On MLX's CUDA backend `gen.array/paged-attention` runs vLLM's

@@ -506,6 +506,131 @@ public final class MlxRuntime {
     return MlxRaw.mlx_get_active_memory(o) == 0 ? o.get(JAVA_LONG, 0) : 0;
   }
 
+  // ---- CUDA: a host read's pages moved in one go ------------------------------
+
+  /** The CUDA runtime's calls a read needs (libcudart.so.13, the one MLX's
+   *  CUDA build links), or null where it is absent (macOS, a CPU build). */
+  private static final class Cudart {
+    static final MethodHandle PREFETCH;
+    static final MethodHandle SYNC;
+    static final MethodHandle LAST_ERROR;
+    static final MemorySegment HOST;
+    static {
+      MethodHandle p = null, s = null, e = null;
+      MemorySegment h = null;
+      try {
+        SymbolLookup lib = SymbolLookup.libraryLookup("libcudart.so.13", Arena.global());
+        // struct cudaMemLocation { enum cudaMemLocationType type; int id; },
+        // cudaMemLocationTypeHost = 2
+        StructLayout loc = MemoryLayout.structLayout(JAVA_INT.withName("type"), JAVA_INT.withName("id"));
+        p = LINKER.downcallHandle(lib.find("cudaMemPrefetchAsync").orElseThrow(),
+                                  FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG, loc, JAVA_INT, ADDRESS));
+        s = LINKER.downcallHandle(lib.find("cudaStreamSynchronize").orElseThrow(), FunctionDescriptor.of(JAVA_INT, ADDRESS));
+        e = LINKER.downcallHandle(lib.find("cudaGetLastError").orElseThrow(), FunctionDescriptor.of(JAVA_INT));
+        h = Arena.global().allocate(loc);
+        h.set(JAVA_INT, 0, 2);
+        h.set(JAVA_INT, 4, 0);
+      } catch (Throwable t) {
+        p = null;
+      }
+      PREFETCH = p;
+      SYNC = s;
+      LAST_ERROR = e;
+      HOST = h;
+    }
+  }
+
+  /** Is the CUDA runtime's prefetch at hand (prefetchToHost does
+   *  something)? */
+  public static boolean canPrefetch() {
+    return Cudart.PREFETCH != null;
+  }
+
+  /** The pages of seg, managed memory MLX's CUDA allocator moved a buffer
+   *  to for a host read (Buffer::raw_ptr), migrated to the host in one
+   *  bulk transfer (cudaMemPrefetchAsync on the legacy stream, then its
+   *  synchronization) rather than page by page as the host faults on
+   *  them: true if it did. Memory that is not managed is left as it is
+   *  (false), its error cleared so that MLX never sees it. Call it on the
+   *  evaluation thread, the array evaluated (genclj-4acj). */
+  public static boolean prefetchToHost(MemorySegment seg) {
+    if (Cudart.PREFETCH == null) return false;
+    try {
+      int rc = (int) Cudart.PREFETCH.invokeExact(seg, seg.byteSize(), Cudart.HOST, 0, MemorySegment.NULL);
+      if (rc != 0) {
+        int ignored = (int) Cudart.LAST_ERROR.invokeExact();
+        return false;
+      }
+      rc = (int) Cudart.SYNC.invokeExact(MemorySegment.NULL);
+      if (rc != 0) {
+        int ignored = (int) Cudart.LAST_ERROR.invokeExact();
+        return false;
+      }
+      return true;
+    } catch (Throwable t) {
+      throw unreachable(t);
+    }
+  }
+
+  // ---- 16-bit floats read: widened on the host --------------------------------
+
+  /** Entries a chunk of a host read: 16 KiB of floats, in a core's L1. */
+  private static final int READ_CHUNK = 4096;
+
+  /** Entries from which a host read runs on the common fork-join pool:
+   *  a read of rows of logits (Qwen3's 151,936 a row), not a scalar's. */
+  private static final int PARALLEL_READ = 1 << 18;
+
+  /** (f c) for each chunk c of a read of n entries, in parallel on the
+   *  common fork-join pool from PARALLEL_READ entries on: each chunk
+   *  writes its own entries, so the result is the same either way. */
+  private static void inChunks(int n, java.util.function.IntConsumer f) {
+    int chunks = (n + READ_CHUNK - 1) / READ_CHUNK;
+    if (n >= PARALLEL_READ) {
+      java.util.stream.IntStream.range(0, chunks).parallel().forEach(f);
+    } else {
+      for (int c = 0; c < chunks; c++) f.accept(c);
+    }
+  }
+
+  /** The n 16-bit floats at seg (their bit patterns: float16, or bfloat16
+   *  when bfloat), as a new float array, exactly: a float16's float is
+   *  Float.float16ToFloat's, a bfloat16's the high half of a float's (what
+   *  gen.array.host/halves-&gt;floats gives, bit for bit). Read from the
+   *  native buffer in place, a chunk of patterns at a time copied into a
+   *  small array and widened by a loop over an int index; a large read's
+   *  chunks in parallel (inChunks). The widening is bound by memory, not by
+   *  its arithmetic: on fenrir (Core Ultra 9) a float16 read of 8 to 16
+   *  rows of Qwen3's logits, then 2.9-3.1 ms a step, the table lookup of
+   *  halves-&gt;floats and a copy of the patterns, is 1.1-1.8 with these and
+   *  the prefetch (genclj-4acj). */
+  public static float[] widenHalves(MemorySegment seg, int n, boolean bfloat) {
+    float[] out = new float[n];
+    inChunks(n, c -> {
+      int from = c * READ_CHUNK;
+      int k = Math.min(READ_CHUNK, n - from);
+      short[] chunk = new short[k];
+      MemorySegment.copy(seg, JAVA_SHORT_UNALIGNED, 2L * from, chunk, 0, k);
+      if (bfloat) {
+        for (int j = 0; j < k; j++) out[from + j] = Float.intBitsToFloat((chunk[j] & 0xFFFF) << 16);
+      } else {
+        for (int j = 0; j < k; j++) out[from + j] = Float.float16ToFloat(chunk[j]);
+      }
+    });
+    return out;
+  }
+
+  /** The n floats at seg, as a new float array: copied from the native
+   *  buffer, a large read's chunks in parallel (inChunks; genclj-4acj). */
+  public static float[] readFloats(MemorySegment seg, int n) {
+    float[] out = new float[n];
+    inChunks(n, c -> {
+      int from = c * READ_CHUNK;
+      MemorySegment.copy(seg, JAVA_FLOAT_UNALIGNED, 4L * from, out, from, Math.min(READ_CHUNK, n - from));
+    });
+    return out;
+  }
+
   /** {live arrays, collections so far}, for tests and diagnostics. */
   public static long[] lifetimeStats() {
     return new long[] {LIVE.get(), COLLECTIONS.get()};
