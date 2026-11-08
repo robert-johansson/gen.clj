@@ -218,17 +218,18 @@
 
 (defn- inputs!
   "The advance's inputs, one for each of parents, in order: each parent's
-   forks, made in one call and added to the volatile made, and the
-   parent itself last when it is consumed. The maps keyed by branches are
-   looked up, never walked."
+   forks, every parent's made in one call (br/fork-each) and added to the
+   volatile made, and the parent itself last when it is consumed. The
+   maps keyed by branches are looked up, never walked."
   [parents consumed made]
   (let [at (reduce (fn [at [i p]] (update at p (fnil conj []) i)) {} (map-indexed vector parents))
+        forked (filterv #(< (if (consumed %) 1 0) (count (at %))) (distinct parents))
+        made-forks (when (seq forked)
+                     (br/fork-each forked (mapv #(- (count (at %)) (if (consumed %) 1 0)) forked)))
+        _ (vswap! made into cat made-forks)
+        forks (zipmap forked made-forks)
         by-index (reduce (fn [by-index p]
-                           (let [is (at p)
-                                 n (- (count is) (if (consumed p) 1 0))
-                                 forks (if (pos? n) (br/fork p n) [])]
-                             (vswap! made into forks)
-                             (into by-index (map vector is (cond-> forks (consumed p) (conj p))))))
+                           (into by-index (map vector (at p) (cond-> (forks p []) (consumed p) (conj p)))))
                          {} (distinct parents))]
     (mapv by-index (range (count parents)))))
 
@@ -384,12 +385,14 @@
 
 (defn next-logprobs!
   "The next-token log-probabilities after each of contexts (non-empty token
-   vectors), in order: new float arrays."
-  [c contexts]
-  (check-open c)
-  (run! #(check-context c %) contexts)
-  (change! c tally :requests (count contexts))
-  (mapv br/logprobs (guarded c #(answer! c contexts))))
+   vectors), in order: new float arrays, or with lend? the branches' own
+   (gen.llm.branching/lent-logprobs: the caller never writes them)."
+  ([c contexts] (next-logprobs! c contexts false))
+  ([c contexts lend?]
+   (check-open c)
+   (run! #(check-context c %) contexts)
+   (change! c tally :requests (count contexts))
+   (mapv (if lend? br/lent-logprobs br/logprobs) (guarded c #(answer! c contexts)))))
 
 (defn- known-scores
   "The scores of whole from position from on, if s has them: whole on a

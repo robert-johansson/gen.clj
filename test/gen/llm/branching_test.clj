@@ -97,6 +97,42 @@
         (is (not-any? #(contains? (br/info e) %) [:n-slots :scratch-slot]) "the engine's books stay inside")
         (br/dispose! b2)))))
 
+(deftest fork-each-is-forks-one-at-a-time
+  ;; fork-each (one call on the engine's thread, ForkEach; genclj-4acj)
+  ;; makes the branches fork makes one branch at a time, and leaves the
+  ;; engine as they do: the forks' tokens and rows, every branch's rows
+  ;; after one advance of them all, the live counts; on an engine without
+  ;; ForkEach too (forks one at a time); and too few free branches for
+  ;; them all is a refusal that makes none.
+  ;; Planted (2026-11-08): the counts paired with the branches in reverse,
+  ;; and a refusal after the first branch's forks (neither the up-front
+  ;; check of free branches nor the cleanup), each fail it
+  (with-open [e1 (toy/engine {:max-branches 8})
+              e2 (toy/engine {:max-branches 8})
+              e3 (toy/engine {:max-branches 8})]
+    (let [go (fn [e fork]
+               (let [a (br/open e [1 2 3])
+                     b (br/open e [4 5])
+                     forks (fork [a b] [2 1])
+                     stepped (br/advance (into [a b] cat forks) [6 7 8 9 10])
+                     live (:live (br/info e))]
+                 (br/dispose! stepped)
+                 [(mapv #(mapv br/tokens %) forks) (mapv #(mapv (comp vec br/logprobs) %) forks)
+                  (mapv (comp vec br/logprobs) stepped) live (:live (br/info e))]))
+          one-at-a-time (fn [bs ns] (mapv br/fork bs ns))
+          ;; e3 seen through an engine that does not fork several at once
+          plain (fn [bs ns] (mapv (fn [b n] (br/-fork (br/engine b) b n)) bs ns))
+          want (go e2 one-at-a-time)]
+      (is (= [[[1 2 3] [1 2 3]] [[4 5]]] (first want)))
+      (is (= want (go e1 br/fork-each)))
+      (is (= want (go e3 plain)))
+      (let [a (br/open e1 [1 2 3])
+            b (br/open e1 [4 5])]
+        (is (= :no-free-branches (contract/reason #(br/fork-each [a b] [3 4]))) "7 forks, 6 free")
+        (is (= 2 (:live (br/info e1))) "a refusal makes none")
+        (is (= :invalid-count (contract/reason #(br/fork-each [a b] [1]))))
+        (br/dispose! [a b])))))
+
 (deftest a-closed-engine-refuses-everything
   (let [e (toy/engine {})
         b (br/open e [1 2])]

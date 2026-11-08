@@ -51,12 +51,20 @@
   (-score [m context continuation] "A vector of doubles, one for each token of continuation.")
   (-info [m] "A map of sizes and counts."))
 
+(defprotocol LentRows
+  "An LM that lends its rows (internal to gen.llm; batch-next-logprobs-lent
+   calls it): its own arrays, which neither it nor the caller ever writes."
+  (-next-logprobs-lent [m contexts] "As -next-logprobs, the LM's own arrays."))
+
 (deftype CachedLM [cache tokenizer lock]
   LM
   (-tokenizer [_] tokenizer)
   (-next-logprobs [_ contexts] (locking lock (cache/next-logprobs! cache contexts)))
   (-score [_ context continuation] (locking lock (cache/score! cache context continuation)))
   (-info [_] (locking lock (cache/info cache)))
+
+  LentRows
+  (-next-logprobs-lent [_ contexts] (locking lock (cache/next-logprobs! cache contexts true)))
 
   java.io.Closeable
   (close [_] (locking lock (cache/close! cache)))
@@ -178,6 +186,21 @@
     (throw (ex-info (str "batch-next-logprobs: contexts is a sequence of contexts, not " (pr-str contexts))
                     {:reason :invalid-token :contexts contexts})))
   (-next-logprobs m (mapv #(context-vector % "batch-next-logprobs") contexts)))
+
+(defn batch-next-logprobs-lent
+  "batch-next-logprobs, its rows lent where the LM lends them (LentRows: an
+   LM over an engine): the LM's own arrays, not copies, which the caller
+   reads and never writes; the same values. Internal to gen.llm: token SMC's
+   and a completion's draws read their rows so, sparing a copy of each
+   (Qwen3's 151,936 floats: 1.5 to 1.8 ms a step of 16 particles on
+   fenrir; genclj-4acj). Another LM's rows are its new arrays."
+  [m contexts]
+  (if (satisfies? LentRows m)
+    (do (when-not (sequential? contexts)
+          (throw (ex-info (str "batch-next-logprobs: contexts is a sequence of contexts, not " (pr-str contexts))
+                          {:reason :invalid-token :contexts contexts})))
+        (-next-logprobs-lent m (mapv #(context-vector % "batch-next-logprobs") contexts)))
+    (batch-next-logprobs m contexts)))
 
 (defn score
   "The log-probability of each token of continuation given context and the

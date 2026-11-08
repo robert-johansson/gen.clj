@@ -242,8 +242,8 @@
 (defn- closed-books [books]
   (assoc books :closed? true :live {} :refs {} :free (sorted-set) :busy #{}))
 
-(declare engine-info operate open-request open* fork* advance-request advance* extend-request extend* score* resample*
-         dispose*)
+(declare engine-info operate open-request open* fork* fork-each* advance-request advance* extend-request extend* score*
+         resample* dispose*)
 
 (deftype SlotEngine [impl info ^Worker worker ^ReferenceQueue queue state]
   br/Branching
@@ -258,6 +258,9 @@
   (-live? [_ b]
     (let [st @state]
       (and (not (:closed? st)) (contains? (:live st) (.-id ^Branch b)))))
+
+  br/ForkEach
+  (-fork-each [this bs ns] (run-on worker #(fork-each* this bs ns) "fork"))
 
   java.io.Closeable
   (close [_]
@@ -472,6 +475,20 @@
           (run! #(free-slot! e %) ss)
           (throw t)))
       (mapv #(make-branch! e (.-tokens b) (.-logprobs b) %) ss))))
+
+(defn- fork-each* [e bs ns]
+  ;; every branch live and the slots there first, so a refusal makes none
+  (begin! e "fork")
+  (run! #(live-entry e % "fork") bs)
+  (ensure-free! e (reduce + 0 ns) "fork")
+  (let [made (volatile! [])]
+    (try
+      (mapv (fn [b n] (let [fs (fork* e b n)] (vswap! made into fs) fs)) bs ns)
+      (catch Throwable t
+        ;; forks do not fail once their slots are had, by the Slots
+        ;; contract; if one does, those made are freed, not leaked
+        (run! #(free-slot! e (consume! e %)) @made)
+        (throw t)))))
 
 (defn- advance-request [e bs ts]
   (begin! e "advance")

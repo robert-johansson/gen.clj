@@ -38,6 +38,22 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Added (experimental): token SMC and completions read the LM's rows
+  lent, and an LM forks a step's parents in one call** (genclj-4acj).
+  `gen.llm.lm/batch-next-logprobs-lent` gives an LM's rows without
+  copying them where the LM lends them (the new protocol `LentRows`,
+  which an LM over an engine implements): its own arrays, which the
+  caller reads and never writes (`gen.llm.branching/lent-logprobs`).
+  `gen.llm.smc/step` (but for a proposal function, which still gets
+  copies) and a completion's draws and site scores (`gen.llm.token`)
+  read their rows so; `lm/next-logprobs` and `lm/batch-next-logprobs`
+  still return new arrays. `gen.llm.branching/fork-each` forks several
+  branches with one call where the engine implements the new optional
+  protocol `ForkEach` (gen.llm.slots's engines: one hand-off to the
+  engine's thread, all or none), and the LM's cache forks a step's
+  parents with it. The same values and draws for the same key. On
+  fenrir's CUDA (Qwen3-0.6B, 16 particles) the copies cost 1.5-1.8 ms a
+  step and the forks' hand-offs 0.2-0.6.
 - **Changed (internal): MLX reads float16 and bfloat16 by a Java loop
   from the buffer, and on CUDA prefetches a large read's pages**
   (genclj-4acj). `->floats` of a 16-bit float array widens its bit

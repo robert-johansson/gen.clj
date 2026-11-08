@@ -275,6 +275,42 @@
     (is (= (smc/particles (run)) (smc/particles (run))))
     (is (= (:log-weights (run)) (:log-weights (run))))))
 
+(deftest lent-rows-are-the-copies
+  ;; token SMC reads its rows lent (lm/batch-next-logprobs-lent: the LM's
+  ;; own arrays, no copies; genclj-4acj). A run equals bit for bit the run
+  ;; over an LM of the same engine that copies (one without LentRows), for
+  ;; each kind of proposal; the lent rows are the copies' values, in
+  ;; order, the same array for the same context; and after the run every
+  ;; row the LM holds is still the engine's (no draw wrote one).
+  ;; Planted (2026-11-08): the lent rows taken in reverse order, and a draw
+  ;; that writes its row's first entry, each fail it
+  (doseq [opts [{} {:potential soft} {:potential soft :proposal :masked} {:potential no-repeats :proposal :awrs}]]
+    (with-open [e (toy/engine {:n-vocab n-vocab :max-branches 128 :n-ctx 64})
+                lent (lm/lm e tokenizer {:max-branches 64 :max-cells 8192})
+                copied (lm/lm e tokenizer {:max-branches 64 :max-cells 8192})]
+      (let [copying (reify lm/LM
+                      (-tokenizer [_] (lm/-tokenizer copied))
+                      (-next-logprobs [_ contexts] (lm/-next-logprobs copied contexts))
+                      (-score [_ context continuation] (lm/-score copied context continuation))
+                      (-info [_] (lm/-info copied)))
+            run (fn [m] (smc/run (token/completion m) [prompt 6] 24 (assoc opts :key (rng/key 9) :host-pool false)))
+            a (run lent)
+            b (run copying)]
+        (testing (pr-str (keys opts) (:proposal opts))
+          (is (satisfies? lm/LentRows lent))
+          (is (not (satisfies? lm/LentRows copying)))
+          (is (= (smc/particles b) (smc/particles a)))
+          (is (= (:log-weights b) (:log-weights a)))
+          (is (= (smc/log-ml-estimate b) (smc/log-ml-estimate a)))
+          ;; the contexts the last step read, lent to its draws
+          (let [contexts (into [] (comp (filter seq) (map #(into prompt (pop %))) (distinct)) (smc/particles a))
+                rows (lm/batch-next-logprobs-lent lent contexts)]
+            (is (every? true? (map (fn [ctx ^floats r] (java.util.Arrays/equals (row ctx) r)) contexts rows))
+                "every lent row the engine's, in order")
+            (is (every? true? (map identical? rows (lm/batch-next-logprobs-lent lent contexts))) "the same arrays again")
+            (is (not-any? true? (map identical? rows (lm/batch-next-logprobs lent contexts))) "batch-next-logprobs copies")
+            (is (= (mapv vec (lm/batch-next-logprobs copying contexts)) (mapv vec rows)) "an LM that copies: the same values")))))))
+
 ;; ---------------------------------------------------------------------------
 ;; The host pool
 ;; ---------------------------------------------------------------------------
