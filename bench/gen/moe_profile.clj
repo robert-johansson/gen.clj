@@ -86,17 +86,17 @@
   "gathered's product of the quantized stack w for the pairs of experts
    idx [N k] and x1's matrices lhs, in gather-qmm calls of at most c pairs
    (MLX's CUDA gather_qmm takes its qmv kernel below 8 rows)."
-  [x1 w idx lhs ^long c]
+  [x1 w idx lhs c]
   (let [[n k] (array/shape idx)
         b (* (long n) (long k))
         fi (array/reshape idx [b])
         fl (array/reshape (array/broadcast-to lhs [n k]) [b])
         outs (mapv (fn [^long s]
-                     (let [e (min b (+ s c))]
+                     (let [e (min b (+ s (long c)))]
                        (array/gather-qmm x1 (:wq w) (:scales w) (:biases w)
                                          (assoc (select-keys w [:bits :group-size])
                                                 :lhs-indices (array/slice fl 0 s e) :rhs-indices (array/slice fi 0 s e)))))
-                   (range 0 b c))]
+                   (range 0 b (long c)))]
     (array/reshape (array/concatenate outs 0) [n k 1 -1])))
 
 (defn- parts
