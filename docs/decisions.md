@@ -6223,3 +6223,69 @@ The JVM battery under C2 there passes too (2,418 tests).
    - the CUDA runtime's prefetch from MlxRuntime ("Token SMC on CUDA").
 6. **CLAUDE.md** gains the llama-bench line and the LLM namespaces in its
    layers table.
+
+### The paged default and shapes compiled at open, as built
+
+(The owner's calls of 2026-11-08, items 3 and 4, built; the choices inside
+them PROVISIONAL, owner to confirm; genclj-i3fp, genclj-17it)
+
+**The paged mode is the default.** `engine` opens the paged mode unless
+given `:paged? false`. `{:continuous? true}` alone opens the continuous
+mode; with `:paged? false` it stays an error.
+- The docstrings and the CHANGELOG say serving several clients needs the
+  continuous mode.
+- The static suites pass `:paged? false`; the paged suites run the default.
+- **An option the chosen mode does not read is loud** (the lead's fix at the
+  merge). `:block` given to the paged default had been silently ignored, and
+  three tests still passed options their mode ignored. The error is
+  `:invalid-option`, naming `:mode` and the `:unread` options.
+
+**Shapes.**
+- **Buckets:** row counts (at least `:min-rows`), chunk lengths (at least a
+  block) and copy counts round up to powers of 2; K, the chunk count, rounds
+  down as before. Every block table is at least 256 positions wide.
+- **A continuous forward's decode rows and chunks are two compiled calls,**
+  evaluated together. Without the split the shapes multiply (rows × width ×
+  K × t × chunk width × state kind), and no bounded set compiled at open could
+  cover them.
+- **`:precompile?`** (default true) traces 21 to 34 shapes at open: decodes
+  of up to 16 rows, a lone read's chunk at each length, several prompts'
+  chunks of up to 64 tokens, and copies of 1 to 16 blocks.
+- **Counting:** `ae/stats :traces` counts calls of a new shape; `ae/shapes`
+  lists every shape with its calls.
+
+**Measured on Metal** (main → branch, alternated; main moves up to 6%
+between passes):
+- **Traces after open:** 16 to 27 → 0 with 8 clients, and 5 → 0 in SMC.
+- **The largest read:** Qwen3 f16 475 → 326 ms; Qwen3.5 f16 603 → 467, f32
+  734 → 496.
+- **Throughput with 8 clients** is within noise: Qwen3 f16 420 → 431, f32
+  283 → 279; Qwen3.5 f16 303 → 295, f32 227 → 224 tokens/s (llama.cpp 107
+  and 73).
+- **Token SMC, paged:** Qwen3 859 → 845 (f16), 769 → 753 (f32); Qwen3.5 967 →
+  925, 786 → 757 (llama.cpp 965 and 287).
+- **Open time:** 0.3–0.5 s → 1.8–2.6 s paged, 2.4–4.4 s continuous.
+
+**Tests.** test/gen/llm/array_engine_shapes.clj checks that bucketed forwards
+equal unbucketed ones and the model's forward, within each suite's band, for
+Qwen3 and Qwen3.5. Three planted bugs fail it:
+- buckets rounded down (up to 4.7 nats on Qwen3; an index error on Qwen3.5);
+- a padding row writing a real block's slot (loud on the JVM);
+- a row reading its table's padding columns (68 rows, up to 6.7 nats).
+
+**The choices, for the owner:**
+1. **The split costs 3 to 7 ms a mixed forward** (the weights read twice):
+   about −2% tokens/s and +4–6% time to first token on Qwen3.5 with 8
+   clients. Not taken: accepting mixed-shape traces.
+2. **One 256-position floor for every table.** A chunk's attention reads the
+   whole width: four 64-token chunks on Qwen3 take 112 → 120 ms (f16) and
+   132 → 151 (f32). Narrowing only prompts' first chunks doubled the chunk
+   shapes and left 5 traces, so it was reverted.
+3. **Compiling at open costs Qwen3.5's SMC about 4%,** likely MLX's buffer
+   cache after the warm-up. Clearing it needs a gen.array hook (only
+   gen.backend.mlx has one). Not taken: a smaller set; `:precompile?` false
+   by default.
+4. **The MoE's open cost is unmeasured,** probably large at 200 to 430 ms a
+   trace; CUDA and the MoE may want a narrower set.
+5. **Smaller:** a growing pool makes every shape new; `ae/groups` is loud on
+   a default engine.
