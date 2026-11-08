@@ -5364,3 +5364,37 @@ before writing the pools, and a step stores its pools at once.
    Infinity are accepted.
 10. **Fixtures add 2.1 MB** under test/fixtures/safetensors, from random
     weights, regenerated deterministically.
+
+### Cleanup: continuous failures, the llama.cpp exit hook, f16 widening
+
+(PROVISIONAL, owner to confirm; genclj-8ni2, genclj-8dtg, genclj-ntre,
+2026-11-08)
+
+**The continuous mode's failures.** batch-forward! stores its pools at once,
+normalizes, then writes the books, as the paged step does. A score that loses
+every slot fails the requests in flight with :lost-slots.
+- Not taken: scoring through the scheduler. That would batch scores (no
+  longer bit-for-bit alone) and need a scratch slot per concurrent score.
+
+**llama.cpp at exit.** A shutdown hook closes each engine on its own thread
+after its current operation, then each unused model under its write lock. It
+waits at most gen.llama.close-at-exit seconds (default 10; 0 turns it off).
+- gen.llm.slots/closer-of (experimental) is new.
+- A child JVM exiting with engines open, one decoding: exit status 134 (the
+  ggml-metal assertion) without the hook, 0 with it.
+- The MLX engine exits cleanly in every mode.
+- Not taken: GGML_METAL_NO_RESIDENCY=1, its cost unmeasured.
+
+**llama-bench.** native/build-llama.sh --bench builds it statically into
+native/build/llama/<platform>/bin/llama-bench.
+- The line for CLAUDE.md's Running section is left for the owner: the lead
+  doesn't edit CLAUDE.md on an agent's request.
+- genclj-ntre stays open until then.
+
+**f16 widening.** gen.array.host/halves->floats is bit-identical on all 65,536
+patterns.
+- On the M4, at 16 rows: float16 0.56 → 0.38 ns per entry, bfloat16
+  0.43 → 0.10 (Graal).
+- Most of the gain comes from bounding loops by the array's length, not by a
+  long argument. gen.llm.host's kernels loop to long arguments too, which may
+  be why Graal on x86 doesn't vectorize them: worth a widen-bench on fenrir.
