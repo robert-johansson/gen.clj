@@ -54,7 +54,13 @@ other values for the same key, from the same distribution.
   rows after the decode rows alike; `[1 MB]` as before), and qwen35's
   `:chunk-len` `[K]`. `ae/stats` counts `:chunks`. A single caller's
   reads are unchanged, bit for bit; concurrent callers' are gathered
-  otherwise (within the engine's band, as before).
+  otherwise (within the engine's band, as before). The paged mode
+  (`:paged?` without `:continuous?`) reads a run by the same compiled
+  batch step, in forwards of `:n-batch` tokens, where it read eagerly
+  over a concatenating cache (**Draws**: its rows move within float
+  round-off); a run whose forward after its first fails now loses its
+  slot (`:lost-slots`), as the continuous mode's does, and its stats
+  count the runs' forwards too.
   At most a power of 2 of chunks a forward, so that forwards trace for
   few shapes. On Metal (M4), 8 clients: Qwen3-0.6B float16 402 → 422
   tokens/s, read p90 16.8 → 14.9 ms, first token 215 → 210 ms (largest
