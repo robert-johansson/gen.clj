@@ -1430,11 +1430,11 @@
         [yc ec] (when chunk
                   (let [k (long (first (array/shape chunk)))
                         t (quot n k)
-                        one (fn [y] (array/reshape (rows y d r) [k t (peek (array/shape y))]))
+                        chunked (fn [y] (array/reshape (rows y d r) [k t (peek (array/shape y))]))
                         live (when chunk-len
                                (array/reshape (array/< (array/arange 0 t 1 {:dtype :int32}) (array/reshape chunk-len [k 1])) [k t 1]))
                         masked (fn [y] (if live (array/where live y 0.0) y))]
-                    (delta-rule cfg w (one qkv) (masked (one beta)) (masked (one g))
+                    (delta-rule cfg w (chunked qkv) (masked (chunked beta)) (masked (chunked g))
                                 {:conv (:chunk-conv entry) :state (:chunk-state entry)} chunk-len)))
         yc (when yc (array/reshape yc [n 1 hv dv]))
         y (cond (and yd yc) (array/concatenate [yd yc] 0) yd yd :else yc)]
