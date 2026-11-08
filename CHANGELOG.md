@@ -38,6 +38,17 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Fixed (experimental): rope of small rotations over many rows on MLX's
+  CUDA** (gen.backend.mlx.rope-cuda; genclj-6fik). MLX 0.32.4's CUDA rope
+  kernel asks a block of more than CUDA's 64 threads on its z axis for a
+  rotation of 16 dimensions or fewer over 128 rows or more (a row each at
+  its own position), and its launch failed (`cudaLaunchKernelExC: invalid
+  argument`): the tiny Qwen3 fixture's paged engine failed to open there
+  (its 128-token chunks), in every dtype. Those shapes now take
+  gen.array's composite; every other rope still runs MLX's kernel (every
+  real model's rotation, 32 dimensions and up, launches). Unchanged off
+  CUDA.
+
 - **Changed (experimental): load-gguf on MLX leaves the file cache as it
   found it for every file** (gen.backend.mlx.io; genclj-vn28). A file of
   only F32, F16, I32, Q8_0, Q4_0 and Q4_1 still loads by MLX's loader

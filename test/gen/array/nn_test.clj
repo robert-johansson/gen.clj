@@ -6,7 +6,9 @@
    - their gradients (the tape's, or MLX's native ones) against central
      finite differences in float64 (on the JVM backend);
    - a backend's fused kernels (MLX's fast ops) against the composites,
-     values and native gradients;
+     values and native gradients; on MLX's CUDA, rope's shapes its kernel
+     cannot launch declined (genclj-6fik; planted: the guard removed, the
+     launch fails);
    - dequantize against the packed words unpacked on the host; quantize's
      error bound; the JVM backend's quantization against MLX's;
      quantized-matmul and gather-qmm against dequantize and matmul, within
@@ -314,6 +316,45 @@
           (let [[fused composite] (fused-and-composite op args)]
             (is (some? fused) (str op " is fused"))
             (is (close-host? (host fused) (host composite) 1e-4) (str op " " (pr-str (last args))))))))))
+
+(deftest small-rotations-over-many-rows-are-the-composite
+  ;; genclj-6fik: MLX's CUDA rope kernel asks a block of 128 threads on z
+  ;; (CUDA's limit 64) for a rotation of 16 dimensions or fewer over 128
+  ;; rows or more, as the tiny Qwen3 fixture's 128-token chunks (a row a
+  ;; token, at its own position): its launch failed (cudaLaunchKernelExC:
+  ;; invalid argument), so such shapes take the composite there. Every
+  ;; backend: rope is the composite at them. On MLX's CUDA: the kernel
+  ;; declines them and takes their neighbors within the limit, and,
+  ;; planted, the guard removed fails the first loudly, as it did
+  ;; (fenrir's RTX PRO 6000, 2026-11-08)
+  (let [opts (fn [x o] (merge {:traditional? false :base 10000.0 :scale 1.0 :freqs nil}
+                              {:offset (array/array (vec (take (first (array/shape x)) (cycle (range 0 120 7)))) {:dtype (ts/int-dtype)})}
+                              o))
+        past [[(normal 40 [128 4 1 16]) 16 {}]                         ; the fixture's q: block (8 1 128)
+              [(normal 41 [256 2 1 16]) 16 {}]                         ; its k, 256 rows: grid z 2
+              [(normal 42 [200 4 2 16]) 8 {:traditional? true}]        ; a partial rotation, 2 positions
+              [(normal 43 [40 16 1 16]) 16 {:offset 3}]]               ; ⌈16/4⌉·40 = 160 on z
+        within [[(normal 44 [64 4 1 16]) 16 {}]                        ; block (8 1 64)
+                [(normal 45 [128 4 1 32]) 32 {}]]                      ; (16 1 64)
+        ;; float32 (float64 is never fused)
+        cuda? (and (= :mlx (ts/backend-name)) (= :cuda (array/device array/*backend*)) (ts/f32?))]
+    (doseq [[x dims o] (concat past within)
+            :let [o (opts x o)]]
+      (is (close-host? (host (array/rope x dims (dissoc o :freqs))) (host (#'nn/rope-composite x dims o)) 1e-4)
+          (str (array/shape x) " rotating " dims)))
+    (when cuda?
+      (let [launches? (requiring-resolve 'gen.backend.mlx.rope-cuda/launches?)
+            block-dims (requiring-resolve 'gen.backend.mlx.rope-cuda/block-dims)]
+        (is (= [8 1 128] (block-dims 8 1 128)) "the block MLX launched for the fixture's chunk (measured)")
+        (doseq [[x dims o] past]
+          (is (nil? (p/-fused array/*backend* :rope [x dims (opts x o)])) (str (array/shape x) " declined")))
+        (doseq [[x dims o] within]
+          (is (some? (p/-fused array/*backend* :rope [x dims (opts x o)])) (str (array/shape x) " fused")))
+        (testing "planted: the guard removed, MLX's launch fails"
+          (let [[x dims o] (first past)]
+            (is (thrown-with-msg? clojure.lang.ExceptionInfo #"cudaLaunchKernelExC"
+                                  (with-redefs-fn {launches? (constantly true)}
+                                    #(array/eval! (array/rope x dims (dissoc (opts x o) :freqs))))))))))))
 
 (deftest native-gradients-of-fused-kernels-are-the-composites
   ;; MLX's own gradients (-Dgen.mlx.grad=native) differentiate the fused

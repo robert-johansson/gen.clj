@@ -12,7 +12,9 @@
    The fast kernels take float32 and the half floats. float64 (the CPU
    device's 64-bit dtypes) is declined: MLX's fallbacks compute rms_norm
    and rope's angles in float32, where the composite is exact. So is rope
-   of 2 axes (MLX's wants 3 or more), and attention under a causal mask
+   of 2 axes (MLX's wants 3 or more), on CUDA rope whose launch MLX's
+   kernel makes past CUDA's limits (small rotations over many rows:
+   gen.backend.mlx.rope-cuda), and attention under a causal mask
    with more queries than keys (MLX's fallback averages the values for
    the queries that see none, where the composite gives zeros). Under
    MLX's native gradients a kernel is used where MLX's VJP agrees with the
@@ -34,6 +36,7 @@
             [gen.backend.mlx.paged :as paged]
             [gen.backend.mlx.paged-attention :as paged-attention]
             [gen.backend.mlx.paged-attention-cuda :as paged-attention-cuda]
+            [gen.backend.mlx.rope-cuda :as rope-cuda]
             [gen.backend.mlx.operands :refer [dtype-on operand scalar-handle shape-of with-operands with-temps]]
             [gen.backend.mlx.transforms :refer [*differentiating*]])
   (:import [gen.mlx Mlx MlxRuntime]
@@ -113,7 +116,10 @@
                             ;; MLX's rope wants 3 axes or more
                             (< (count (shape-of x)) 3)
                             ;; mlx_fast_rope takes an int offset
-                            (and (integer? offset) (not (<= Integer/MIN_VALUE (long offset) Integer/MAX_VALUE))))
+                            (and (integer? offset) (not (<= Integer/MIN_VALUE (long offset) Integer/MAX_VALUE)))
+                            ;; MLX's CUDA kernel fails to launch small
+                            ;; rotations over many rows (genclj-6fik)
+                            (not (rope-cuda/launches? b x dims)))
                 (rope b x dims opts)))
       :gated-delta (let [[q k v g beta state {:keys [chunk-size]}] args]
                      ;; mlx-lm's Metal kernel: no VJP, so not under MLX's
