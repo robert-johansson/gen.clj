@@ -6730,3 +6730,17 @@ the forced tiny tests run on the opt-in `-Dgen.qwen35.vocab-models` models.
    general-prompts band of 0.013 is open.
 2. **A tiny MoE fixture with a vocabulary,** committed, would make the forced
    tiny tests run in every battery.
+
+### The loader's memory on Macs: next (the owner, 2026-11-08 evening)
+
+(Owner, 2026-11-08: "I support your recommendation. Go with number one.")
+
+The GGUF loader's peak comes down, so the Qwen3.6 MoE loads on a Mac
+without the conditions it needs today: the big apps closed, -Xmx8g, and a
+guard tolerating "warn". The levers, each measured:
+- a float16 model's tensors produced in their final dtype tensor by tensor,
+  bit-identical to today's load-then-cast;
+- the GGUF read without leaving its pages in the file cache;
+- the host decode's garbage bounded so the load needs little heap.
+The K-quants' in-memory scales stay as "k-quants: exact" has them; scales
+in float16 is a numerics change, not part of this.
