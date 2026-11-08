@@ -37,7 +37,21 @@
    its own inputs (the same tokens, written where they were), each
    evaluated (no read, no host work between): MLX's encoding and the
    device's time for that step's shape, and once more with the logits
-   read (->floats) and normalized."
+   read (->floats) and normalized.
+   Measured on fenrir (RTX PRO 6000, C2, 2026-11-08, genclj-4acj),
+   Qwen3-0.6B Q8_0 in float16, ms a step (each engine in a JVM of its
+   own; the profile itself costs a few percent): main's paged mode 17.1,
+   its LM read 16.5 of it: the engine's step 12.3 (MLX's evaluation 5.7,
+   the read 3.1 of which the widening 1.2, the normalization 2.2, the
+   compiled call 1.3), the LM's copies of the rows 1.8 (16 a step), the
+   forks' hand-offs to the engine's thread 0.6 (7.9 a step); llama.cpp's
+   7.3 (its step 4.5, the copies 0.8). After genclj-4acj (the 16-bit read
+   from the buffer, prefetched; rows lent; one call for the forks): paged
+   13.2, the read 1.7-1.8; llama.cpp 6.2. MLX's evaluation is bound by
+   the host: gen.step-profile at 16 rows encodes for 7.0 ms and waits 0.3
+   (the device's pipelined floor 5.2 a step), and neither CUDA graphs
+   off, MLX_MAX_OPS_PER_BUFFER of 50 to 1000, nor fenrir's P-cores alone
+   change it."
   (:require [clojure.string :as str]
             [gen.array :as array]
             [gen.array.host :as ahost]

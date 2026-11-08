@@ -234,8 +234,9 @@
   ;; (MlxRuntime/widenHalves; genclj-4acj), as a 2-d slice of rows, and
   ;; past 2^18 entries, where the chunks run in parallel; and so does a
   ;; float32 read that long (MlxRuntime/readFloats).
-  ;; Planted (2026-11-08, on fenrir's CUDA): a chunk read from one entry
-  ;; on, and a chunk's last entry left 0, each fail it for both dtypes
+  ;; Planted (2026-11-08, on fenrir's CUDA, MlxRuntime mutated): a
+  ;; chunk's last entry left 0 (18 failures, both dtypes), each chunk read
+  ;; from one entry on (12), a float32 chunk one entry short (1)
   (when-mlx
     (let [b (mlx)
           stream @(requiring-resolve 'gen.backend.mlx.array/stream)

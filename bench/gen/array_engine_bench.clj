@@ -36,7 +36,15 @@
    llama.cpp's CUDA build 2228; 8 clients: 147, 219 (181), 555 (431),
    503. In float32 SMC 740, 1022 (721), 857 (858), 2214. Qwen3-8B Q8_0
    in float16: SMC 620, 842 (766), 841 (791), 1484; 8 clients 73, 81
-   (76), 231 (220), 144.
+   (76), 231 (220), 144. A JVM's median varies by up to 30% from one
+   JVM to the next on fenrir: genclj-4acj (2026-11-08) alternated main
+   and its branch, the medians of 5 or 6 JVMs. Token SMC on the 0.6B in
+   float16: paged 1008 → 1272, continuous 1056 → 1445, llama.cpp 2177 →
+   2579 (its LM gains the lent rows and forks too); one JVM each: static
+   940 (797 in genclj-6qb6's session), float32 paged 834 → 983,
+   continuous 957 → 972, llama.cpp
+   2124 → 2576; the 8B paged 833 → 840, continuous 848 → 889, llama.cpp
+   1455 → 1600; 8 clients unchanged (550 continuous, llama.cpp 501).
    Its paged mode (gen.bench.engines, of static, paged and llama;
    gen.bench.block-size 16, gen.bench.pool-blocks, gen.bench.min-rows),
    measured on the same Mac (2026-11-07, pool-blocks 128): float32 decode
