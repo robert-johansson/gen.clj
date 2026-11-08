@@ -8,8 +8,8 @@
    the backend under test:
    - the Branching contract (gen.llm.branching-contract), the LM contract
      (gen.llm.lm-contract) and the token generative function's and token
-     SMC's checks (gen.llm.token-contract), within gen.llm.array-engine-
-     test's band;
+     SMC's checks (gen.llm.token-contract), within the band (per
+     platform, array-engine-qwen35-continuous-test's);
    - a branch's rows are qwen35's forward's, through steps that cross
      blocks, stacked steps, lane steps and steps reading a shared group
      in place, forks appending in place and copying (a second writer);
@@ -40,7 +40,16 @@
 
 (def ^:private models (delay (into {} (map (fn [[k f]] [k (qwen35/load f)])) files)))
 
-(def ^:private band (if (ts/jvm?) 2e-6 2e-5))
+(def ^:private band
+  "array-engine-qwen35-continuous-test's, per platform (its docstring
+   gives bench/gen/qwen35_continuous_noise.clj's measurements, which take
+   this namespace's comparisons too: on fenrir's x86 CPU a lane step's
+   2.5e-5 failed the band of 2e-5): 2e-6 on the JVM backend, 2e-5 on MLX
+   on macOS, 1.4e-4 on CUDA and 8e-5 on MLX's CPU elsewhere."
+  (cond (ts/jvm?) 2e-6
+        (.startsWith (System/getProperty "os.name") "Mac") 2e-5
+        (ts/cuda?) 1.4e-4
+        :else 8e-5))
 
 (def ^:private tokenizer (tt/tokenizer 128))
 

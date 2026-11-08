@@ -52,23 +52,24 @@
 (def ^:private band
   "The largest |Δ log p| between two computations of one distribution,
    per platform: twice the largest that bench/gen/qwen35_continuous_noise.clj
-   measured, rounded up, over this namespace's comparisons (the concurrent
-   clients alone and concurrently against qwen35's forward and each other,
-   10 runs; the contracts') and 20 more clients alone, of contexts to 133
-   tokens (the test's reach 44).
+   measured, rounded up, over this namespace's comparisons and
+   array-engine-qwen35-paged-test's (the clients in 10 runs, each
+   namespace in 3 with its band 0) and 20 more clients alone, of contexts
+   to 144 tokens (the test's reach 44).
    - The JVM backend: 2e-6 (float rounding, gen.llm.array-engine-test's).
    - MLX on macOS: 2e-5, gen.llm.array-engine-test's (Qwen3's, measured
-     on the M4's Metal and CPU).
+     on the M4's Metal and CPU; Qwen3.5's not measured there yet).
    - CUDA: 1.4e-4 (fenrir's RTX PRO 6000, sm_120, 2026-11-08): largest
-     6.8e-5, a row of 121 tokens; 2.4e-5 over the test's comparisons,
-     whose 2e-5 band it failed.
+     6.8e-5, a row of 121 tokens; 2.4e-5 over the tests' comparisons,
+     which failed the band of 2e-5.
    - MLX's CPU elsewhere: 8e-5 (fenrir's x86 CPU, 2026-11-08): largest
-     3.7e-5, a row of 51 tokens; 3.5e-5 over the test's comparisons.
-   Off the Mac, a recurrent read's round-off (a chunk of 8 tokens, then
+     3.7e-5, a row of 51 tokens; 3.5e-5 over the tests' comparisons.
+   Off the Mac, a recurrent read's round-off (chunks of 8 tokens and
    steps, against the forward's one prefill) is heavy-tailed over
-   contexts: on CUDA a median of 3.8e-6, a 99th percentile of 4.6e-5. The
-   planted bugs exceed every band by far: the test's by 4 nats, and the
-   decode rows' states rounded to float16 at each step by 5e-3 (MLX)."
+   contexts: on CUDA a median of 3.8e-6 and a 99th percentile of 4.6e-5.
+   The planted bugs exceed every band by far: the test's by 4 nats, and
+   the decode rows' states rounded to float16 at each step by 5e-3 (on
+   CUDA and the CPU)."
   (cond (ts/jvm?) 2e-6
         (.startsWith (System/getProperty "os.name") "Mac") 2e-5
         (ts/cuda?) 1.4e-4
