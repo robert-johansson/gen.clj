@@ -5,10 +5,13 @@
 
      clojure -J-Dgen.backend=mlx -J-Dgen.llama.lib=<lib> -M:bench -m gen.array-engine-bench <Qwen3 GGUF>
 
-   One GPU JVM at a time. Rows (each the median of gen.bench.runs runs, 3,
-   after one untimed warm run, which traces the compiled steps):
+   One GPU JVM at a time. Each engine is opened once and every section
+   run on it before the next opens (a model loaded once). Rows (each the
+   median of gen.bench.runs runs, 3, after one untimed warm run, which
+   traces the compiled steps):
    - decode: a prompt of gen.bench.prompt tokens (64) read, forked
-     gen.bench.batch times (16) and the forks advanced together
+     gen.bench.batch times (16; or a list, 1,16, a row each) and the
+     forks advanced together
      gen.bench.steps times (32), by fixed tokens: tokens/s is batch ×
      steps over the time, every row's next-token log-probabilities
      normalized on the host (the Branching protocol's form). On the array
@@ -150,7 +153,23 @@
    290-295 → 292-296 (read p90 21.9-23.2 → 21.9-22.3 ms), float32
    217-218 → 217-219; Qwen3-0.6B (its SMC steps hold 0.5-0.6 GB of
    cache) SMC float16 847-856 → 838-853, float32 747-753 → 738-752, 8
-   clients 400-428 → 404-422, 272-277 → 272-279."
+   clients 400-428 → 404-422, 272-277 → 272-279.
+   Qwen3.6-35B-A3B Q4_K_M on the MacBook M2 Max (64 GB, Metal,
+   2026-11-08; each engine and dtype in a JVM of its own, two JVMs each,
+   three for continuous float32; -Xmx8g, gen.bench.batch 1,16, warm-runs
+   2; tokens/s, float32 → float16; llama.cpp v0.9.0's Metal build):
+   decode at batch 1 (paged) 35.9-36.5 → 39.4-39.5, llama.cpp 48.3-49.1;
+   at 16 172-215 → 176-225, llama.cpp 174; token SMC at 16 particles
+   paged 544-548 → 621-622, continuous 537-541 → 604-611, llama.cpp
+   653-656; 8 continuous clients 99-111 → 93-118 (read p50 52-56 → 48-60
+   ms, p90 55-61 → 50-64 ms, time to first token p50 0.94-1.12 → 0.88-1.22
+   s, largest 1.3-1.7 s), llama.cpp 47.8-47.9 (p50 150, p90 161 ms; first
+   token 0.85 s). The second JVMs ran slower at 16 rows and 8 clients
+   (the laptop in use), llama.cpp's within 2%. Open 14-30 s (27 shapes
+   compiled in 6-14.5 s paged, 34 in 10-13.5 s continuous, faster with
+   the file cached), 0 traces after open. MLX's peak 30.7-32.2 GB in
+   float32, 33.7 GB in float16 (the model loads in float32, then is cast;
+   23.2 GB after)."
   (:require [clojure.string :as str]
             [gen.array :as array]
             [gen.gfi :as gfi]
@@ -169,7 +188,8 @@
 
 (def ^:private settings
   {:prompt (long-prop "prompt" 64)
-   :batch (long-prop "batch" 16)
+   ;; gen.bench.batch: the decode row's batch, or several (1,16), a row each
+   :batches (mapv parse-long (str/split (prop "batch" 16) #","))
    :steps (long-prop "steps" 32)
    :particles (long-prop "particles" 16)
    :smc-tokens (long-prop "smc-tokens" 32)
@@ -233,8 +253,8 @@
 (defn- decode
   "The decode row's work on engine e: prompt read, batch forks advanced
    steps times, everything disposed."
-  [e prompt]
-  (let [{:keys [batch steps]} settings
+  [e prompt batch]
+  (let [{:keys [steps]} settings
         root (br/open e prompt)
         tokens (vec (take batch (cycle [13 220 279 323 315 264 304 374])))]
     (loop [bs (br/fork root batch) i 0]
@@ -376,7 +396,7 @@
 (defn- run
   "-main's rows, for the model at path."
   [path]
-  (let [{:keys [batch steps particles smc-tokens prompt]} settings
+  (let [{:keys [steps particles smc-tokens prompt]} settings
         ;; the engine's :precompile?, when given (genclj-i3fp)
         pre #(cond-> % (some? (:precompile? settings)) (assoc :precompile? (:precompile? settings)))
         engines (filterv (fn [[k]] ((:engines settings) k))
@@ -424,29 +444,36 @@
                        (when (and (:shapes? settings) (:paged (br/info e)))
                          (doseq [[sig n] (sort-by (comp - val) ((requiring-resolve 'gen.llm.array-engine/shapes) e))]
                            (println (format "|   %6d %s | | |" n (pr-str sig)))))))))]
+    ;; each engine opened once, every section run on it before the next
+    ;; opens (a model as large as Qwen3.6-35B-A3B's 28 GB loaded once)
     (with-open [^java.io.Closeable v ((llama 'vocabulary) path)]
       (let [tok ((llama 'tokenizer) v)
             text (str/join " " (repeat 40 "The sea is calm tonight, and the tide is full."))
-            prompt-tokens (vec (take prompt ((llama 'tokenize) v text)))]
-        (when ((:sections settings) :decode)
-          (println "\n### Decode at batch" batch "," steps "steps after" prompt "tokens\n")
-          (println "|                                              |        ms |  tokens/s |")
-          (println "|---|---:|---:|")
-          (doseq [[k label make] engines]
-            (opened k make #(row label (median-ms (fn [] (decode % prompt-tokens))) (* batch steps)))))
-        (when ((:sections settings) :smc)
-          (println "\n### Token SMC," (:smc-clients settings) "run(s) at once," particles "particles," smc-tokens "tokens each (bootstrap)\n")
-          (println "|                                              |        ms |  tokens/s |")
-          (println "|---|---:|---:|")
-          (doseq [[k label make] engines]
-            (opened k make #(row label (median-ms (fn [] (smc-run % tok prompt-tokens))) (* (:smc-clients settings) particles smc-tokens)))))
-        (doseq [[section n] [[:clients (:clients settings)] [:lone 1]]
-                :when ((:sections settings) section)]
-          (println "\n###" n (if (= 1 n) "client" "clients at once") "," (:client-tokens settings) "tokens each, an LM each\n")
-          (println "|                                              |   wall ms |  tokens/s | p50 ms  | p90 ms  | max ms  | TTFT p50 | TTFT max | admission | traces |")
-          (println "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|")
-          (doseq [[k label make] engines]
-            (opened k make #(clients-rows label % tok prompt-tokens n))))))))
+            prompt-tokens (vec (take prompt ((llama 'tokenize) v text)))
+            header (fn [] (println "|                                              |        ms |  tokens/s |")
+                     (println "|---|---:|---:|"))]
+        (doseq [[k label make] engines]
+          (println "\n##" label)
+          (opened k make
+                  (fn [e]
+                    (when ((:sections settings) :decode)
+                      (doseq [batch (:batches settings)]
+                        (println "\n### Decode at batch" batch "," steps "steps after" prompt "tokens\n")
+                        (header)
+                        (row label (median-ms (fn [] (decode e prompt-tokens batch))) (* (long batch) (long steps)))
+                        (flush)))
+                    (when ((:sections settings) :smc)
+                      (println "\n### Token SMC," (:smc-clients settings) "run(s) at once," particles "particles," smc-tokens "tokens each (bootstrap)\n")
+                      (header)
+                      (row label (median-ms (fn [] (smc-run e tok prompt-tokens))) (* (long (:smc-clients settings)) (long particles) (long smc-tokens)))
+                      (flush))
+                    (doseq [[section n] [[:clients (:clients settings)] [:lone 1]]
+                            :when ((:sections settings) section)]
+                      (println "\n###" n (if (= 1 n) "client" "clients at once") "," (:client-tokens settings) "tokens each, an LM each\n")
+                      (println "|                                              |   wall ms |  tokens/s | p50 ms  | p90 ms  | max ms  | TTFT p50 | TTFT max | admission | traces |")
+                      (println "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|")
+                      (clients-rows label e tok prompt-tokens n)
+                      (flush)))))))))
 
 (defn -main [path & _]
   (when-not (= :mlx (array/backend-name array/*backend*))

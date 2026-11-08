@@ -50,6 +50,33 @@
    weights: their attention and states are less tame than a trained
    model's); the value heads grouped where the converter tiles them fail
    it by 7.1 to 11.1 nats.
+   On Metal a model of K-quants has the band 11.7 nats
+   (against-llama/band): twice the largest |Δ log p| (5.85, rounded up)
+   that the bench measured on the MacBook M2 Max (2026-11-08,
+   Qwen3.6-35B-A3B-Q4_K_M against llama.cpp v0.9.0's Metal build, the
+   forward in float32; gen.llama-noise's 20 general prompts and its 20 of
+   digits, each read whole, as a chunk and through 8 steps; llama.cpp's
+   readings taken in a JVM of their own, as the 28 GB model and
+   llama.cpp's 21 GB do not fit the MacBook together): 0.78 on the
+   general prompts (median 1.8e-3; 12 of the 20 prompts within 3e-3, as
+   a dense model's), 5.85 on the digits (median 0.17-0.24); the argmax
+   equal in 199 and 200 of 200. The largest gaps are routing near-ties:
+   the 12 largest of each set are of readings whose forwards hold a
+   near-tie of the router's top k (its least log p_8/p_9 over the layers
+   and positions read 9e-7 to 5.4e-5, but one of 1.5e-4 on the digits);
+   on the general prompts the readings of least margin 1e-4 or more (99
+   of 200) are within 3.0e-3 (bench/gen/qwen3_llama_noise.clj's margins,
+   its docstring the table). This test's 5 prompts measured within the
+   band, and every planted error past mutation-nats on the 44-token one.
+   llama.cpp's own spread on Metal on this file reaches 2.65 (general)
+   and 7.11 (digits, a fork against a fresh read). The planted errors
+   there, the least and the median over the 20 general prompts: the conv
+   state's oldest inputs 2.34 and 5.81; the conv kernel reversed 9.06 and
+   13.8; attn_q's query and gate swapped 10.3 and 15.8; KV heads tiled
+   2.65 and 4.52; the q/k norms skipped 10.9 and 13.1; RoPE's traditional
+   pairs 0.16 and 0.48; the value heads grouped 7.41 and 14.2; the
+   experts' gate and up swapped 9.63 and 14.2; the router's top k not
+   renormalized 2.89 and 6.13; the shared expert ungated 7.23 and 13.8.
    Off the Mac the band is 7.1 nats, and 12.3 on a model of K-quants
    (against-llama/band): twice the largest |Δ log p| (rounded up) that
    the bench measured on fenrir as qwen3-llama-test's (2026-11-08, MLX's
@@ -91,8 +118,7 @@
 
 (def ^:private band
   ;; Per platform and quantization, from the measurements above
-  ;; (against-llama/band; on Metal, K-quants unmeasured); 0 without a test
-  ;; model (the tests skip)
+  ;; (against-llama/band); 0 without a test model (the tests skip)
   (if (and model-path (.isFile (java.io.File. ^String model-path))) (against/band model-path) 0.0))
 
 (def ^:private mutation-nats
@@ -125,18 +151,7 @@
 
 (def ^:private shared (atom nil))
 
-(defn- setup
-  "[engine model]: llama.cpp's engine and the forward's model, of the test
-   model, made once."
-  []
-  (or @shared
-      (reset! shared [((llama 'engine) {:model model-path :max-branches 4 :n-ctx 1024}) (qwen35/load model-path)])))
-
-(use-fixtures :once (fn [f]
-                      (try (f)
-                           (finally (when-let [[^java.io.Closeable e] @shared]
-                                      (.close e)
-                                      (reset! shared nil))))))
+(use-fixtures :once (fn [f] (try (f) (finally (reset! shared nil)))))
 
 (defmacro ^:private when-qwen35
   "body when llama.cpp, MLX and a Qwen3.5 test model are here (counted as
@@ -159,6 +174,19 @@
         "is the product of each choice's, and")
    (apply str (repeat 6 (str "A recurrent layer keeps a state of fixed size, which each token decays, "
                              "corrects and reads; attention keeps every token. ")))])
+
+(defn- setup
+  "[readings model]: llama.cpp's readings of each of prompts
+   (against-llama/reference's, 4 greedy steps) and the forward's model, of
+   the test model, made once. llama.cpp's engine is closed before the
+   model loads, so that the two are never in memory at once (on
+   Qwen3.6-35B-A3B 21 and 28 GB, more than a 64 GB Mac holds beside its
+   own)."
+  []
+  (or @shared
+      (let [rs (with-open [^java.io.Closeable e ((llama 'engine) {:model model-path :max-branches 4 :n-ctx 1024})]
+                 (mapv #(against/reference e ((llama 'tokenize) e %) 4) prompts))]
+        (reset! shared [rs (qwen35/load model-path)]))))
 
 ;; ---------------------------------------------------------------------------
 ;; Tiny random models with the 0.8B's vocabulary: unequal heads, experts
@@ -203,18 +231,17 @@
 
 (deftest log-probabilities-are-llama-cpp-s
   (when-qwen35
-    (let [[e m] (setup)]
-      (doseq [text prompts
-              :let [tokens ((llama 'tokenize) e text)]]
-        (testing (str (count tokens) " tokens: " (pr-str (subs text 0 (min 30 (count text)))))
-          (doseq [{:keys [what max-diff argmax? top5?]} (against/compare-prompt e m tokens 4 band)]
+    (let [[rs m] (setup)]
+      (doseq [[text r] (map vector prompts rs)]
+        (testing (str (count (:tokens r)) " tokens: " (pr-str (subs text 0 (min 30 (count text)))))
+          (doseq [{:keys [what max-diff argmax? top5?]} (against/compare-readings m r band)]
             (is (<= max-diff band) (str what ": |Δ log p| " max-diff))
             (is argmax? (str what ": the argmax"))
             (is top5? (str what ": the top 5"))))))))
 
 (deftest planted-convention-errors-fail-by-nats
   (when-qwen35
-    (let [[e m] (setup)
-          tokens ((llama 'tokenize) e (nth prompts 3))]
+    (let [[rs m] (setup)
+          readings (nth rs 3)]
       (doseq [mutation (sort (keys (against/mutations-of m)))]
-        (is (< mutation-nats (against/mutated e m tokens mutation)) (name mutation))))))
+        (is (< mutation-nats (against/mutated m readings mutation)) (name mutation))))))

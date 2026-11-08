@@ -83,8 +83,11 @@
    bench/gen/qwen3_llama_noise.clj measured, rounded up, by the model's
    family and quantization. qwen3-llama-test's and qwen35-llama-test's
    docstrings give the measurements.
-   - On Metal: Qwen3 0.075 (Q8_0), 0.47 (K-quants); Qwen3.5 0.035 (Q8_0;
-     K-quants unmeasured).
+   - On Metal: Qwen3 0.075 (Q8_0), 0.47 (K-quants); Qwen3.5 0.035 (Q8_0)
+     and 11.7 (K-quants: Qwen3.6-35B-A3B's Q4_K experts, the MacBook M2
+     Max, 2026-11-08, the general and the digit prompts; a few readings'
+     routing near-ties make it, and llama.cpp's own spread on Metal
+     reaches 7.1).
    - Elsewhere, against llama.cpp's CUDA and x86 CPU builds, which
      quantize the activations to 8 bits for their dot products (fenrir,
      2026-11-08, the general and the digit prompts): Qwen3 2.4 (Q8_0;
@@ -95,7 +98,7 @@
   (let [qwen35? (#{"qwen35" "qwen35moe"} (architecture path))
         k? (k-quants? path)]
     (if (.startsWith (System/getProperty "os.name") "Mac")
-      (cond qwen35? 0.035 k? 0.47 :else 0.075)
+      (cond (and qwen35? k?) 11.7 qwen35? 0.035 k? 0.47 :else 0.075)
       (cond (and qwen35? k?) 12.3 qwen35? 7.1 :else 2.4))))
 
 (def ^:private sdpa array/sdpa)
