@@ -107,7 +107,13 @@
    413-431. The same branch with :max-chunks 1 against 16 in one session:
    Qwen3 float16 398 → 441, first token 252 → 197; Qwen3.5 float16 275 →
    298, 328 → 274. With one warm run, 0 to 7 of each timed run's forwards
-   trace a new shape (50-125 ms each), moving these by up to 20%."
+   trace a new shape (50-125 ms each), moving these by up to 20%. The
+   paged mode's runs by the compiled batch step (main, then the branch;
+   gen.bench.warm 2, runs 5): token SMC Qwen3-0.6B float16 811 → 864,
+   float32 691 → 757, Qwen3.5-0.8B float16 887 → 970, float32 706 → 783;
+   8 clients' first token at the median 319 → 249, 373 → 268, 447 → 317,
+   556 → 340 ms, tokens/s within ±5% (102 → 97, 91 → 93, 78 → 77, 70 →
+   73)."
   (:require [clojure.string :as str]
             [gen.array :as array]
             [gen.gfi :as gfi]

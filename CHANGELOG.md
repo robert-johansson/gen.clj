@@ -60,7 +60,10 @@ other values for the same key, from the same distribution.
   over a concatenating cache (**Draws**: its rows move within float
   round-off); a run whose forward after its first fails now loses its
   slot (`:lost-slots`), as the continuous mode's does, and its stats
-  count the runs' forwards too.
+  count the runs' forwards too. Token SMC in the paged mode (16
+  particles, Metal): Qwen3-0.6B float16 811 → 864 tokens/s, Qwen3.5-0.8B
+  887 → 970; its 8 clients' first token 319 → 249 ms (Qwen3) and 447 →
+  317 (Qwen3.5).
   At most a power of 2 of chunks a forward, so that forwards trace for
   few shapes. On Metal (M4), 8 clients: Qwen3-0.6B float16 402 → 422
   tokens/s, read p90 16.8 → 14.9 ms, first token 215 → 210 ms (largest
