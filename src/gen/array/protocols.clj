@@ -184,9 +184,9 @@
                                                  :sorted? as for MLX's"))
 
 (defprotocol ^{:api :experimental} ILoading
-  "A backend that loads arrays from a model's files: gen.array/load-gguf.
-   A backend without it makes load-gguf a loud error. Experimental:
-   outside the 1.x promise (DESIGN §9)."
+  "A backend that loads arrays from a model's files: gen.array/load-gguf
+   and gen.array/load-safetensors. A backend without it makes them loud
+   errors. Experimental: outside the 1.x promise (DESIGN §9)."
   (^{:api :experimental} -load-gguf [b header]
     "The arrays of one GGUF file (a split model's file), whose header
      gen.array has read and checked (gen.array.gguf/header and
@@ -209,7 +209,18 @@
                      sub-block of 32 a group: scale d·sc and bias -(dmin·m)
                      in float32
        :q6_k         an array of float32, d·sc·(q - 32)
-     gen.array.gguf/host-tensor decodes every type so on the host."))
+     gen.array.gguf/host-tensor decodes every type so on the host.")
+  (^{:api :experimental} -load-safetensors [b header]
+    "The arrays of one safetensors file (a checkpoint's shard), whose
+     header gen.array has read and checked (gen.array.safetensors/header:
+     {:path :metadata :tensors :all-types}, a tensor {:name :type :dtype
+     :shape :offset :bytes}), :tensors only those to load (:all-types
+     every tensor's type in the file, by name): a map from each
+     tensor's name to its array, of the dtype :dtype names (gen.array's
+     for the file's: F64, F32, F16, BF16, I64, I32, U32, BOOL; a backend
+     may refuse a file, loudly: MLX refuses one holding F64), or float32
+     (the same values) for :float16 and :bfloat16 on a backend without
+     them. gen.array.safetensors/read-tensor reads each so on the host."))
 
 (defprotocol ^{:api :experimental} IOverwriting
   "A backend that writes values over an array's entries at indices:
@@ -344,6 +355,18 @@
     (-load-gguf b header)
     (throw (ex-info (str "load-gguf: the " (name (-name b)) " backend loads no GGUF files")
                     {:reason :unsupported :op :load-gguf :backend (-name b)}))))
+
+(defn ^:no-doc load-safetensors
+  "-load-safetensors on b, or the loud error naming b when b loads no
+   files (or, implementing ILoading before load-safetensors came, no
+   safetensors files)."
+  [b header]
+  (let [refuse #(ex-info (str "load-safetensors: the " (name (-name b)) " backend loads no safetensors files")
+                         {:reason :unsupported :op :load-safetensors :backend (-name b)})]
+    (if (instance? gen.array.protocols.ILoading b)
+      (try (-load-safetensors b header)
+           (catch AbstractMethodError _ (throw (refuse))))
+      (throw (refuse)))))
 
 (defn ^:no-doc put-along-axis
   "-put-along-axis on b, or the loud error naming b when b overwrites

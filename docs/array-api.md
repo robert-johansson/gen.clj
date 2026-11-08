@@ -209,7 +209,7 @@ needs, taken from GenMLX's measured call counts
 | batching | `vmap` · `batched?` `batch-shape` `particle-backend` `particle` `particles` `all-particles` | — (the batch tracer, a wrapping backend: §8b) | all |
 | neural networks (experimental, 1.3.0) | `rms-norm` `rope` `sdpa` `selective-log-softmax` `gated-delta` | — (a fused kernel where a backend has one: `IFused`'s `-fused` with `:rms-norm :rope :sdpa :gated-delta`) | all five |
 | quantized weights (experimental, 1.3.0) | `quantize` `dequantize` `quantized-matmul` `gather-qmm` | `IQuantized`'s `-quantized` with `:quantize :dequantize :quantized-matmul :gather-qmm` | — |
-| files (experimental, 1.3.0) | `load-gguf` | `ILoading`'s `-load-gguf`, per file of a model | — |
+| files (experimental, 1.3.0) | `load-gguf` `load-safetensors` | `ILoading`'s `-load-gguf` and `-load-safetensors`, per file of a model | — |
 | overwriting (experimental, 1.3.0) | `put-along-axis` | `IOverwriting`'s `-put-along-axis` | — |
 | paged KV caches (experimental, 1.3.0) | `paged-write` `copy-blocks` `paged-attention` | composites (`IFused`'s `:paged-write`, `:paged-attention`) | all three |
 | host reads (experimental, 1.3.0) | `->floats` | `IHostFloats`'s `-to-floats` (else `-to-host`) | — |
@@ -350,6 +350,18 @@ each capability is an optional protocol of its own:
   loader would make it float16, silently. MLX 0.32.4's loader misreads
   float64 metadata and the process dies, so the MLX backend refuses such
   a file (`:unsupported`); the JVM backend reads it.
+- **`load-safetensors`** reads a safetensors file, an index
+  (model.safetensors.index.json: every shard it maps) or a checkpoint's
+  directory on `*backend*`: the headers on the host (`gen.array.safetensors`,
+  its JSON by `gen.array.json`: no dependency), the tensors by the
+  backend's `ILoading` (MLX: `mlx_load_safetensors`; the JVM backend: the
+  host reader), only those `:select` accepts. F32, F64, I32, I64, U32 and
+  BOOL load as their dtypes, F16 and BF16 as float16 and bfloat16 (float32
+  on the JVM backend: the same values). Another dtype selected, an int64
+  past 2^53 on the JVM backend, and a file whose tensors do not cover its
+  data exactly are loud. MLX's quantized checkpoints (U32 words with
+  `.scales` and `.biases`) are read as quantized matrices by
+  gen.llm.models' loaders, which have config.json's bits and group size.
 
 - **`put-along-axis`** (`IOverwriting`) writes values over x's entries at
   indices along an axis: the overwrite, the counterpart of `take-along-axis`

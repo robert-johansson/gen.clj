@@ -1,10 +1,12 @@
 (ns gen.llm.models.qwen35
   "Qwen3.5's and Qwen3.6's forward passes over gen.array, dense
    (architecture qwen35) and mixture-of-experts (qwen35moe), from a GGUF
-   file's weights (docs/research/llm-mlx-engine.md §2, P4 of §6), beside
+   file's weights or a Hugging Face checkpoint's
+   (docs/research/llm-mlx-engine.md §2, P4 of §6), beside
    gen.llm.models.qwen3 and with its functions:
 
-     (load path)                       → a model {:config :weights} from a GGUF file
+     (load path)                       → a model {:config :weights} from a GGUF file,
+                                         or a checkpoint's directory (load's docstring)
      (load path {:dtype :float16})     → … computing in another float dtype
      (model gguf)                      → the same from gen.array/load-gguf's result
      (config metadata)                 → the architecture from a GGUF's metadata
@@ -109,6 +111,7 @@
             [gen.array :as array :refer [+ * /]]
             [gen.llm.lora :as lora]
             [gen.llm.models :as models]
+            [gen.llm.models.checkpoint :as checkpoint]
             [gen.llm.models.common :as common]))
 
 (set! *warn-on-reflection* true)
@@ -349,11 +352,283 @@
                            {:tensors (vec unread)})))
      {:config (assoc cfg :vocab vocab :dtype dtype) :weights weights})))
 
+;; ---------------------------------------------------------------------------
+;; Hugging Face checkpoints, read as llama.cpp's converter writes their GGUF
+;; ---------------------------------------------------------------------------
+
+(def ^:private skipped
+  "The prefixes of a checkpoint's tensors the text model never reads: the
+   vision tower (Hugging Face's, mlx-vlm's) and the MTP block."
+  ["model.visual." "visual." "vision_tower." "model.vision_tower." "mtp." "model.mtp."])
+
+(def ^:private prefixes
+  "The text model's prefixes: Qwen3_5ForConditionalGeneration's, mlx-lm's
+   saved layout's, a causal LM's."
+  ["model.language_model." "language_model.model." "model."])
+
+(defn- skipped? [name] (some #(str/starts-with? name %) skipped))
+
+(defn- strip
+  "A tensor's name after its text model's prefix (\"layers.0.…\",
+   \"embed_tokens.weight\"), lm_head's \"lm_head.weight\", or the name
+   itself."
+  [name]
+  (if (#{"lm_head.weight" "language_model.lm_head.weight"} name)
+    "lm_head.weight"
+    (or (some #(when (str/starts-with? name %) (subs name (count %))) prefixes) name)))
+
+(defn- text-config
+  "config.json's text model's: its text_config, or itself."
+  [c]
+  (let [tc (get c "text_config" c)]
+    (when-not (map? tc) (throw (invalid "config.json's text_config is not an object")))
+    tc))
+
+(defn- hf-metadata
+  "The metadata llama.cpp's converter writes for a Qwen3.5 or Qwen3.5-MoE
+   checkpoint's config.json (conversion/qwen.py's Qwen3_5TextModel and
+   Qwen3NextModel), floats as the GGUF's float32, with its defaults: RoPE
+   over a quarter of a head (partial_rotary_factor 0.25), M-RoPE's
+   sections [11 11 10 0], a full attention layer every 4th; layer_types
+   as the recurrent layers, the MTP block's not. Loud (:unsupported) for
+   another model_type, an activation but SiLU, attention without its
+   output gate, M-RoPE not interleaved, dense layers in a mixture of
+   experts or its top weights not renormalized, and RoPE scaling (which
+   config refuses once it is metadata)."
+  [c]
+  (let [tc (text-config c)
+        k #(get tc %)
+        types #{"qwen3_5" "qwen3_5_moe" "qwen3_5_text" "qwen3_5_moe_text"}
+        model-type (get c "model_type")
+        moe? (some? (k "num_experts"))
+        arch (if moe? "qwen35moe" "qwen35")
+        a #(str arch "." %)
+        rope (or (k "rope_parameters") (k "rope_scaling") {})
+        rope-type (or (get rope "rope_type") (get rope "type"))
+        theta (or (get rope "rope_theta") (k "rope_theta"))
+        head-dim (k "head_dim")
+        rope-head (or head-dim (when (and (integer? (k "hidden_size")) (integer? (k "num_attention_heads")))
+                                 (quot (long (k "hidden_size")) (long (k "num_attention_heads")))))
+        factor (or (get rope "partial_rotary_factor") (k "partial_rotary_factor") 0.25)
+        sections (get rope "mrope_section" [11 11 10 0])
+        mtp (long (or (k "mtp_num_hidden_layers") 0))
+        layer-types (k "layer_types")]
+    (when-not (and (types model-type) (or (identical? c tc) (types (k "model_type"))))
+      (throw (unsupported (str "the checkpoint's model_type is " (pr-str model-type) ", not one of " (vec (sort types)))
+                          {:model-type model-type})))
+    (when-not (contains? #{nil "silu"} (k "hidden_act"))
+      (throw (unsupported (str "the activation " (pr-str (k "hidden_act")) " (Qwen3.5's is SiLU)") {:hidden-act (k "hidden_act")})))
+    (when (false? (k "attn_output_gate"))
+      (throw (unsupported "attention without its output gate")))
+    (when (and sections (false? (get rope "mrope_interleaved")))
+      (throw (unsupported "M-RoPE not interleaved (llama.cpp's qwen35 computes the interleaved one)")))
+    (when (and moe? (or (seq (k "mlp_only_layers")) (not (contains? #{nil 1} (k "decoder_sparse_step")))
+                        (false? (k "norm_topk_prob"))))
+      (throw (unsupported (str "a mixture of experts with dense layers among its own (mlp_only_layers, decoder_sparse_step)"
+                               " or its top experts' weights not renormalized (norm_topk_prob)"))))
+    (when (and layer-types (not (and (sequential? layer-types)
+                                      (every? #{"linear_attention" "full_attention"} layer-types))))
+      (throw (invalid (str "config.json's layer_types are not linear_attention or full_attention: " (pr-str layer-types)))))
+    (cond-> {"general.architecture" arch
+             (a "context_length") (k "max_position_embeddings")
+             (a "embedding_length") (k "hidden_size")
+             (a "block_count") (when (integer? (k "num_hidden_layers")) (c/+ (long (k "num_hidden_layers")) mtp))
+             (a "attention.head_count") (k "num_attention_heads")
+             (a "attention.head_count_kv") (k "num_key_value_heads")
+             (a "attention.key_length") head-dim
+             (a "attention.value_length") head-dim
+             (a "attention.layer_norm_rms_epsilon") (checkpoint/float32 (k "rms_norm_eps"))
+             (a "rope.dimension_count") (when (integer? rope-head) (long (c/* (double rope-head) (double factor))))
+             (a "rope.dimension_sections") (when (sequential? sections) (vec (take 4 (concat sections (repeat 0)))))
+             (a "full_attention_interval") (or (k "full_attention_interval") 4)
+             (a "ssm.conv_kernel") (k "linear_conv_kernel_dim")
+             (a "ssm.state_size") (k "linear_key_head_dim")
+             (a "ssm.group_count") (k "linear_num_key_heads")
+             (a "ssm.time_step_rank") (k "linear_num_value_heads")
+             (a "ssm.inner_size") (when (and (integer? (k "linear_value_head_dim")) (integer? (k "linear_num_value_heads")))
+                                    (c/* (long (k "linear_value_head_dim")) (long (k "linear_num_value_heads"))))}
+      theta (assoc (a "rope.freq_base") (checkpoint/float32 theta))
+      (k "intermediate_size") (assoc (a "feed_forward_length") (k "intermediate_size"))
+      (pos? mtp) (assoc (a "nextn_predict_layers") mtp)
+      layer-types (assoc (a "attention.recurrent_layers") (into (mapv #(= "linear_attention" %) layer-types)
+                                                                (repeat mtp false)))
+      (not (contains? #{nil "default"} rope-type)) (assoc (a "rope.scaling.type") rope-type)
+      moe? (assoc (a "expert_count") (k "num_experts")
+                  (a "expert_used_count") (k "num_experts_per_tok")
+                  (a "expert_feed_forward_length") (k "moe_intermediate_size")
+                  (a "expert_shared_feed_forward_length") (k "shared_expert_intermediate_size")))))
+
+(def ^:private block-names
+  "A block's tensors (Hugging Face's names, after layers.i.) by llama.cpp's
+   (after blk.i.), and what the converter does to each: :norm (Qwen3-Next's
+   +1, in a Hugging Face checkpoint), :qkv (the value rows' heads to tiled
+   order), [:rows d] and [:columns d] (the value heads, d values each, to
+   tiled order along the rows or the columns), :a-log (-exp, the heads
+   tiled), :conv (the kernel squeezed to [C K], its value channels tiled),
+   :flat (to a vector)."
+  {"input_layernorm.weight" ["attn_norm.weight" :norm]
+   "post_attention_layernorm.weight" ["post_attention_norm.weight" :norm]
+   "self_attn.q_proj.weight" ["attn_q.weight"]
+   "self_attn.k_proj.weight" ["attn_k.weight"]
+   "self_attn.v_proj.weight" ["attn_v.weight"]
+   "self_attn.o_proj.weight" ["attn_output.weight"]
+   "self_attn.q_norm.weight" ["attn_q_norm.weight" :norm]
+   "self_attn.k_norm.weight" ["attn_k_norm.weight" :norm]
+   "linear_attn.in_proj_qkv.weight" ["attn_qkv.weight" :qkv]
+   "linear_attn.in_proj_z.weight" ["attn_gate.weight" [:rows :value-dim]]
+   "linear_attn.in_proj_b.weight" ["ssm_beta.weight" [:rows 1]]
+   "linear_attn.in_proj_a.weight" ["ssm_alpha.weight" [:rows 1]]
+   "linear_attn.A_log" ["ssm_a" :a-log]
+   "linear_attn.dt_bias" ["ssm_dt.bias" [:rows 1]]
+   "linear_attn.conv1d.weight" ["ssm_conv1d.weight" :conv]
+   "linear_attn.norm.weight" ["ssm_norm.weight"]
+   "linear_attn.out_proj.weight" ["ssm_out.weight" [:columns :value-dim]]
+   "mlp.gate_proj.weight" ["ffn_gate.weight"]
+   "mlp.up_proj.weight" ["ffn_up.weight"]
+   "mlp.down_proj.weight" ["ffn_down.weight"]
+   "mlp.gate.weight" ["ffn_gate_inp.weight"]
+   "mlp.switch_mlp.gate_proj.weight" ["ffn_gate_exps.weight"]
+   "mlp.switch_mlp.up_proj.weight" ["ffn_up_exps.weight"]
+   "mlp.switch_mlp.down_proj.weight" ["ffn_down_exps.weight"]
+   "mlp.shared_expert.gate_proj.weight" ["ffn_gate_shexp.weight"]
+   "mlp.shared_expert.up_proj.weight" ["ffn_up_shexp.weight"]
+   "mlp.shared_expert.down_proj.weight" ["ffn_down_shexp.weight"]
+   "mlp.shared_expert_gate.weight" ["ffn_gate_inp_shexp.weight" :flat]})
+
+(defn- convention
+  "Whose conventions the checkpoint's tensors (names stripped) follow, by
+   its conv kernels' layout, as mlx-lm's sanitize tells them: :hf
+   (PyTorch's Conv1d, [C 1 K]: RMSNorm weights w of 1 + w) or :mlx (MLX's
+   [C K 1]: mlx-lm's saved layout, the +1 in them already)."
+  [tensors]
+  (let [layouts (set (for [[name w] tensors
+                           :when (re-matches #"layers\.\d+\.linear_attn\.conv1d\.weight" name)
+                           :let [s (common/weight-shape w)]]
+                       (cond (and (c/== 3 (count s)) (c/== 1 (long (s 1)))) :hf
+                             (and (c/== 3 (count s)) (c/== 1 (long (s 2)))) :mlx
+                             :else (throw (invalid (str "the conv kernel " name " is " s ", neither [C 1 K] nor [C K 1]")
+                                                   {:tensor name :shape s})))))]
+    (when-not (c/== 1 (count layouts))
+      (throw (invalid (if (seq layouts) "conv kernels of both layouts, [C 1 K] and [C K 1]" "the checkpoint has no conv kernels"))))
+    (first layouts)))
+
+(defn- converted
+  "The weight w (Hugging Face's, or mlx-lm's) as the GGUF holds it, by the
+   converter's transform op (block-names'), the value heads tiled for k
+   key heads of r value heads each, d values a head."
+  [op w {:keys [k r d key-width hf?]} name]
+  (let [dense #(checkpoint/dense who name %)
+        tiled-from (fn [w from size]
+                     (checkpoint/concat-rows
+                      [(checkpoint/rows w 0 from)
+                       (checkpoint/tiled who (checkpoint/rows w from (first (common/weight-shape w))) 0 k r size)]))]
+    (cond
+      (nil? op) w
+      (= :norm op) (if hf? (checkpoint/shift-norm (dense w)) (dense w))
+      (= :qkv op) (tiled-from w (c/* 2 (long key-width)) d)
+      (= :a-log op) (checkpoint/tiled who (checkpoint/neg-exp (dense w)) 0 k r 1)
+      (= :conv op) (tiled-from (array/reshape (dense w) [(first (array/shape w)) -1]) (c/* 2 (long key-width)) d)
+      (= :flat op) (array/reshape (dense w) [-1])
+      :else (let [[axis size] op]
+              (checkpoint/tiled who w ({:rows 0 :columns 1} axis) k r (if (= :value-dim size) d size))))))
+
+(defn- experts
+  "tensors (names stripped) with each layer's experts' matrices
+   (layers.i.mlp.experts.e.gate_proj.weight, …: Hugging Face's, one an
+   expert) stacked [experts out in] under mlx-lm's switch_mlp names, as
+   llama.cpp's converter stacks them. Loud (:unsupported) for the fused
+   gate_up_proj form, a layout no checkpoint at hand shows; an expert
+   missing is loud (:invalid-args)."
+  [tensors n]
+  (let [pattern #"layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight"
+        groups (dissoc (group-by (fn [[name]] (when-let [[_ i _ proj] (re-matches pattern name)] [i proj])) tensors) nil)]
+    (when-let [fused (first (filter #(re-matches #"layers\.\d+\.mlp\.experts\.(gate_up_proj|down_proj)(\.weight)?" %)
+                                    (keys tensors)))]
+      (throw (unsupported (str "the experts' fused matrices (" fused "): a layout not read; one matrix an expert, or"
+                               " mlx-lm's switch_mlp stacks, are")
+                          {:tensor fused})))
+    (reduce-kv (fn [ts [i proj] entries]
+                 (let [by-expert (into {} (map (fn [[name w]] [(Long/parseLong (nth (re-matches pattern name) 2)) w])) entries)]
+                   (when-not (= (set (keys by-expert)) (set (range (long n))))
+                     (throw (invalid (str "layer " i "'s " proj " has experts " (vec (sort (keys by-expert))) ", not 0 to " (dec (long n)))
+                                     {:layer i})))
+                   (-> (apply dissoc ts (map first entries))
+                       (assoc (str "layers." i ".mlp.switch_mlp." proj ".weight")
+                              (checkpoint/stack who (mapv by-expert (range (long n))))))))
+               tensors groups)))
+
+(defn- gguf-name
+  "[llama.cpp's name, the converter's transform] of a checkpoint's tensor
+   (its name stripped), or [the name] for one the GGUF does not have
+   (which model then refuses, naming it)."
+  [name]
+  (or (when-let [[_ i rest] (re-matches #"layers\.(\d+)\.(.+)" name)]
+        (when-let [[g op] (block-names rest)] [(str "blk." i "." g) op]))
+      ({"embed_tokens.weight" ["token_embd.weight"] "norm.weight" ["output_norm.weight" :norm]
+        "lm_head.weight" ["output.weight"]} name)
+      [name]))
+
+(defn- checkpoint-gguf
+  "The GGUF llama.cpp's converter writes from the Qwen3.5 or Qwen3.5-MoE
+   checkpoint at path (its config.json checked first; the vision tower and
+   the MTP block not read), as gen.array/load-gguf gives one,
+   {:metadata :tensors :types :files}."
+  [path]
+  (let [config (checkpoint/config who path)
+        metadata (hf-metadata config)
+        {:keys [tensors types files]} (checkpoint/read who path config (complement skipped?))
+        tc (text-config config)
+        stripped (into {} (map (fn [[name w]] [(strip name) w])) tensors)
+        stripped (if (get tc "num_experts") (experts stripped (get tc "num_experts")) stripped)
+        n-k (long (or (get tc "linear_num_key_heads") 1))
+        layout {:k n-k
+                :r (quot (long (or (get tc "linear_num_value_heads") n-k)) n-k)
+                :d (get tc "linear_value_head_dim")
+                :key-width (c/* n-k (long (or (get tc "linear_key_head_dim") 0)))
+                :hf? (= :hf (convention stripped))}
+        renamed (checkpoint/output who
+                                   (into {} (map (fn [[name w]]
+                                                   (let [[g op] (gguf-name name)]
+                                                     [g (converted op w layout name)])))
+                                         stripped)
+                                   (get tc "tie_word_embeddings" (get config "tie_word_embeddings"))
+                                   (get tc "vocab_size"))
+        ;; a tensor's dtype in the file (a stack of experts', its first's)
+        type-of (fn [name] (first (gguf-name (strip (str/replace name #"\.experts\.0\." ".switch_mlp.")))))]
+    {:metadata metadata
+     :tensors renamed
+     :types (select-keys (into {} (map (fn [[name t]] [(type-of name) t])) types) (keys renamed))
+     :files files}))
+
 (defn load
-  "(model (gen.array/load-gguf path) opts): a Qwen3.5 or Qwen3.6 GGUF
-   file's model (dense or MoE), on *backend*."
+  "A Qwen3.5 or Qwen3.6 model (dense or MoE) from path, on *backend*:
+   (model (gen.array/load-gguf path) opts) for a GGUF file; for a Hugging
+   Face checkpoint (its directory, or its .safetensors file or index), its
+   tensors as the GGUF llama.cpp's converter writes from it would give
+   them, so that a checkpoint and its GGUF give one model:
+   - config.json's text model (its text_config) gives the metadata;
+   - the tensors are renamed (model.language_model.layers.i.linear_attn.
+     in_proj_qkv.weight is blk.i.attn_qkv.weight, …), under the prefixes
+     of Qwen3_5ForConditionalGeneration, of a causal LM (model.) and of
+     mlx-lm's saved layout (language_model.model.); the vision tower and
+     the MTP block are never read;
+   - the converter's transforms are done: the RMSNorm weights but the
+     gated norm's get Qwen3-Next's +1, in float32; ssm_a is -exp(A_log),
+     in float32; the conv kernel is squeezed to [C K]; the value heads go
+     from grouped (Hugging Face's: value head h reads key head h / (value
+     heads / key heads)) to tiled order in attn_qkv's value rows,
+     attn_gate, ssm_beta, ssm_alpha, ssm_a, ssm_dt.bias, the conv kernel's
+     value channels and ssm_out's columns (the identity for as many value
+     heads as key heads, Qwen3.5-0.8B's); the experts' matrices, one an
+     expert, are stacked;
+   - mlx-lm's saved checkpoints (mlx-community's), told by their conv
+     kernels' layout [C K 1], hold the +1 already; their matrices load
+     quantized, by config.json's quantization (gen.llm.models.checkpoint).
+   A checkpoint of another model_type is loud (:unsupported), as are the
+   other configurations hf-metadata and config refuse, the experts' fused
+   gate_up_proj, and a tensor the forward does not read."
   ([path] (load path nil))
-  ([path opts] (model (array/load-gguf path) opts)))
+  ([path opts] (model (if (checkpoint/checkpoint? path) (checkpoint-gguf path) (array/load-gguf path)) opts)))
 
 ;; ---------------------------------------------------------------------------
 ;; The layers

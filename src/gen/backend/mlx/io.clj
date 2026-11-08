@@ -1,6 +1,7 @@
 (ns gen.backend.mlx.io
   "The MLX backend's files (gen.backend.mlx): GGUF tensors by MLX's loader
-   (p/ILoading: mlx_load_gguf), for gen.array/load-gguf.
+   (p/ILoading: mlx_load_gguf), for gen.array/load-gguf, and safetensors
+   files' by mlx_load_safetensors, for gen.array/load-safetensors.
 
    MLX's loader (mlx/io/gguf.cpp, gguf_quants.cpp) reads F32, F16 and I32
    tensors as they are, and Q8_0, Q4_0 and Q4_1 as its affine
@@ -22,11 +23,17 @@
    quantized ones decoded and repacked on the host as MLX's affine
    quantization (the same words, scales and biases as MLX's loader gives
    for Q8_0, Q4_0 and Q4_1), Q6_K decoded to float32, and the arrays made
-   from the host's data (load-host)."
+   from the host's data (load-host).
+
+   A safetensors file's tensors are mlx_load_safetensors's, each of the
+   file's dtype (BF16 as bfloat16, F16 as float16), as gen.array has read
+   and checked its header (gen.array.safetensors): only the tensors
+   selected are taken from the loader's map, the others never read (MLX
+   loads lazily)."
   {:api :internal}
   (:require [clojure.string :as str]
             [gen.array.gguf :as gguf]
-            [gen.backend.mlx.array :refer [code fence stream wrap]]
+            [gen.backend.mlx.array :refer [code cpu-stream fence stream wrap]]
             [gen.backend.mlx.operands :refer [made operand scalar-handle with-temps]])
   (:import [gen.mlx Mlx MlxRaw]
            [java.lang.foreign Arena ValueLayout]))
@@ -108,3 +115,22 @@
                                (wrap b (Mlx/mlx_io_gguf_get_array g name)))]))
                 tensors)
           (finally (Mlx/mlx_io_gguf_free g)))))))
+
+(defn load-safetensors
+  "p/-load-safetensors on the MLX backend b: the tensors of the header
+   (those selected) by mlx_load_safetensors, by name, read on b's CPU
+   stream (MLX's Load runs there; its GPU kernels have none). A file
+   holding a tensor of a dtype MLX 0.32.4's loader does not know (F64,
+   F8_E5M2), selected or not, is loud (:unsupported): the loader refuses
+   the whole file (and MLX's GPU has no float64)."
+  [b {:keys [path tensors all-types]}]
+  (when-let [[name t] (first (filter (comp #{:f64 :f8_e5m2} val) all-types))]
+    (throw (ex-info (str "load-safetensors: " path ": tensor " name " is " (str/upper-case (clojure.core/name t))
+                         ", which MLX's loader does not read (it refuses the file); the JVM backend reads F64")
+                    {:reason :unsupported :path (str path) :tensor name :type t})))
+  (let [[arrays metadata] (Mlx/mlx_load_safetensors (str path) (cpu-stream b))]
+    (try
+      (into {} (map (fn [{:keys [name]}] [name (wrap b (Mlx/mlx_map_string_to_array_get arrays name))])) tensors)
+      (finally
+        (Mlx/mlx_map_string_to_array_free arrays)
+        (Mlx/mlx_map_string_to_string_free metadata)))))
