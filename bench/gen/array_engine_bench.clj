@@ -161,7 +161,9 @@
    ;; backend's kernel declined (Metal's or CUDA's; genclj-6qb6)
    :paged-kernel (parse-boolean (prop "paged-kernel" true))
    ;; the paged engines' :precompile?, when given (genclj-i3fp)
-   :precompile? (some-> (System/getProperty "gen.bench.precompile") parse-boolean)})
+   :precompile? (some-> (System/getProperty "gen.bench.precompile") parse-boolean)
+   ;; true: each paged engine's shapes listed after its rows (genclj-i3fp)
+   :shapes? (= "true" (prop "shapes" "false"))})
 
 (defn- llama [sym] @(requiring-resolve (symbol "gen.llm.llama" (name sym))))
 
@@ -349,7 +351,13 @@
                      (when-not (= :llama k)
                        (println (format "| open %.0f ms (%s), %d traces after open | | |" ms
                                         (pr-str (select-keys (:paged (br/info e)) [:precompiled :precompile-ms]))
-                                        (- (long @traces) (long traced))))))))]
+                                        (- (long @traces) (long traced))))
+                       ;; gen.bench.shapes=true: every shape its compiled
+                       ;; calls took, with their calls (0: compiled at open,
+                       ;; not called)
+                       (when (and (:shapes? settings) (:paged (br/info e)))
+                         (doseq [[sig n] (sort-by (comp - val) ((requiring-resolve 'gen.llm.array-engine/shapes) e))]
+                           (println (format "|   %6d %s | | |" n (pr-str sig)))))))))]
     (with-open [^java.io.Closeable v ((llama 'vocabulary) path)]
       (let [tok ((llama 'tokenizer) v)
             text (str/join " " (repeat 40 "The sea is calm tonight, and the tide is full."))

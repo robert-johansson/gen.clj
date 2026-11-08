@@ -162,9 +162,10 @@
    - every one-token read in flight (an advance's rows, a one-token open
      or extend, a long read's last token): decode rows, attending by
      paged attention over their tables, their count bucketed;
-   - then a chunk of the oldest longer read (open, extend), at most the
-     budget (:n-batch tokens a forward, the decode rows on top), padded
-     to t rows (its tokens bucketed); and chunks of the next longer
+   - then a chunk of the oldest longer read (open, extend), as many of
+     its tokens as the budget (:n-batch tokens a forward) leaves after
+     the decode rows, at least a block, padded to t rows (its tokens
+     bucketed); and chunks of the next longer
      reads, at most t tokens each, padded to t rows, while the budget
      holds them (at most :max-chunks in all, and a power of 2 of them,
      so that forwards trace for few shapes; genclj-6qb6). Each chunk's
@@ -565,19 +566,34 @@
   (max floor (next-pow2 n)))
 
 (def ^:private min-span
-  "The positions a block table spans at the least (its width in blocks a
-   power of 2): contexts up to it share one width. The paged kernels read
-   each row's own positions only, whatever the width (Metal's v1 holds
-   4 bytes a position of the width in threadgroup memory: 1 KiB here); a
-   chunk's composite gathers the width's blocks, 1 MiB a layer for
-   Qwen3-0.6B in float16."
+  "The positions a decode row's block table spans at the least (its width
+   in blocks a power of 2): contexts up to it share one width. The paged
+   kernels read each row's own positions only, whatever the width
+   (measured on Metal, 2026-11-08: a step of 8 rows of Qwen3-0.6B 11.3 ms
+   at 16 blocks, 11.7 at 128; v1 holds 4 bytes a position of the width in
+   threadgroup memory, 1 KiB here). A chunk's table is floored so only
+   when its read goes on from earlier positions (chunk-width): its
+   composite gathers and attends over the width's blocks (four chunks of
+   64 tokens, Qwen3-0.6B: 112 ms at 4 blocks, 120 at 16 in float16, 132
+   and 151 in float32)."
   256)
 
 (defn- table-width
   "The width of the block tables of seqs (blocks of bs): their most
-   blocks, bucketed, at least min-span positions' worth."
-  ^long [seqs ^long bs]
-  (bucket (reduce max 1 (map (comp count :blocks) seqs)) (paged/blocks-for min-span bs)))
+   blocks, bucketed, at least floor blocks."
+  ^long [seqs ^long floor]
+  (bucket (reduce max 1 (map (comp count :blocks) seqs)) floor))
+
+(defn- chunk-width
+  "The width of the block tables of chunks of t rows over seqs (blocks of
+   bs): the chunk's own blocks, t's, while they hold the sequences (a
+   prompt's first chunk, after at most a token), else their most blocks
+   bucketed, at least min-span positions' (a read going on from earlier
+   positions: an extend, a long prompt's next chunk)."
+  ^long [seqs ^long t ^long bs]
+  (let [own (max 1 (quot t bs))
+        most (long (reduce max 1 (map (comp count :blocks) seqs)))]
+    (if (c/<= most own) own (bucket most (paged/blocks-for min-span bs)))))
 
 (defn- chunk-floor
   "The fewest rows a chunk has: a block (bs), within a forward's budget of
@@ -892,7 +908,7 @@
         seqs (mapv #(or (entry state %) paged/empty-sequence) slots)
         [a seqs' write-slots copies] (prepared ctx seqs (repeat n 1))
         _ (copy-blocks! ctx a copies)
-        width (table-width seqs' bs)
+        width (table-width seqs' (paged/blocks-for min-span bs))
         ;; the step's pools are stored at once (step-call!), the rest of
         ;; the books once its rows are normalized: a failure then leaves
         ;; every slot as it was, since what the step wrote lies past each
@@ -984,23 +1000,24 @@
   "Which of reads (gen.llm.slots/slots-forward's) a forward reads, and
    its rows: every one-token read (decode rows, in order, their count
    bucketed, at least min-rows), and chunks of the longer reads, first
-   come first served: the first one's next chunk of at most the budget
-   (n-batch tokens), its rows t bucketed (at least chunk-floor); then the
-   next longer reads' chunks of at most t tokens each, t rows each,
-   while the budget holds their rows, at most max-chunks in all, and a
-   power of 2 of them (the rest wait a forward; genclj-6qb6). The decode
-   rows come on top of the budget, so that a forward's chunks do not
-   depend on them (genclj-i3fp). {:decode [indices] :d-rows :chunks
-   [indices] :cs [their tokens] :t}."
+   come first served: the first one's next chunk of what the budget
+   (n-batch tokens) leaves, at least a block (bs), its rows t bucketed
+   (genclj-i3fp: at least chunk-floor, and up, past what the budget
+   leaves when its tokens do); then the next longer reads' chunks of at
+   most t tokens each, t rows each, while the budget holds them, at most
+   max-chunks in all, and a power of 2 of them (the rest wait a forward;
+   genclj-6qb6). {:decode [indices] :d-rows :chunks [indices] :cs [their
+   tokens] :t}."
   [reads min-rows n-batch bs max-chunks]
   (let [decode (filterv #(one-token? (reads %)) (range (count reads)))
         d (count decode)
         d-rows (if (pos? d) (bucket d min-rows) 0)
         longer (remove #(one-token? (reads %)) (range (count reads)))
         n-of #(count (:tokens (reads %)))
-        c (when (seq longer) (min (long (n-of (first longer))) (long n-batch)))
+        left (max (long bs) (c/- (long n-batch) d-rows))
+        c (when (seq longer) (min (long (n-of (first longer))) left))
         t (when c (bucket c (chunk-floor bs n-batch)))
-        k (when t (min (long max-chunks) (max 1 (quot (long n-batch) (long t))) (count longer)))
+        k (when t (min (long max-chunks) (max 1 (quot left (long t))) (count longer)))
         chunks (when t (vec (take (Long/highestOneBit k) longer)))]
     {:decode decode :d-rows d-rows :chunks (or chunks []) :t t
      :cs (into (if c [c] []) (map #(min (long (n-of %)) (long t))) (rest chunks))}))
@@ -1118,7 +1135,7 @@
         ;; the decode rows' call: a token a row, padding rows after them
         ;; (row i writing the scratch slot i), the logits of every row
         dbatch (when (pos? d)
-                 (let [width (table-width dseqs bs)]
+                 (let [width (table-width dseqs (paged/blocks-for min-span bs))]
                    {:tokens (into (mapv #(vector (first (:tokens (reads %)))) decode) (repeat (c/- d-rows d) [0]))
                     :positions (into (mapv #(:pos (reads %)) decode) (repeat (c/- d-rows d) 0))
                     :slots (into (mapv first (subvec write-slots 0 d)) (map pad-slot) (range d d-rows))
@@ -1136,7 +1153,7 @@
         ks (mapv (fn [i c] (if-let [tg (:targets (reads i))] (min (long c) (count tg)) 0)) chunks cs)
         scored? (some pos? ks)
         cbatch (when (pos? nk)
-                 (let [cwidth (table-width cseqs bs)
+                 (let [cwidth (chunk-width cseqs t bs)
                        out (-> (mapv #(at % (dec (long (cs %)))) ended)
                                (into (mapcat (fn [j k] (map #(at j (long %)) (range k))) (range) ks)))
                        ;; the rows whose logits are computed, as many as
@@ -1316,30 +1333,34 @@
 (defn- precompiled
   "The shapes an engine compiles when it opens (:precompile?), as
    forward-shape's, [:step rows width states] and [:copy pairs]: the
-   shapes short contexts take (tables of min-span's width), most common
-   first: a decode of each row count up to 16 (or the slots'); a lone
-   read's chunk of each length up to the budget, with scores (an LM's
-   extend) and without (an open); in the continuous mode, several
-   prompts' chunks of up to 64 tokens, with scores; and copy-on-write's
-   first pair counts. A forward's decode rows and chunks are separate
-   calls (batch-forward!), so these are its shapes."
+   shapes contexts up to min-span positions take, most common first: a
+   decode of each row count up to 16 (or the slots'); a lone read's chunk
+   of each length up to the budget, its first (a prompt's) and one going
+   on from earlier positions (chunk-width), with scores (an LM's extend)
+   and without (an open); in the continuous mode, a few prompts' first
+   chunks of 32 and 64 tokens, with scores; and copy-on-write's first
+   pair counts. A forward's decode rows and chunks are separate calls
+   (batch-forward!), so these are its shapes."
   [{:keys [continuous? min-rows n-batch max-chunks]} rows? ^long bs ^long n-slots]
   (let [w (paged/blocks-for min-span bs)
         n-batch (long n-batch)
         rs (pow2s (bucket 1 min-rows) (min 16 (bucket n-slots min-rows)))
         ts (pow2s (chunk-floor bs n-batch) (next-pow2 n-batch))
-        dkinds (if rows? [:fresh :held] [nil])]
+        own #(max 1 (quot (long %) bs))
+        dkinds (if rows? [:fresh :held] [nil])
+        ckind (when rows? :held)]
     (vec (concat (if continuous?
                    (for [r rs, k dkinds] (forward-shape r w 0 0 0 false k nil))
                    (concat (for [r rs, k dkinds] [:step r w k])
                            ;; a run of one token (an LM's first)
                            (for [k dkinds] (forward-shape 1 w 0 0 0 false k nil))))
-                 (for [t ts, targets? [false true]] (forward-shape 0 0 1 t w targets? nil (when rows? :held)))
+                 (for [t ts, targets? [false true]] (forward-shape 0 0 1 t (own t) targets? nil ckind))
+                 (for [t ts, :when (c/< (long (own t)) w), targets? [false true]] (forward-shape 0 0 1 t w targets? nil ckind))
                  (when continuous?
-                   (for [t ts
-                         :while (c/<= (long t) 64)
-                         k (pow2s 2 (min (long max-chunks) (quot n-batch (long t))))]
-                     (forward-shape 0 0 k t w true nil (when rows? :fresh))))
+                   (for [t [32 64]
+                         k [2 4]
+                         :when (and (c/<= (long t) n-batch) (c/<= (c/* (long k) (long t)) n-batch) (c/<= (long k) (long max-chunks)))]
+                     (forward-shape 0 0 k t (own t) true nil (when rows? :fresh))))
                  (for [n (pow2s 1 16)] [:copy n])))))
 
 (defn- precompile!
@@ -1540,9 +1561,8 @@
      :continuous?   true: concurrent callers' reads batched (continuous
                     batching, over the paged mode; see the namespace's
                     docstring), which serving several clients at once
-                    needs; :n-batch then the tokens of its longer reads'
-                    chunks a forward reads at most, besides its decode
-                    rows, with
+                    needs; :n-batch then the tokens a forward reads at
+                    most (its long reads' chunks), with
        :wait        how long a forward waits for the callers the last
                     one answered, at most, as a fraction of its time
                     (default 0.25; 0 never waits)

@@ -59,8 +59,7 @@ other values for the same key, from the same distribution.
   and block tables' widths round up to powers of 2, the widths at least
   256 positions', and a continuous forward's decode rows and chunks are
   two compiled calls evaluated together, so that a compiled call's
-  shapes are few; the decode rows come on top of `:n-batch`, which now
-  bounds a forward's chunk tokens only. The new option `:precompile?`
+  shapes are few. The new option `:precompile?`
   (default true) traces the common shapes when the engine opens (on
   Metal about 1-2 s for Qwen3-0.6B and Qwen3.5-0.8B); `ae/stats` counts
   `:traces` (calls of a shape not compiled before) and `ae/shapes` lists
