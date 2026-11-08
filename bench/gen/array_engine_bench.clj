@@ -210,9 +210,10 @@
     (-score [_ context continuation] (lm/-score m context continuation))
     (-info [_] (lm/-info m)))))
 
-;; Prompt admission's time (genclj-6qb6): the continuous mode's forwards
-;; that read a chunk of a longer read, and the paged mode's runs, timed
-;; by wrapping the engine's (private) functions while the clients run;
+;; Prompt admission's time (genclj-6qb6): the forwards that read a chunk
+;; of a longer read (the continuous mode's, and since genclj-6qb6 the
+;; paged mode's runs; before it, its paged-read-run), timed by wrapping
+;; the engine's (private) functions while the clients run;
 ;; and the batched steps' traces (calls of the families' batch-forward,
 ;; which a compiled step makes once per new shape).
 (def ^:private admission-ns (atom 0))
@@ -223,20 +224,21 @@
    read a chunk (more than one token of a read) and of its paged runs."
   [f]
   (let [forward @#'ae/batch-forward!
-        run @#'ae/paged-read-run
+        ;; the paged mode's eager run, on a commit before genclj-6qb6
+        run-var (resolve 'gen.llm.array-engine/paged-read-run)
         timed (fn [g] (fn [& args]
                         (let [t0 (System/nanoTime)]
                           (try (apply g args)
                                (finally (swap! admission-ns + (- (System/nanoTime) t0)))))))]
-    (with-redefs-fn {(requiring-resolve 'gen.llm.models.qwen3/batch-forward)
-                     (let [g @(requiring-resolve 'gen.llm.models.qwen3/batch-forward)] (fn [& args] (swap! traces inc) (apply g args)))
-                     (requiring-resolve 'gen.llm.models.qwen35/batch-forward)
-                     (let [g @(requiring-resolve 'gen.llm.models.qwen35/batch-forward)] (fn [& args] (swap! traces inc) (apply g args)))
-                     #'ae/batch-forward! (fn [ctx reads]
-                                           (if (some #(< 1 (count (:tokens %))) reads)
-                                             ((timed forward) ctx reads)
-                                             (forward ctx reads)))
-                     #'ae/paged-read-run (timed run)}
+    (with-redefs-fn (cond-> {(requiring-resolve 'gen.llm.models.qwen3/batch-forward)
+                             (let [g @(requiring-resolve 'gen.llm.models.qwen3/batch-forward)] (fn [& args] (swap! traces inc) (apply g args)))
+                             (requiring-resolve 'gen.llm.models.qwen35/batch-forward)
+                             (let [g @(requiring-resolve 'gen.llm.models.qwen35/batch-forward)] (fn [& args] (swap! traces inc) (apply g args)))
+                             #'ae/batch-forward! (fn [ctx reads]
+                                                   (if (some #(< 1 (count (:tokens %))) reads)
+                                                     ((timed forward) ctx reads)
+                                                     (forward ctx reads)))}
+                      run-var (assoc run-var (timed @run-var)))
       f)))
 
 (defn- client-run
