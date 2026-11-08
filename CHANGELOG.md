@@ -38,6 +38,35 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Changed (experimental): gen.array/gated-delta has a CUDA kernel, and
+  Qwen3.5/3.6's decode step makes fewer kernels** (genclj-yesw; **Draws**,
+  gated-delta's reads shorter than its chunk on MLX's CUDA backend, and so
+  Qwen3.5/3.6 decoding there). On MLX's CUDA backend, where MLX's host
+  encodes a kernel in about 5 µs and a batch-1 decode step is bound by
+  it, `gen.array/gated-delta` (`:method :auto`) computes reads shorter
+  than its `:chunk-size` (64) by one kernel, mlx-lm's Metal kernel ported
+  to CUDA (`gen.backend.mlx.gated-delta-cuda`), in place of the token
+  loop's composite (about 10 kernels a token). Its values are the
+  composite's within float32 round-off (gated-delta-test's band, 1e-5).
+  `gen.llm.models.qwen35` makes the same values in fewer kernels on every
+  device (qwen35-test's fewer-kernels-are-the-old-forms): a GatedDeltaNet
+  layer's query and key heads l2-normed in one rms-norm, scaled and cast
+  to the rule's dtype in one elementwise chain, then tiled to the value
+  heads by one copy each (not a concatenation of the repeats); the
+  attention's output gate read where it lies in its projection; the
+  mixture of experts' aranges shared. A compiled batch-1 decode step on
+  fenrir (RTX PRO 6000, float16) makes 2,184 kernels where it made 2,574
+  on Qwen3.6-35B-A3B Q4_K_M (the continuous mode's step 18.9 → 17.4 ms,
+  the paged mode's 12.1 → 11.6), and 632 where it made 746 on
+  Qwen3.5-0.8B Q8_0; a read's prefill chunks under 64 tokens take one
+  kernel a layer where they took the loop's (the static mode's time to
+  first token on the MoE 478 → 243 ms). The array engine's batch-1
+  tokens/s on the MoE, alternated runs: continuous 51 → 57, paged 56 →
+  58 (runs spread ±6%), static 40 → 50; 8 continuous clients 166 → 183
+  (llama.cpp: 139 and 162). Unchanged: the values off CUDA
+  (Metal, MLX's CPU, the JVM backend), reads of 64 tokens or more, and
+  Metal's speed (Qwen3.5-0.8B, float32, within noise).
+
 - **Changed (experimental): a mixture of experts' router computes in
   float32 under half floats** (genclj-fxag; **Draws**, a Qwen3.5/3.6
   mixture of experts loaded in float16 or bfloat16, on CUDA and Metal).
