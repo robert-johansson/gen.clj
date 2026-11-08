@@ -364,7 +364,5 @@
   (let [reason #(:reason (ts/thrown-data (%)))]
     (is (= :invalid-option (reason #(ae/engine (merge paged-opts {:model (:f32 files) :block-size 12})))))
     (is (= :invalid-option (reason #(ae/engine (merge paged-opts {:model (:f32 files) :paged? 1})))))
-    (is (= :unsupported (reason #(ae/engine {:model "test/fixtures/gguf/qwen35-tiny-f32.gguf" :paged? true :continuous? true})))
-        "Qwen3.5 continuously")
     (with-open [e (ae/engine {:model (:f32 @models)})]
       (is (= :not-paged (reason #(ae/blocks e)))))))

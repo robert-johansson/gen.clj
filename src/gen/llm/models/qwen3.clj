@@ -113,7 +113,8 @@
             [gen.array.paged :as paged]
             [gen.llm.lora :as lora]
             [gen.llm.models :as models]
-            [gen.llm.models.checkpoint :as checkpoint]))
+            [gen.llm.models.checkpoint :as checkpoint]
+            [gen.llm.models.common :as common]))
 
 (set! *warn-on-reflection* true)
 
@@ -900,29 +901,12 @@
    paged attention over their tables, and the rest's (a prefill chunk of
    one sequence) over the chunk table's blocks gathered, each row to its
    own position (a causal mask): [its output, the pools after x]."
-  [{:keys [heads kv-heads head-dim] :as cfg} w x {:keys [positions tables slots chunk d]} entry]
+  [{:keys [heads kv-heads head-dim] :as cfg} w x {:keys [positions slots] :as at} entry]
   (let [r (long (first (array/shape x)))
-        d (long d)
         [q k v] (qkv cfg w x positions)
         [kp vp] (array/paged-write (:k entry) (:v entry)
                                    (array/reshape k [r kv-heads head-dim]) (array/reshape v [r kv-heads head-dim]) slots)
-        q (array/reshape q [r heads head-dim])
-        decoded (when (pos? d)
-                  (array/paged-attention (if (c/== d r) q (array/slice q 0 0 d)) kp vp tables
-                                         (+ (if (c/== d r) positions (array/slice positions 0 0 d)) 1)))
-        chunked (when chunk
-                  (let [n (c/- r d)
-                        [gk gv] (paged/gathered kp vp chunk)                           ; [1 Hk T D]
-                        t (nth (array/shape gk) 2)
-                        qc (array/transpose (array/reshape (array/slice q 0 d r) [1 n heads head-dim]) [0 2 1 3])
-                        mask (<= (array/arange 0 t 1 {:dtype :int32})
-                                 (array/reshape (array/slice positions 0 d r) [1 1 n 1]))]
-                    (-> (array/sdpa qc gk gv {:mask mask})                             ; [1 heads n D]
-                        (array/transpose [0 2 1 3])
-                        (array/reshape [n heads head-dim]))))
-        o (cond (and decoded chunked) (array/concatenate [decoded chunked] 0)
-                decoded decoded
-                :else chunked)]
+        o (common/batch-attention (array/reshape q [r heads head-dim]) kp vp at)]
     [(linear (array/reshape o [r 1 (c/* heads head-dim)]) (:o w)) {:k kp :v vp}]))
 
 (defn- batch-forward
@@ -933,9 +917,7 @@
             :d (if tables (first (array/shape tables)) 0)}
         [logits pools] (logits-of cfg weights ids (fn [i w x] (batch-attention cfg w x at (nth pools i))) {:rows out})]
     (cond-> {:logits logits :pools pools}
-      targets (assoc :scores (array/reshape (array/- (array/take-along-axis logits (array/reshape targets [-1 1 1]) 2)
-                                                     (array/logsumexp logits {:axis -1 :keep-dims? true}))
-                                            [-1])))))
+      targets (assoc :scores (common/target-scores logits targets)))))
 
 (defn- check-batch
   "paged-batch-step's operands: pools of the model's layers, R rows,

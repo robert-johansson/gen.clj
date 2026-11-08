@@ -3,13 +3,15 @@
    beside qwen3's own): their loud errors, options and tokens checked, a
    GGUF's weights cast and measured, the linear layers (dense, quantized
    or adapted by gen.llm.lora), training's output projection by chunks and
-   masked loss, and a static cache's slots, masks and checks. who, a
+   masked loss, a static cache's slots, masks and checks, and a batched
+   paged step's attention and scores. who, a
    string naming the model family (\"qwen35\"), heads each message.
    Internal: the families' namespaces are the API."
   {:api :internal}
   (:refer-clojure :exclude [+ - * / < > <= >= ==])
   (:require [clojure.core :as c]
             [gen.array :as array :refer [+ * <=]]
+            [gen.array.paged :as paged]
             [gen.llm.lora :as lora]))
 
 (set! *warn-on-reflection* true)
@@ -103,6 +105,47 @@
     (array/dequantize (array/take (:wq w) tokens 0) (array/take (:scales w) tokens 0) (array/take (:biases w) tokens 0)
                       (assoc (select-keys w [:bits :group-size]) :dtype dtype))
     (array/take w tokens 0)))
+
+;; ---------------------------------------------------------------------------
+;; Batched paged steps: decode rows and a prefill chunk (genclj-b3ow)
+;; ---------------------------------------------------------------------------
+
+(defn batch-attention
+  "The attention of a batch's queries q [R heads head-dim], a token a
+   row, over the pools kp, vp its keys and values were written into
+   (qwen3/paged-batch-step's batch, its {:positions :tables :chunk :d}):
+   the first d rows (decode rows) each by paged attention over its
+   table's blocks to its position, the rest (a prefill chunk of one
+   sequence) over the chunk table's blocks gathered, each to its own
+   position (a causal mask): [R heads head-dim]."
+  [q kp vp {:keys [positions tables chunk d]}]
+  (let [[r heads head-dim] (array/shape q)
+        r (long r)
+        d (long d)
+        decoded (when (pos? d)
+                  (array/paged-attention (if (c/== d r) q (array/slice q 0 0 d)) kp vp tables
+                                         (+ (if (c/== d r) positions (array/slice positions 0 0 d)) 1)))
+        chunked (when chunk
+                  (let [n (c/- r d)
+                        [gk gv] (paged/gathered kp vp chunk)                           ; [1 Hk T D]
+                        t (nth (array/shape gk) 2)
+                        qc (array/transpose (array/reshape (array/slice q 0 d r) [1 n heads head-dim]) [0 2 1 3])
+                        mask (<= (array/arange 0 t 1 {:dtype :int32})
+                                 (array/reshape (array/slice positions 0 d r) [1 1 n 1]))]
+                    (-> (array/sdpa qc gk gv {:mask mask})                             ; [1 heads n D]
+                        (array/transpose [0 2 1 3])
+                        (array/reshape [n heads head-dim]))))]
+    (cond (and decoded chunked) (array/concatenate [decoded chunked] 0)
+          decoded decoded
+          :else chunked)))
+
+(defn target-scores
+  "The log-probabilities [O] of targets (an int array [O]) under logits
+   [O 1 vocab], each row's at its target, in the logits' dtype."
+  [logits targets]
+  (array/reshape (array/- (array/take-along-axis logits (array/reshape targets [-1 1 1]) 2)
+                          (array/logsumexp logits {:axis -1 :keep-dims? true}))
+                 [-1]))
 
 ;; ---------------------------------------------------------------------------
 ;; Training: the output projection by vocabulary chunks, the masked loss

@@ -31,6 +31,11 @@
                                          the rows' states merged by layer (qwen3's
                                          paged-step for Qwen3.5)
      (compile-paged-step m)            → paged-step compiled (:donate? true)
+     (paged-batch-step m layers batch) → {:logits :scores :layers}: decode rows and a prefill
+                                         chunk in one forward (qwen3's paged-batch-step for
+                                         Qwen3.5: the chunk one sequence through the
+                                         GatedDeltaNet layers)
+     (compile-paged-batch-step m)      → paged-batch-step compiled (:donate? true)
 
    tokens, :logits :last, prefill's :capacity and the steps are as
    qwen3's: a row's tokens are positions offset, offset + 1, … after a
@@ -681,33 +686,62 @@
   (let [hk (long (nth (array/shape y) 2))]
     (if (c/== hk (long value-heads)) y (array/concatenate (vec (repeat (quot (long value-heads) hk) y)) 2))))
 
-(defn- delta-net
-  "One GatedDeltaNet layer of the normed x [B T hidden] after its cache
-   entry {:conv :state} (nil: zeros, the start): [its output, the entry
-   after x]."
-  [{:keys [eps dtype delta-conv delta-key-heads delta-value-heads delta-key-dim delta-value-dim]} w x entry]
-  (let [[b t] (array/shape x)
+(defn- delta-rule
+  "A GatedDeltaNet layer's sequence part: the projected inputs qkv [B T
+   channels], convolved after the entry's conv state, and the gated delta
+   rule over them from its recurrent state (entry {:conv :state}, nil
+   for zeros, the start), with beta and the log decay g [B T value-heads]:
+   [y [B T value-heads value-dim], the entry after them]. The conv state
+   after is the newest K-1 inputs, or with end (an int array [1], the
+   tokens of the T that are a sequence's, the rest padding) those up to
+   its end."
+  [{:keys [eps dtype delta-conv delta-key-heads delta-value-heads delta-key-dim delta-value-dim]} w qkv beta g entry end]
+  (let [[b t channels] (array/shape qkv)
         hk (long delta-key-heads) hv (long delta-value-heads) dk (long delta-key-dim) dv (long delta-value-dim)
         width (c/* hk dk)
-        qkv (common/linear x (:qkv w))
-        channels (peek (array/shape qkv))
-        padded (array/concatenate [(or (:conv entry) (array/zeros [b (dec (long delta-conv)) channels] {:dtype (array/dtype qkv)}))
-                                   qkv]
-                                  1)
+        kk (dec (long delta-conv))
+        padded (array/concatenate [(or (:conv entry) (array/zeros [b kk channels] {:dtype (array/dtype qkv)})) qkv] 1)
         mixed (common/silu (causal-conv padded (:conv w) t))
         heads (fn [from to n d] (array/reshape (array/slice mixed 2 from to) [b t n d]))
         q (* (key-heads-tiled (l2-norm (heads 0 width hk dk) eps) hv) (c// 1.0 (Math/sqrt dk)))
         k (key-heads-tiled (l2-norm (heads width (c/* 2 width) hk dk) eps) hv)
         v (heads (c/* 2 width) channels hv dv)
-        beta (array/sigmoid (common/linear x (:beta w)))
-        g (* (array/softplus (+ (common/linear x (:alpha w)) (:dt-bias w))) (:a w))
         state (or (:state entry) (array/zeros [b hv dv dk] {:dtype (state-dtype dtype)}))
-        [y state] (array/gated-delta q k v g beta state)
-        y (if (= dtype (array/dtype y)) y (array/astype y dtype))
+        [y state] (array/gated-delta q k v g beta state)]
+    [(if (= dtype (array/dtype y)) y (array/astype y dtype))
+     {:conv (if end
+              (array/take padded (+ (array/arange 0 kk 1 {:dtype :int32}) end) 1)
+              (conv-state padded t))
+      :state state}]))
+
+(defn- delta-gates
+  "[beta g] of a GatedDeltaNet layer's normed x [B T hidden]: the write
+   strengths sigmoid(ssm_beta x) and the log decays
+   ssm_a·softplus(ssm_alpha x + ssm_dt.bias), [B T value-heads] each."
+  [w x]
+  [(array/sigmoid (common/linear x (:beta w)))
+   (* (array/softplus (+ (common/linear x (:alpha w)) (:dt-bias w))) (:a w))])
+
+(defn- delta-out
+  "A GatedDeltaNet layer's output of the normed x [B T hidden] and its
+   rule's y [B T value-heads value-dim]: y RMSNormed per head times
+   silu(attn_gate x), through ssm_out."
+  [{:keys [eps delta-value-heads delta-value-dim]} w x y]
+  (let [[b t] (array/shape x)
+        hv (long delta-value-heads) dv (long delta-value-dim)
         z (array/reshape (common/linear x (:z w)) [b t hv dv])
         y (* (array/rms-norm y (:ssm-norm w) eps) (common/silu z))]
-    [(common/linear (array/reshape y [b t (c/* hv dv)]) (:out w))
-     {:conv (conv-state padded t) :state state}]))
+    (common/linear (array/reshape y [b t (c/* hv dv)]) (:out w))))
+
+(defn- delta-net
+  "One GatedDeltaNet layer of the normed x [B T hidden] after its cache
+   entry {:conv :state} (nil: zeros, the start): [its output, the entry
+   after x]."
+  [cfg w x entry]
+  (let [qkv (common/linear x (:qkv w))
+        [beta g] (delta-gates w x)
+        [y entry] (delta-rule cfg w qkv beta g entry nil)]
+    [(delta-out cfg w x y) entry]))
 
 (defn- query-and-gate
   "[query gate] of attn_q's projection [B T heads 2 head-dim]: each head's
@@ -841,7 +875,8 @@
 (defn- logits-of
   "[logits, the cache entries after them] of tokens ids [B T] (an int
    array) through every block, block i's layer (mixer i w x');
-   logits :all or :last."
+   logits :all, :last, or {:rows idx}: the rows idx (int32 [O]) of B,
+   [O T vocab]."
   [{:keys [layers eps dtype] :as cfg} weights ids mixer logits]
   (let [t (long (second (array/shape ids)))
         [h entries] (reduce (fn [[h entries] i]
@@ -850,7 +885,9 @@
                                 [h (conj entries e)]))
                             [(common/embed (:embed weights) ids dtype) []]
                             (range layers))
-        h (if (= :last logits) (array/slice h 1 (dec t) t) h)]
+        h (cond (= :last logits) (array/slice h 1 (dec t) t)
+                (map? logits) (array/take h (:rows logits) 0)
+                :else h)]
     [(common/linear (array/rms-norm h (:norm weights) eps) (or (:output weights) (:embed weights))) entries]))
 
 ;; ---------------------------------------------------------------------------
@@ -1314,22 +1351,208 @@
     (check-paged config layers positions tables slots ids)
     (paged-forward config weights layers positions tables slots ids)))
 
+(defn- with-held
+  "layers (by layer) with held's states (by layer: what each layer's entry
+   lacks) merged in; held empty (or nil) for none."
+  [layers held]
+  (if (seq held) (mapv merge held layers) layers))
+
 (defn compile-paged-step
   "paged-step compiled by array/compile, as qwen3/compile-paged-step: a
-   function (f layers positions tables slots tokens) → [logits layers'].
-   Options: :donate? true, each call consumes the layers it steps (the
-   pools written in place on MLX, the states' buffers reused)."
+   function (f layers positions tables slots tokens) → [logits layers'],
+   or (f layers positions tables slots tokens held), held a vector by
+   layer of states the step reads but never consumes (a GatedDeltaNet
+   layer's {:conv :state}, an attention layer's {}), each layer's
+   states then in layers or in held. Options: :donate? true, each call
+   consumes layers, the pools (written in place on MLX) and the states in
+   them; give the states in held instead when others still read them (a
+   group's rows read in place)."
   ([m] (compile-paged-step m nil))
   ([{:keys [config weights]} {:keys [donate?] :as opts}]
    (common/check-options who :compile-paged-step opts #{:donate?})
    (array/eval! weights)
-   (let [f (array/compile (fn [layers positions tables slots ids]
-                            (paged-forward config weights layers positions tables slots ids))
-                          (when donate? {:donate #{0}}))]
-     (fn [layers positions tables slots tokens]
-       (let [ids (common/token-array who tokens (:vocab config))]
-         (check-paged config layers positions tables slots ids)
-         (f layers positions tables slots ids))))))
+   (let [f (array/compile (fn [layers held positions tables slots ids]
+                            (paged-forward config weights (with-held layers held) positions tables slots ids))
+                          (when donate? {:donate #{0}}))
+         go (fn [layers positions tables slots tokens held]
+              (let [ids (common/token-array who tokens (:vocab config))]
+                (check-paged config (with-held layers held) positions tables slots ids)
+                (f layers (vec held) positions tables slots ids)))]
+     (fn
+       ([layers positions tables slots tokens] (go layers positions tables slots tokens nil))
+       ([layers positions tables slots tokens held] (go layers positions tables slots tokens held))))))
+
+;; ---------------------------------------------------------------------------
+;; Batched paged steps (genclj-6qb6): decode rows and a prefill chunk, as
+;; qwen3's (genclj-b3ow), the chunk one sequence through the GatedDeltaNet
+;; layers
+;; ---------------------------------------------------------------------------
+
+(defn- batch-attention
+  "One gated attention layer of the normed x [R 1 hidden] of a batch
+   (paged-batch-step's), a token a row, over its pools entry: every row's
+   key and value written at its slot (at its position, rotated there),
+   then common/batch-attention's attention (decode rows over their
+   tables, the chunk's rows over its blocks gathered), gated: [its
+   output, the pools after x]."
+  [{:keys [heads kv-heads head-dim] :as cfg} w x {:keys [positions slots] :as at} entry]
+  (let [r (first (array/shape x))
+        [q k v gate] (gated-qkv cfg w x positions)
+        [kp vp] (array/paged-write (:k entry) (:v entry)
+                                   (array/reshape k [r kv-heads head-dim]) (array/reshape v [r kv-heads head-dim]) slots)
+        o (common/batch-attention (array/reshape q [r heads head-dim]) kp vp at)]
+    [(-> (array/reshape o [r 1 (c/* (long heads) (long head-dim))])
+         (* (array/sigmoid gate))
+         (common/linear (:o w)))
+     {:k kp :v vp}]))
+
+(defn- batch-delta-net
+  "One GatedDeltaNet layer of the normed x [R 1 hidden] of a batch: its
+   first d rows (decode rows) each one token of its own sequence, from
+   its row of entry's {:conv :state} (d rows); the rest, with a chunk,
+   one sequence's tokens in order, from entry's {:chunk-conv
+   :chunk-state} (one row), those past :chunk-len padding, which leave
+   its states as they are (no decay, no write; the conv state taken at
+   its end). [its output, the entry after x: {:conv :state} of the d rows
+   and {:chunk-conv :chunk-state} of the chunk]."
+  [{:keys [delta-value-heads delta-value-dim] :as cfg} w x {:keys [d chunk chunk-len]} entry]
+  (let [r (long (first (array/shape x)))
+        d (long d)
+        n (c/- r d)
+        hv (long delta-value-heads) dv (long delta-value-dim)
+        qkv (common/linear x (:qkv w))                                    ; [R 1 C]
+        [beta g] (delta-gates w x)                                        ; [R 1 Hv]
+        rows (fn [y ^long from ^long to] (if (and (zero? from) (c/== to r)) y (array/slice y 0 from to)))
+        [yd ed] (when (pos? d)
+                  (delta-rule cfg w (rows qkv 0 d) (rows beta 0 d) (rows g 0 d) (select-keys entry [:conv :state]) nil))
+        [yc ec] (when chunk
+                  (let [one (fn [y] (array/reshape (rows y d r) [1 n (peek (array/shape y))]))
+                        live (when chunk-len (array/reshape (array/< (array/arange 0 n 1 {:dtype :int32}) chunk-len) [1 n 1]))
+                        masked (fn [y] (if live (array/where live y 0.0) y))]
+                    (delta-rule cfg w (one qkv) (masked (one beta)) (masked (one g))
+                                {:conv (:chunk-conv entry) :state (:chunk-state entry)} chunk-len)))
+        yc (when yc (array/reshape yc [n 1 hv dv]))
+        y (cond (and yd yc) (array/concatenate [yd yc] 0) yd yd :else yc)]
+    [(delta-out cfg w x y)
+     (cond-> {}
+       ed (merge ed)
+       ec (assoc :chunk-conv (:conv ec) :chunk-state (:state ec)))]))
+
+(defn- batch-forward
+  "paged-batch-step's arrays in and out: {:logits [O 1 vocab] :scores [O]
+   (with :targets) :layers}."
+  [{:keys [kinds] :as cfg} weights layers {:keys [ids positions slots tables chunk chunk-len out targets]}]
+  (let [at {:positions positions :slots slots :tables tables :chunk chunk :chunk-len chunk-len
+            :d (if tables (first (array/shape tables)) 0)}
+        [logits layers] (logits-of cfg weights ids
+                                   (fn [i w x]
+                                     (if (= :attention (kinds i))
+                                       (batch-attention cfg w x at (nth layers i))
+                                       (batch-delta-net cfg w x at (nth layers i))))
+                                   {:rows out})]
+    (cond-> {:logits logits :layers layers}
+      targets (assoc :scores (common/target-scores logits targets)))))
+
+(defn- check-batch
+  "paged-batch-step's operands: layers of the model's kinds (the
+   attention layers' pools, the GatedDeltaNet layers' states of the D
+   decode rows and of the chunk), R rows, decode rows first, a chunk's
+   after them."
+  [{:keys [kinds]} layers {:keys [ids positions slots tables chunk chunk-len out targets]}]
+  (let [r (long (first (array/shape ids)))
+        d (long (if tables (first (array/shape tables)) 0))
+        bad (fn [msg data] (throw (invalid (str "paged-batch-step: " msg) data)))
+        rows (fn [x] (when (array/array? x) (first (array/shape x))))
+        want (cond-> #{} (pos? d) (into [:conv :state]) chunk (into [:chunk-conv :chunk-state]))]
+    (when-not (and (vector? layers) (= (count kinds) (count layers))
+                   (every? (fn [[kind e]]
+                             (if (= :attention kind)
+                               (pools? e)
+                               (and (map? e) (= want (set (keys e)))
+                                    (every? #(= d (rows (% e))) (filter #{:conv :state} want))
+                                    (every? #(= 1 (rows (% e))) (filter #{:chunk-conv :chunk-state} want)))))
+                           (map vector kinds layers)))
+      (bad (str "the layers must be a vector by layer, each attention layer's pools (paged-pools') and each"
+                " GatedDeltaNet layer's states: {:conv :state} of the " d " decode rows (paged-states'), and"
+                (if chunk " {:chunk-conv :chunk-state} of the chunk's one row" " no chunk's"))
+           {:layers (if (vector? layers) (mapv #(when (map? %) (vec (keys %))) layers) layers)}))
+    (when-not (= [r 1] (array/shape ids))
+      (bad (str "a batch reads one token a row, [R 1], not " (array/shape ids)) {:tokens (array/shape ids)}))
+    (doseq [[what x] [[:positions positions] [:slots slots]]]
+      (when-not (and (array/array? x) (= [r] (array/shape x)))
+        (bad (str (name what) " must be an int array [R] " [r]) {what (when (array/array? x) (array/shape x))})))
+    (when (and tables (not (and (= 2 (array/ndim tables)) (c/<= 1 d r))))
+      (bad (str ":tables must be [D MB] for D decode rows, at most R " r ", not " (array/shape tables))
+           {:tables (array/shape tables)}))
+    (when-not (= (some? chunk) (c/< d r))
+      (bad (if chunk
+             (str "a :chunk table, but no rows after the " d " decode rows")
+             (str "the rows after the " d " decode rows read a chunk: a :chunk table is missing"))
+           {:rows r :decode-rows d}))
+    (when (and chunk (not (and (= 2 (array/ndim chunk)) (= 1 (first (array/shape chunk))))))
+      (bad (str ":chunk must be [1 MB], not " (array/shape chunk)) {:chunk (array/shape chunk)}))
+    (when (and chunk-len (not (and chunk (array/array? chunk-len) (= [1] (array/shape chunk-len)))))
+      (bad ":chunk-len must be an int array [1], with a :chunk" {:chunk-len (when (array/array? chunk-len) (array/shape chunk-len))}))
+    (when-not (and (array/array? out) (= 1 (array/ndim out)))
+      (bad ":out must be the rows whose logits are computed, an int array [O]" {:out (when (array/array? out) (array/shape out))}))
+    (when (and targets (not (and (array/array? targets) (= (array/shape out) (array/shape targets)))))
+      (bad (str ":targets must be an int array [O] " (array/shape out)) {:targets (when (array/array? targets) (array/shape targets))}))))
+
+(def ^:private batch-keys #{:tokens :positions :slots :tables :chunk :chunk-len :out :targets})
+
+(defn- batch-arrays
+  "batch with its :tokens as :ids, an int array [R 1]."
+  [batch vocab]
+  (-> batch (dissoc :tokens) (assoc :ids (common/token-array who (:tokens batch) vocab))))
+
+(defn paged-batch-step
+  "One forward of R rows, a token a row, as qwen3/paged-batch-step's, for
+   Qwen3.5's layers: {:logits [O 1 vocab] :scores [O] (with :targets)
+   :layers}. layers is a vector by layer: each attention layer's paged
+   pools (paged-pools'), each GatedDeltaNet layer's states of the D
+   decode rows, in row order ({:conv :state}, paged-states', when D is
+   positive), and of the chunk's sequence ({:chunk-conv :chunk-state}, of
+   one row, with a :chunk), merged; :layers the same after the rows.
+   batch is qwen3/paged-batch-step's (:tokens :positions :slots :tables
+   :chunk :out :targets) and
+     :chunk-len  (optional, with a :chunk) [1] the chunk's tokens: its
+                 rows past them are padding, which leave its states as
+                 they were (absent: every chunk row is the sequence's).
+   A decode row is one token of its own sequence; the chunk's rows are
+   one sequence's tokens in order through the GatedDeltaNet layers
+   (gen.array/gated-delta over them), as through the attention layers
+   (each attending to the positions up to its own). Its logits are
+   paged-step's (decode rows) and a concatenating cache's (a chunk)
+   within float round-off; the layers are values, as paged-step's."
+  [{:keys [config weights]} layers batch]
+  (common/check-options who :paged-batch-step batch batch-keys)
+  (let [b (batch-arrays batch (:vocab config))]
+    (check-batch config layers b)
+    (batch-forward config weights layers b)))
+
+(defn compile-paged-batch-step
+  "paged-batch-step compiled by array/compile: a function (f layers
+   batch) → {:logits :scores :layers}, or (f layers batch held), held a
+   vector by layer of states read but never consumed (a GatedDeltaNet
+   layer's {:conv :state} or {:chunk-conv :chunk-state}, each in layers
+   or in held), one trace per batch's structure and shapes. The model's
+   weights are evaluated here. Options: :donate? true, each call
+   consumes layers (the pools written in place on MLX, and the states in
+   them), as compile-paged-step's."
+  ([m] (compile-paged-batch-step m nil))
+  ([{:keys [config weights]} {:keys [donate?] :as opts}]
+   (common/check-options who :compile-paged-batch-step opts #{:donate?})
+   (array/eval! weights)
+   (let [f (array/compile (fn [layers held b] (batch-forward config weights (with-held layers held) b))
+                          (when donate? {:donate #{0}}))
+         go (fn [layers batch held]
+              (common/check-options who :paged-batch-step batch batch-keys)
+              (let [b (batch-arrays batch (:vocab config))]
+                (check-batch config (with-held layers held) b)
+                (f layers (vec held) b)))]
+     (fn
+       ([layers batch] (go layers batch nil))
+       ([layers batch held] (go layers batch held))))))
 
 ;; ---------------------------------------------------------------------------
 ;; The family, by its architectures (gen.llm.models)
