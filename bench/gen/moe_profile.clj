@@ -42,7 +42,13 @@
    15.31; down 0.46, 1.43, 2.27); routing 1.22, 1.25, 1.35; shared 0.88,
    2.60, 2.70. The gathers' qmm_sm80 makes ceil(N/128) CTAs a pair: 32
    for a token's gate (N 512), slow at 1 row (41 µs a call), near the
-   memory's speed at 16 (84 MB in 80 µs)."
+   memory's speed at 16 (84 MB in 80 µs). In products of at most 7 rows
+   (qmv): the GatedDeltaNet layers' Q8_0 qkv, z and out 1.11, 3.31, 5.47
+   against 1.23, 3.06, 3.07; the shared expert 1.19, 1.75, 2.39 against
+   1.31, 2.70, 2.74. Without CUDA graphs (MLX_USE_CUDA_GRAPHS=0) the step
+   is the same (16.5 ms at 1 row). In float32 (qmm_sm80 takes the half
+   floats only: qmm_naive) the step takes 21.7, 42.1, 60.2 ms, the
+   experts 3.88, 10.71, 20.07."
   (:require [clojure.string :as str]
             [gen.array :as array]
             [gen.llm.host :as host]
