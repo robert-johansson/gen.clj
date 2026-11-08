@@ -812,9 +812,9 @@
   "picked's indices by ranks: an entry's rank is the number of entries of
    its row larger, or equal and before it (argmax's order), counted over
    [N E E] comparisons; the entry of rank i is the i-th index (one-hot
-   sums). In a few kernels whatever k, where picked takes about four a
-   pick. Ranks are a permutation of each row unless it holds a NaN, whose
-   indices are clamped into range."
+   sums). About 10 kernels whatever k, where picked takes about 11 a
+   pick (on MLX's CUDA, 2026-11-08). Ranks are a permutation of each row
+   unless it holds a NaN, whose indices are clamped into range."
   [p k]
   (let [e (long (peek (array/shape p)))
         ids (array/arange 0 e 1 {:dtype :int32})
@@ -838,8 +838,9 @@
    (stop-gradient: MLX's native gradients refuse a gather's VJP with
    respect to its indices), the values p's. By ranks (ranked) up to
    ranked-limit comparisons, else by picks (picked): the same indices.
-   A decode step's routing is a few kernels a layer by ranks, about 4k by
-   picks, which on MLX's CUDA cost more than the experts' products (genclj-p0ad)."
+   On MLX's CUDA, whose host encodes a kernel in about 5 µs, the picks
+   were 3500 of a Qwen3.6-35B-A3B decode step's 5400 kernels: its
+   encoding took 21 ms a step, by ranks 14 (genclj-p0ad)."
   [p k]
   (let [[n e] (array/shape p)
         idx (array/stop-gradient (if (c/<= (c/* (long n) (long e) (long e)) (long ranked-limit)) (ranked p k) (picked p k)))]
