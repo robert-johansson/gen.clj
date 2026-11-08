@@ -223,6 +223,60 @@
           (gen.mlx.MlxRaw/mlx_closure_free f))))))
 
 ;; ---------------------------------------------------------------------------
+;; Reads
+;; ---------------------------------------------------------------------------
+
+(deftest sixteen-bit-floats-read-as-their-bits
+  ;; every float16 and bfloat16 bit pattern, as MLX holds it (a view of
+  ;; int32s, two patterns each), reads (->floats) as
+  ;; gen.array.host/halves->floats widens it, bit for bit (NaN payloads
+  ;; too), whole, in slices across the read's chunks of 4,096 entries
+  ;; (MlxRuntime/widenHalves; genclj-4acj), as a 2-d slice of rows, and
+  ;; past 2^18 entries, where the chunks run in parallel; and so does a
+  ;; float32 read that long (MlxRuntime/readFloats).
+  ;; Planted (2026-11-08, on fenrir's CUDA, MlxRuntime mutated): a
+  ;; chunk's last entry left 0 (18 failures, both dtypes), each chunk read
+  ;; from one entry on (12), a float32 chunk one entry short (1)
+  (when-mlx
+    (let [b (mlx)
+          stream @(requiring-resolve 'gen.backend.mlx.array/stream)
+          handle @(requiring-resolve 'gen.backend.mlx.array/handle)
+          wrap @(requiring-resolve 'gen.backend.mlx.array/wrap)
+          code @(requiring-resolve 'gen.backend.mlx.array/code)
+          widen @(requiring-resolve 'gen.array.host/halves->floats)
+          ^shorts bits (short-array (map unchecked-short (range 65536)))
+          packed (mapv (fn [^long k] (unchecked-int (bit-or (* 2 k) (bit-shift-left (inc (* 2 k)) 16)))) (range 32768))]
+      (array/with-backend b
+        (let [ints (array/array packed {:dtype :int32})]
+          (doseq [dtype [:float16 :bfloat16]]
+            (let [x (wrap b (gen.mlx.Mlx/mlx_view (handle ints) (int (code dtype)) (stream b)))
+                  differing (fn [y from to]
+                              (let [^floats got (array/->floats y)
+                                    ^floats want (widen (java.util.Arrays/copyOfRange bits (int from) (int to)) dtype)]
+                                (if (== (alength got) (alength want))
+                                  (into [] (comp (remove #(== (Float/floatToRawIntBits (aget got %)) (Float/floatToRawIntBits (aget want %))))
+                                                 (take 3))
+                                        (range (alength got)))
+                                  [:length (alength got) (alength want)])))]
+              (testing dtype
+                (is (= [65536] (array/shape x)))
+                (doseq [[from to] [[0 65536] [0 0] [0 1] [0 4095] [0 4096] [0 4097] [1 8196] [4095 12291] [65535 65536]]]
+                  (is (= [] (differing (array/slice x 0 from to) from to)) (str "entries " from " to " to)))
+                (is (= [] (differing (array/slice (array/reshape x [16 4096]) 0 3 7) (* 3 4096) (* 7 4096))) "rows 3 to 7")
+                ;; past 2^18 entries the read runs in parallel chunks
+                (let [big (array/concatenate (vec (repeat 8 x)) 0)
+                      ^shorts bits8 (short-array (apply concat (repeat 8 (seq bits))))
+                      ^floats got (array/->floats (array/slice big 0 1 (dec (* 8 65536))))
+                      ^floats want (widen (java.util.Arrays/copyOfRange bits8 1 (dec (* 8 65536))) dtype)]
+                  (is (and (== (alength want) (alength got))
+                           (every? #(== (Float/floatToRawIntBits (aget got %)) (Float/floatToRawIntBits (aget want %)))
+                                   (range (alength want))))
+                      "8 × 65,536 patterns, from the second"))))))
+        (testing "a float32 read past 2^18 entries, in parallel chunks"
+          (let [want (float-array (map #(* 0.5 (- (long %) 150000)) (range 300001)))]
+            (is (java.util.Arrays/equals want ^floats (array/->floats (array/array (vec want) {:dtype :float32}))))))))))
+
+;; ---------------------------------------------------------------------------
 ;; Threads and memory
 ;; ---------------------------------------------------------------------------
 

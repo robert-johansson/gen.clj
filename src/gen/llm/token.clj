@@ -282,7 +282,8 @@
     (loop [i 0 acc [[] (boolean dead?)]]
       (if (< i n)
         (let [m (min n (+ i reads-at-once))
-              rows (lm/batch-next-logprobs lm (mapv #(into ctx (subvec run 0 %)) (range i m)))]
+              ;; the LM's rows, lent: read, never written
+              rows (lm/batch-next-logprobs-lent lm (mapv #(into ctx (subvec run 0 %)) (range i m)))]
           (recur m (reduce (fn [acc j] (score acc j (rows (- (long j) i)))) acc (range i m))))
         (first acc)))))
 
@@ -302,7 +303,8 @@
    row's). Loud where the context has weight but the potential allows no
    token."
   [{:keys [lm potential end-tokens]} {:keys [ctx tokens dead?]} key]
-  (let [row (lm/next-logprobs lm ctx)]
+  (let [;; the LM's row, lent: drawn from and read, never written
+        row (first (lm/batch-next-logprobs-lent lm [ctx]))]
     (if-not potential
       [(draw row key) nil]
       (let [q (if dead? row (constrained/site-row potential end-tokens row tokens))]

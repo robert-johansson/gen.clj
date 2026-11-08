@@ -6,6 +6,7 @@
 
      (open engine tokens)            → branch, after reading tokens
      (fork branch n)                 → n new branches with branch's state
+     (fork-each branches ns)         → each branch's n forks, in one call where the engine can
      (advance branches tokens)       → branches, each one token further, in one decode
      (extend branch tokens)          → {:branch :scores}: many tokens, teacher-forced
      (score branch tokens)           → the log-probabilities of a continuation
@@ -54,6 +55,11 @@
   (-resample [engine branches ancestors])
   (-dispose [engine branches])
   (-live? [engine branch]))
+
+(defprotocol ForkEach
+  "An engine that forks several branches in one call (optional: fork-each
+   forks one branch a call on another)."
+  (-fork-each [engine branches ns] "A vector of each branch's n forks' vectors, all or none."))
 
 (deftype Branch [engine ^long id tokens ^floats logprobs]
   Object
@@ -117,6 +123,13 @@
    entry per token of the vocabulary)."
   ^floats [b]
   (aclone ^floats (.-logprobs (as-branch b))))
+
+(defn lent-logprobs
+  "The log-probabilities of the branch's next token, the branch's own
+   array: lent to a caller that reads it and never writes it (internal to
+   gen.llm, for gen.llm.lm's lent rows; logprobs gives a copy)."
+  ^floats [b]
+  (.-logprobs (as-branch b)))
 
 (defn logprob
   "The log-probability of token as the branch's next token."
@@ -208,6 +221,24 @@
      (when-not (index? n (inc Integer/MAX_VALUE))
        (throw (ex-info (str "fork: n is a non-negative integer, not " (pr-str n)) {:reason :invalid-count :n n})))
      (-fork (.-engine b) b (long n)))))
+
+(defn fork-each
+  "(fork b n) for each branch b of branches and its count n of ns: a
+   vector of the vectors of forks, in order, the same branches as those
+   forks one at a time. An engine of gen.llm.slots (ForkEach) makes them
+   in one call, one hand-off to its thread where fork takes one a branch
+   (about 60 µs each on fenrir's MLX engine; genclj-4acj), all or none:
+   too few free branches for them all is a refusal that makes none."
+  [branches ns]
+  (let [bs (branch-vector branches "fork-each")]
+    (when-not (and (sequential? ns) (== (count bs) (count ns)) (every? #(index? % (inc Integer/MAX_VALUE)) ns))
+      (throw (ex-info (str "fork-each: one non-negative count for each of the " (count bs) " branches, not " (pr-str ns))
+                      {:reason :invalid-count :ns ns :branches (count bs)})))
+    (let [e (.-engine ^Branch (first bs))
+          ns (mapv long ns)]
+      (if (satisfies? ForkEach e)
+        (-fork-each e bs ns)
+        (mapv #(-fork e %1 %2) bs ns)))))
 
 (defn advance
   "Each branch advanced by its token, all in one decode: a vector of new

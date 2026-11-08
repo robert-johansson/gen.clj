@@ -26,6 +26,12 @@
   (delay (and (not (.contains (.toLowerCase (System/getProperty "os.name")) "mac"))
               (with-device :gpu #(Mlx/mlx_device_is_available (long %))))))
 
+(defn cuda-gpu?
+  "Does MLX compute on a CUDA GPU here (Linux with a GPU: the evaluations
+   need one thread)?"
+  []
+  @one-eval-thread?)
+
 (defonce ^:private eval-thread
   (delay
     (let [t (promise)

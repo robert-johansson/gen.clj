@@ -38,6 +38,36 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Added (experimental): token SMC and completions read the LM's rows
+  lent, and an LM forks a step's parents in one call** (genclj-4acj).
+  `gen.llm.lm/batch-next-logprobs-lent` gives an LM's rows without
+  copying them where the LM lends them (the new protocol `LentRows`,
+  which an LM over an engine implements): its own arrays, which the
+  caller reads and never writes (`gen.llm.branching/lent-logprobs`).
+  `gen.llm.smc/step` (but for a proposal function, which still gets
+  copies) and a completion's draws and site scores (`gen.llm.token`)
+  read their rows so; `lm/next-logprobs` and `lm/batch-next-logprobs`
+  still return new arrays. `gen.llm.branching/fork-each` forks several
+  branches with one call where the engine implements the new optional
+  protocol `ForkEach` (gen.llm.slots's engines: one hand-off to the
+  engine's thread, all or none), and the LM's cache forks a step's
+  parents with it. The same values and draws for the same key. On
+  fenrir's CUDA (Qwen3-0.6B, 16 particles) the copies cost 1.5-1.8 ms a
+  step on gen.array's engine and 0.8-1.0 on llama.cpp's, the forks'
+  hand-offs 0.6 and 0.2; token SMC there runs 1272 tokens/s paged (main
+  1008), 1445 continuous (1056), 2579 on llama.cpp (2177).
+- **Changed (internal): MLX reads float16 and bfloat16 by a Java loop
+  from the buffer, and on CUDA prefetches a large read's pages**
+  (genclj-4acj). `->floats` of a 16-bit float array widens its bit
+  patterns from MLX's buffer in place (`MlxRuntime/widenHalves`), with no
+  copy of its own, bit for bit as before. On MLX's CUDA backend a host
+  read of at least `gen.mlx.prefetch-bytes` bytes (a system property,
+  default 1 MiB; 0 turns it off) moves its managed pages to the host in
+  one `cudaMemPrefetchAsync` (the CUDA runtime MLX links,
+  libcudart.so.13) rather than page by page as the host faults on them.
+  Values are unchanged. A float16 read of 8 to 16 rows of Qwen3's
+  logits took 2.9-3.1 ms a step on fenrir, now 1.1-1.8.
+
 - **Changed (experimental): paged attention runs a kernel on MLX's CUDA**
   (genclj-6qb6, genclj-1daf; **Draws**, the paged and continuous modes
   on CUDA). On MLX's CUDA backend `gen.array/paged-attention` runs vLLM's

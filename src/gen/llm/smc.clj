@@ -342,7 +342,13 @@
          [prompt] (:args state)
          live (into [] (remove #(:done? (particles %))) (range (count particles)))
          contexts (mapv #(into prompt (:tokens (particles %))) live)
-         rows (when (seq live) (lm/batch-next-logprobs (:lm completion) contexts))
+         ;; the LM's rows, lent (read only, never written: token/dist,
+         ;; the :masked and :awrs proposals) unless a proposal function,
+         ;; the caller's, receives them
+         rows (when (seq live)
+                (if (fn? proposal)
+                  (lm/batch-next-logprobs (:lm completion) contexts)
+                  (lm/batch-next-logprobs-lent (:lm completion) contexts)))
          draws (or key (step-key state 0))
          drawn (if (= :awrs proposal)
                  (mapv (fn [i row] (awrs-draw state (particles i) row (rng/fold-in draws i))) live rows)
