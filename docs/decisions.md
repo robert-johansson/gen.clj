@@ -6845,3 +6845,46 @@ only"; not taken for now, the apps-open run on the MacBook)
    gives one memory behaviour (no file cache, cast at load, bounded host
    memory), fewer MLX loader bugs to rely on (float64 metadata, BF16), and
    the same arrays.
+
+### mlx_load_gguf's file cache evicted; the host reader slower on CUDA
+
+(The owner's rule of 2026-11-08, "The loader's two calls", applied; the
+choices inside it PROVISIONAL, owner to confirm; genclj-vn28)
+
+**The host reader missed the 20% rule on CUDA,** so mlx_load_gguf stays for
+its types, and the pages its load brings into the file cache are evicted
+after it. Cold-cache load times (5 runs, medians):
+
+| Model, machine | mlx_load_gguf | host reader | ratio | file cache after (mlx / host) |
+|---|---|---|---|---|
+| Qwen3-0.6B, M4 | 1.18 s | 0.81 s | 0.69 | 0.64 / 0.006 GB |
+| Qwen3.5-0.8B, M4 | 1.40 s | 0.92 s | 0.65 | 0.83 / 0.011 GB |
+| Qwen3-0.6B, fenrir | 0.40 s | 0.73 s | 1.82 | 0.64 / 0.006 GB |
+| Qwen3.5-0.8B, fenrir | 0.53 s | 0.87 s | 1.66 | 0.83 / 0.011 GB |
+| Qwen3-8B, fenrir | 3.36 s | 7.49 s | 2.23 | 8.71 / 0.006 GB |
+
+- **On the 8B the host reader's 7.5 s** are: reads 1.48 s (5.9 GB/s),
+  decoding 0.83 s, mlx_array_new_data 2.0 s, and about 3.2 s untimed, most
+  likely the zeroed arena and its copies.
+- **The eviction** (gen.backend.mlx.io/load-gguf): before the load, mincore
+  records which of the file's pages are cached. After it, only the pages
+  that weren't are evicted (msync MS_INVALIDATE on macOS, posix_fadvise
+  DONTNEED on Linux, through FFM).
+  - `-Dgen.gguf.cache=true` keeps them. A failed call throws `:io`.
+  - It costs 2–5% of mlx_load_gguf's time. The cache left after is the
+    header's pages (6–12 MB).
+- **Tests:** gguf-test's mlx-s-loader-leaves-the-file-cache-as-it-found-it.
+  Planted bugs fail it: no eviction, every page evicted, a range a page
+  short. The real models' tensors are the same before and after (CRC32C,
+  704 and 725 parts); a planted Q8_0 bias changes 197 of them.
+- On macOS the eviction also drops pages another process has mapped but
+  that weren't cached before our load (llama.cpp's mmap of the same model,
+  say); they're read back from disk when needed. Linux keeps mapped pages.
+
+**For the owner:**
+1. **One rule for every platform** (kept). On Metal the host reader is about
+   32% faster and would give one memory behaviour there, but two behaviours
+   in all.
+2. **A faster host reader** (decode into native memory with no zeroing, and
+   hand MLX its buffers without the mlx_array_new_data copy) could pass the
+   rule on CUDA too, and then every file would go through it.
