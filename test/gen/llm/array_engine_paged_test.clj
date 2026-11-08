@@ -9,9 +9,14 @@
      (gen.llm.array-engine-test's: 2e-6 on the JVM backend, 2e-5 on MLX);
    - a branch's rows are qwen3's forward's, through steps that cross
      blocks;
-   - forks share their blocks: a fork copies nothing, a step copies a
-     shared block filled in part (copy-on-write) and nothing else, and a
-     disposed branch's blocks are free again;
+   - forks share their blocks: a fork copies nothing; the first holder to
+     write a shared block filled in part appends in place (an LM's kept
+     entry and the fork that goes on), a second writer copies it
+     (copy-on-write, within its step), and nothing else is copied; the
+     parent, the root and a resampled duplicate written after their forks
+     each read their own history; a disposed branch's blocks are free
+     again (planted bugs: a second writer not copying, the written
+     offsets not advanced);
    - a step pads its rows to a power of 2 (:min-rows at least), and the
      padding changes no row;
    - the pool grows when its blocks run out, keeping every branch;
@@ -137,7 +142,7 @@
         v (f)]
     [(into {} (keep (fn [[k n]] (let [d (- (long n) (long (before k)))] (when-not (zero? d) [k d])))) (ae/stats e)) v]))
 
-(deftest forks-share-blocks-copy-on-write
+(deftest forks-share-blocks-and-a-second-writer-copies
   (with-open [e (ae/engine (merge paged-opts {:model (:f32 @models) :max-branches 12}))]
     (let [p (vec (take 12 (cycle (:prompt contract-opts))))  ; a block and a half of 8
           free0 (:free (ae/blocks e))
@@ -146,17 +151,78 @@
           held #(- (long free0) (long (:free (ae/blocks e))))]
       (is (= 2 (held)) "the root's two blocks; three forks share them")
       (let [[d stepped] (stats-delta e #(br/advance kids [1 2 3]))]
-        (is (= {:steps 1 :rows 3 :padded-rows 1 :copied-blocks 3} d)
-            "three rows padded to 4; each fork copies the shared partial block (the root still holds it)")
-        (is (= 5 (held)) "the root's two, three copies")
+        (is (= {:steps 1 :rows 3 :padded-rows 1 :copied-blocks 2} d)
+            (str "three rows padded to 4: the first fork appends to the shared partial block in place (the root"
+                 " never wrote past its end), the other two copy it"))
+        (is (= 4 (held)) "the root's two, two copies")
         (doseq [[b t] (map vector stepped [1 2 3])]
           (is (<= (bc/max-diff (forward-row :f32 (conj p t)) (br/logprobs b) 128) band)))
+        (is (<= (bc/max-diff (forward-row :f32 p) (br/logprobs root) 128) band) "the root's own row, read before")
         (br/dispose! root)
-        (is (= 4 (held)) "the root disposed: its partial block freed, the full one shared by the steps")
+        (is (= 4 (held)) "the root disposed: its blocks the first fork's and shared")
         (let [[d2 s2] (stats-delta e #(br/advance stepped [4 5 6]))]
           (is (zero? (:copied-blocks d2 0)) "each holds its partial block alone: written in place")
           (br/dispose! s2))
         (is (= free0 (:free (ae/blocks e))) "every block free again")))))
+
+(defn- writers-scenario
+  "Forks and their parents written in turn, on a fresh paged engine (opts
+   over paged-opts): {:gaps {what max |Δ log p| against the forward}
+   :copies [copied-blocks by step]}."
+  [opts]
+  (with-open [e (ae/engine (merge paged-opts {:model (:f32 @models) :max-branches 16} opts))]
+    (let [p (vec (take 10 (cycle (:prompt contract-opts))))  ; a block and a quarter of 8
+          gap (fn [bs ctxs] (reduce max 0.0 (map #(bc/max-diff (forward-row :f32 %2) (br/logprobs %1) 128) bs ctxs)))
+          copies #(:copied-blocks % 0)
+          root (br/open e p)
+          ;; an LM's pattern: an entry kept, a fork of it going on; the
+          ;; fork appends in place
+          [d1 [a]] (stats-delta e #(br/advance [(br/fork root)] [1]))
+          [d2 [b]] (stats-delta e #(br/advance [(br/fork a)] [2]))
+          ;; the parent written after its fork: a second writer, it copies
+          [d3 [a']] (stats-delta e #(br/advance [a] [3]))
+          ;; the root itself, two writers back
+          [d4 [r']] (stats-delta e #(br/advance [root] [4]))
+          ;; resampled: two forks of b in one step, the second copies
+          [d5 [c1 c2]] (stats-delta e #(br/advance [(br/fork b) (br/fork b)] [5 6]))
+          ;; b's extend after them, a third writer
+          x (:branch (br/extend b [7 8]))
+          out {:gaps {:a-fork (gap [b] [(conj p 1 2)])
+                      :its-parent (gap [a'] [(conj p 1 3)])
+                      :the-root (gap [r'] [(conj p 4)])
+                      :resampled (gap [c1 c2] [(conj p 1 2 5) (conj p 1 2 6)])
+                      :a-run (gap [x] [(conj p 1 2 7 8)])}
+               :copies (mapv copies [d1 d2 d3 d4 d5])}]
+      (br/dispose! [a' r' c1 c2 x])
+      out)))
+
+(def ^:private writers-planted
+  "Mutations of the books' written offsets, each failing writers-scenario's
+   gaps."
+  {"a second writer not copying (the written offsets taken to be its own)"
+   {#'paged/prepare (let [prepare paged/prepare]
+                      (fn [a s ^long n ^long bs] (prepare (cond-> a (seq (:blocks s)) (assoc-in [:written (peek (:blocks s))] (rem (long (:len s)) (long bs))))
+                                              s n bs)))}
+   "the written offsets not advanced"
+   {#'paged/prepare (let [prepare paged/prepare]
+                      (fn [a s ^long n ^long bs] (let [[a' s' slots copies] (prepare a s n bs)]
+                                       [(assoc a' :written (merge (:written a') (select-keys (:written a) (keys (:written a')))))
+                                        s' slots copies])))}})
+
+(deftest a-second-writer-copies-and-every-history-holds
+  (doseq [opts [nil {:continuous? true}]]
+    (testing (pr-str opts)
+      (let [{:keys [gaps copies]} (writers-scenario opts)]
+        (doseq [[what g] gaps]
+          (is (<= g band) (name what)))
+        (is (= [0 0 1 1 1] copies)
+            "forks of kept entries in place; the parent, the root and a resampled duplicate copy"))))
+  (testing "planted bugs fail it"
+    (doseq [[what redefs] writers-planted]
+      ;; loud counts as failing: two rows of a step written at one slot
+      (is (< 0.01 (try (reduce max (vals (:gaps (with-redefs-fn redefs #(writers-scenario nil)))))
+                       (catch clojure.lang.ExceptionInfo _ ##Inf)))
+          what))))
 
 (deftest padding-changes-no-row
   (doseq [min-rows [1 4 16]]
@@ -265,7 +331,7 @@
   "Mutations of the paged mode, each with the contract checks it fails."
   {"copy-on-write skipped (a fork writes its parent's block)"
    [{#'paged/prepare (let [prepare paged/prepare]
-                       (fn [a s n bs]
+                       (fn [a s ^long n ^long bs]
                          (let [[a' s' slots copies] (prepare a s n bs)]
                            (if (seq copies)
                              ;; the shared block kept, the copy's block given back
@@ -298,6 +364,7 @@
   (let [reason #(:reason (ts/thrown-data (%)))]
     (is (= :invalid-option (reason #(ae/engine (merge paged-opts {:model (:f32 files) :block-size 12})))))
     (is (= :invalid-option (reason #(ae/engine (merge paged-opts {:model (:f32 files) :paged? 1})))))
-    (is (= :unsupported (reason #(ae/engine {:model "test/fixtures/gguf/qwen35-tiny-f32.gguf" :paged? true}))) "Qwen3.5")
+    (is (= :unsupported (reason #(ae/engine {:model "test/fixtures/gguf/qwen35-tiny-f32.gguf" :paged? true :continuous? true})))
+        "Qwen3.5 continuously")
     (with-open [e (ae/engine {:model (:f32 @models)})]
       (is (= :not-paged (reason #(ae/blocks e)))))))

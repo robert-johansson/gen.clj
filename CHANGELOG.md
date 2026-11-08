@@ -123,6 +123,34 @@ other values for the same key, from the same distribution.
     llama.cpp (175 against 82 and 92 in float32); a lone caller as
     before.
 
+- **Changed (experimental): the paged mode copies a block only for a
+  second writer; Qwen3.5 runs paged** (genclj-6qb6, genclj-1ovd).
+  - `gen.llm.paged`: an allocator records each block's written offsets
+    (`:written`, `paged/written`). `prepare` appends to a shared block
+    filled in part in place when no holder has written past the
+    sequence's end, and copies it only otherwise: an LM's kept entry and
+    the fork that goes on from it share the block, and only a second
+    writer (a resampled duplicate, or the entry itself written later)
+    copies. The values read are the same; the copies, and `stats`'
+    `:copied-blocks`, are fewer: token SMC at 16 particles copied 44
+    blocks where it copied 1012 (Qwen3-0.6B on Metal: 680-703 tokens/s
+    in float32 against 604, 742-758 in float16 against 713).
+  - `gen.llm.models.qwen35`: `paged-pools`, `paged-states`,
+    `paged-cache`, `paged-entries`, `paged-step` and
+    `compile-paged-step`: the attention layers' keys and values in paged
+    pools, the GatedDeltaNet layers' states a row each, the step's
+    layers the two merged by layer.
+  - `gen.llm.array-engine`: `:paged? true` runs Qwen3.5 and Qwen3.6
+    (`:continuous?` stays Qwen3's, loud otherwise). A branch's recurrent
+    states are a row of a group, as the static mode's: a lane steps in
+    place, any other step stacks its rows' states (`stats`'
+    `:stacked-steps`).
+  - `p/IFused` gains `:put-blocks` (gen.array.paged's block write): on
+    MLX one scatter of the blocks as slices.
+  - The donated writes' cost of 8 ms a GB (genclj-1daf) was the GC that
+    genclj-c7uf removed: on Metal a write into pools of 0.14 to 3 GB now
+    takes 0.3-0.7 ms whatever their size.
+
 - **Added (experimental): LoRA adapters, `gen.llm.lora`** (genclj-yc3b,
   genclj-p4mk): low-rank adapters trained beside a model's frozen, dense
   or quantized, weights, and served by llama.cpp.
