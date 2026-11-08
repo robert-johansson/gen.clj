@@ -57,8 +57,10 @@
    namespace in 3 with its band 0) and 20 more clients alone, of contexts
    to 144 tokens (the test's reach 44).
    - The JVM backend: 2e-6 (float rounding, gen.llm.array-engine-test's).
-   - MLX on macOS: 2e-5, gen.llm.array-engine-test's (Qwen3's, measured
-     on the M4's Metal and CPU; Qwen3.5's not measured there yet).
+   - MLX on macOS: 4e-5 (the M4's Metal, 2026-11-08): largest 1.67e-5, a
+     client of the 20 more; 1.38e-5 over the tests' comparisons (the band
+     had been Qwen3's 2e-5, gen.llm.array-engine-test's). MLX's CPU on the
+     Mac is not measured; it takes Metal's.
    - CUDA: 1.4e-4 (fenrir's RTX PRO 6000, sm_120, 2026-11-08): largest
      6.8e-5, a row of 121 tokens; 2.4e-5 over the tests' comparisons,
      which failed the band of 2e-5.
@@ -69,9 +71,9 @@
    contexts: on CUDA a median of 3.8e-6 and a 99th percentile of 4.6e-5.
    The planted bugs exceed every band by far: the test's by 4 nats, and
    the decode rows' states rounded to float16 at each step by 5e-3 (on
-   CUDA and the CPU)."
+   CUDA and the CPU) and 3.5e-3 (on Metal)."
   (cond (ts/jvm?) 2e-6
-        (.startsWith (System/getProperty "os.name") "Mac") 2e-5
+        (.startsWith (System/getProperty "os.name") "Mac") 4e-5
         (ts/cuda?) 1.4e-4
         :else 8e-5))
 

@@ -5967,10 +5967,12 @@ namespaces.
   pass.
 
 **Still open:**
-- **The Mac's band for Qwen3.5 was never measured;** 2e-5 is Qwen3's. To do
-  when the Mac's GPU is free:
-  `clojure -J-Dgen.backend=mlx -M:test:bench -m gen.qwen35-continuous-noise`
-  on Metal and on MLX's CPU.
+- **The Mac's band for Qwen3.5 was never measured;** 2e-5 is Qwen3's.
+  Measured after the merge (the lead, the M4's Metal, 2026-11-08 ~06:15):
+  largest 1.67e-5 (a client of the 20 more), 1.38e-5 over the tests'
+  comparisons, so 2e-5 had been only 1.2× it. The Mac's band is now 4e-5,
+  by the same rule. The float16 planted bug gives 3.5e-3 on Metal. MLX's
+  CPU on the Mac is not measured and takes Metal's band.
 - The Thor's CUDA (sm_110) and aarch64 Linux CPUs fall under these bands
   unmeasured.
 - array-engine-qwen35-test keeps 2e-5. It passed on CUDA and x86, but the

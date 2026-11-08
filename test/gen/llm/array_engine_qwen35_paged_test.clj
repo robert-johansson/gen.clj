@@ -44,10 +44,10 @@
   "array-engine-qwen35-continuous-test's, per platform (its docstring
    gives bench/gen/qwen35_continuous_noise.clj's measurements, which take
    this namespace's comparisons too: on fenrir's x86 CPU a lane step's
-   2.5e-5 failed the band of 2e-5): 2e-6 on the JVM backend, 2e-5 on MLX
+   2.5e-5 failed the band of 2e-5): 2e-6 on the JVM backend, 4e-5 on MLX
    on macOS, 1.4e-4 on CUDA and 8e-5 on MLX's CPU elsewhere."
   (cond (ts/jvm?) 2e-6
-        (.startsWith (System/getProperty "os.name") "Mac") 2e-5
+        (.startsWith (System/getProperty "os.name") "Mac") 4e-5
         (ts/cuda?) 1.4e-4
         :else 8e-5))
 
