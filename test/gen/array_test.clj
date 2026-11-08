@@ -364,7 +364,21 @@
     (is (= [3.0] (vec (array/->floats 3))) "a host scalar")
     (is (= [] (vec (array/->floats (array/zeros [0 3])))) "empty")
     (is (thrown? clojure.lang.ExceptionInfo ((array/grad (fn [y] (array/->floats y) (array/sum y))) x))
-        "a value being differentiated is loud")))
+        "a value being differentiated is loud"))
+  (when-not (ts/jvm?)
+    ;; MLX reads a float16 or bfloat16 array's bits and widens them on the
+    ;; host (genclj-9y6y): the floats of its cast to float32, bit for bit,
+    ;; the ends of float16's range, subnormals, zeros and infinities among
+    ;; them, a view too (plant: bfloat16's bits shifted by 15 fails all)
+    (let [r (java.util.Random. 3)
+          vs (concat [0.0 -0.0 1.0 -1.0 65504.0 -65504.0 6.1e-5 5.96e-8 1e-8 ##Inf ##-Inf]
+                     (repeatedly 4096 #(* 30.0 (.nextGaussian r))))
+          x (array/reshape (array/array (vec (take 4100 vs))) [4 1025])]
+      (doseq [dt [:float16 :bfloat16]
+              :let [h (array/astype x dt)]
+              y [h (array/transpose h)]]
+        (is (java.util.Arrays/equals ^floats (array/->floats (array/astype y :float32)) ^floats (array/->floats y))
+            (str dt))))))
 
 (deftest matmul
   (is (= [[19 22] [43 50]] (array/->clj (array/matmul (array/array [[1 2] [3 4]]) (array/array [[5 6] [7 8]])))))

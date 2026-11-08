@@ -337,18 +337,53 @@
     (float-array 0)
     (.toArray (data-segment (Mlx/mlx_array_data_float32 h) (* 4 n)) ValueLayout/JAVA_FLOAT)))
 
+(def ^:private ^"[F" half-floats
+  "Each float16 bit pattern's float (exact), by its pattern as an index."
+  (let [t (float-array 65536)]
+    (dotimes [i 65536] (aset t i (Float/float16ToFloat (unchecked-short i))))
+    t))
+
+(defn- read-halves
+  "The n float16 or bfloat16 (dtype) elements of the evaluated,
+   row-contiguous handle h, widened to floats on the host, exactly: their
+   bit patterns read (mlx-c's uint16 accessor, which any 16-bit dtype's
+   buffer answers; its float16 one is absent where its compiler lacks
+   _Float16), a float16's looked up, a bfloat16's the high half of a
+   float's."
+  ^floats [^long h ^long n dtype]
+  (let [out (float-array n)]
+    (when (pos? n)
+      (let [^shorts bits (.toArray (data-segment (Mlx/mlx_array_data_uint16 h) (* 2 n)) ValueLayout/JAVA_SHORT)]
+        (if (= :bfloat16 dtype)
+          (dotimes [j n] (aset out j (Float/intBitsToFloat (unchecked-int (bit-shift-left (bit-and (long (aget bits j)) 0xFFFF) 16)))))
+          (let [t half-floats]
+            (dotimes [j n] (aset out j (aget t (bit-and (long (aget bits j)) 0xFFFF))))))))
+    out))
+
+;; A float16 or bfloat16 array is read as its own bits, widened on the
+;; host, rather than cast to float32 on the device first (genclj-9y6y). On
+;; CUDA, MLX moves a buffer the host reads to unified (managed) memory and
+;; later recycles it, by its size, for the device's next allocation of
+;; that size: the next read's cast. Freed at once, a cast's buffer was
+;; written by the device into pages the host had read and read back from
+;; pages the device had written, each a storm of page faults: 26 ms a read
+;; of Qwen3-0.6B's 16 rows on fenrir, 4.6 ms its float16 read alone.
+
 (defn to-floats
   "x's values, row-major, as a new float array: a float32 array's buffer
-   read in place, another dtype's cast to float32 first. Evaluates x."
+   read in place, a float16 or bfloat16 array's widened on the host,
+   another dtype's cast to float32 first. Evaluates x."
   ^floats [x]
   (let [^MlxArray x x
         b (.-backend x)
+        dtype (.-dtype x)
+        half? (#{:float16 :bfloat16} dtype)
         n (sh/size (.-shape x))
         s (stream b)]
     (with-temps [t]
       (try
         (let [h (handle x)
-              h (if (= :float32 (.-dtype x)) h (t (Mlx/mlx_astype h (int (code :float32)) s)))]
+              h (if (or half? (= :float32 dtype)) h (t (Mlx/mlx_astype h (int (code :float32)) s)))]
           (evaluating
             (Mlx/mlx_array_eval h)
             (let [c (if (Mlx/_mlx_array_is_row_contiguous h)
@@ -356,7 +391,7 @@
                       (let [c (t (Mlx/mlx_contiguous h false s))]
                         (Mlx/mlx_array_eval c)
                         c))]
-              (read-floats c n))))
+              (if half? (read-halves c n dtype) (read-floats c n)))))
         (catch MlxException e (throw (mlx-error :->floats [x] e)))
         (finally (fence x))))))
 
