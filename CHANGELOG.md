@@ -474,6 +474,13 @@ other values for the same key, from the same distribution.
   cache for the next read's cast in unified memory, so that the device
   wrote, and the host read, pages the other side held: Qwen3-0.6B's 16
   rows of float16 logits took 26 ms to read on fenrir, against 4.6 now.
+- **Performance (experimental): MLX's `array/->floats` widens a float16
+  or bfloat16 array's bits about 1.5 to 4 times faster** (genclj-9y6y's
+  follow-up; `gen.array.host/halves->floats`, internal), the same floats,
+  bit for bit: each loop runs to its array's length, a float16's four
+  entries at a time. On the M4, 16 rows of 151,936
+  (bench/gen/widen_bench.clj), ns an entry: Graal's JIT, float16 0.56 to
+  0.38 and bfloat16 0.43 to 0.10; C2 0.60 to 0.34 and 0.52 to 0.25.
 - **Performance (experimental): `gen.llm.token`'s draw walks a row
   about 2x faster** (genclj-9y6y): its inverse CDF sums each token's
   probability by `gen.llm.host/exp`. The total moves in its last bits, so
@@ -490,8 +497,19 @@ other values for the same key, from the same distribution.
   made (its config's `:arch`); another architecture is loud
   (`:unsupported`). Its info's `:model` gains `:arch`.
 
+- **Fixed (experimental): a JVM exiting with a llama.cpp model or engine
+  open no longer aborts on Metal** (genclj-8dtg). ggml-metal asserts at
+  the process's exit that none of its buffers is left
+  (`GGML_ASSERT([rsets->data count] == 0)`), status 134. A shutdown hook
+  now closes the open engines, each on its own thread after the
+  operation it runs, then the models no engine uses, under their write
+  locks; it waits at most `gen.llama.close-at-exit` seconds (default 10;
+  0 turns it off). gen.llm.llama's namespace doc says to close them first
+  all the same. `gen.llm.slots/closer-of` (experimental) is the action
+  that closes an engine, for such a registry.
+
 - **Fixed (experimental): gen.llm.array-engine after a failed call**
-  (genclj-5t5l).
+  (genclj-5t5l, genclj-8ni2).
   - A score whose read fails in a call that consumes the paged pools
     (the paged and continuous modes) now loses every branch the pools
     held, loudly: its error names them (`:lost-slots`) and they are no
@@ -506,6 +524,15 @@ other values for the same key, from the same distribution.
     one that fails leaves its slot as it was. It used to leave the slot
     ahead of its branch, so that the branch's next operation failed as an
     engine bug.
+  - A continuous forward whose rows fail to normalize keeps its branches,
+    as a paged step does (genclj-8ni2). It used to lose every branch it
+    read (`:lost-slots`). A read begun in an earlier forward is still
+    lost.
+  - In the continuous mode, a score that loses every branch while other
+    callers' requests are in flight fails those requests too, as lost
+    (`:lost-slots`, their branches freed), and the operations waiting
+    for their branches run (genclj-8ni2). Their next forward used to fail
+    them as an engine bug (`:internal`).
 - **Fixed: `gen.llm.trie/insert` loops down a path** (gen.llm.trie,
   experimental; genclj-gn5i). insert recursed once for each node on the
   path it walked, so a trie with an entry at each of a few thousand

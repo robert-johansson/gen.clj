@@ -133,7 +133,10 @@
    device. A read alone (a score's, or a program's from one thread) is
    forwards of its own, so its results repeat bit for bit; a read
    batched with others' is the same within float round-off (kernels
-   differ by shape).
+   differ by shape). A forward fails as a paged step does: one whose call
+   fails has consumed the pools, every branch lost (:lost-slots), and one
+   whose rows fail to normalize leaves its slots as they were (a read
+   begun in an earlier forward is then lost, by gen.llm.slots's rule).
 
    Results depend on batch shapes and capacities as llama.cpp's do (float
    round-off: MLX's kernels differ by shape); the same read from the same
@@ -795,8 +798,9 @@
   "slots-forward's body in the continuous mode (see the namespace's
    docstring): the plan's reads made ready (copy-on-write), one compiled
    forward of their rows (qwen3/compile-paged-batch-step, consuming the
-   pools), the books written, then the rows read and normalized on the
-   host."
+   pools), its pools kept, its rows read and normalized on the host, then
+   the rest of the books written: a forward whose rows fail to normalize
+   leaves its slots as they were."
   [{:keys [state pool batch-fn min-rows n-batch] :as ctx} reads]
   (let [bs (long (:block-size @state))
         {:keys [decode d-rows chunk c c-rows]} (forward-plan reads min-rows n-batch bs)
@@ -848,25 +852,25 @@
                                                   (into (repeat (c/- o (count out)) 0))))))
         {:keys [logits scores pools]} (donating ctx #(let [res (batch-fn (:pools @state) batch)]
                                                        (array/eval! res)
-                                                       res))]
-    ;; the books first: the pools are the step's now, whatever the reading
-    ;; of its rows does
+                                                       res))
+        ;; the forward's pools at once (it consumed those it was given),
+        ;; the rest of the books once its rows are read and normalized: a
+        ;; failure then leaves every slot as it was, as a paged step's
+        ;; does, since what the forward wrote lies past each sequence's end
+        ;; or in blocks the books still hold free
+        _ (vswap! state assoc :pools pools)
+        rows (when (seq lp-rows)
+               (host-rows pool (if (c/== o (count lp-rows)) logits (array/slice logits 0 0 (count lp-rows))) "advance"))
+        sc (when (pos? k) (mapv double (array/->floats scores)))]
     (vswap! state (fn [st] (-> st
-                               (assoc :pools pools :alloc a)
+                               (assoc :alloc a)
                                (update :table #(reduce (fn [t [i s']] (assoc t (:slot (reads i)) s')) % (map vector chosen seqs'))))))
     (tally! state :forwards 1)
     (tally! state :decode-rows d)
     (tally! state :chunk-rows c)
     (tally! state :padded-rows (c/- r d c))
     (when (and (pos? d) chunk) (tally! state :mixed-forwards 1))
-    (let [[rows sc] (try
-                      [(when (seq lp-rows)
-                         (host-rows pool (if (c/== o (count lp-rows)) logits (array/slice logits 0 0 (count lp-rows))) "advance"))
-                       (when (pos? k) (mapv double (array/->floats scores)))]
-                      (catch Throwable t
-                        ;; their sequences hold the step's positions now
-                        (throw (ex-info (ex-message t) (assoc (ex-data t) :lost-slots (mapv #(:slot (reads %)) chosen)) t))))
-          by (zipmap decode (range))]
+    (let [by (zipmap decode (range))]
       (mapv (fn [i]
               (let [{:keys [targets]} (reads i)]
                 (cond (contains? by i) {:read 1 :scores (when targets []) :logprobs (rows (by i))}

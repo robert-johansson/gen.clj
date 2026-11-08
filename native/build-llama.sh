@@ -5,14 +5,16 @@
 #             the CPU backend, and Metal and BLAS on macOS or CUDA on Linux)
 #   include/  llama.h and ggml's headers, from which native/jextract-llama.sh
 #             generates the Java binding (src-java/gen/llama/ffi)
+#   bin/      with --bench: llama-bench, llama.cpp's own benchmark, the
+#             reference for gen.qwen3-bench's -Dgen.bench.llama-bench
 #
 # The Java binding is generated from this version's llama.h, and passes
 # structs by value whose layouts change between releases, so the two must
 # match exactly: gen.llama.LlamaRuntime refuses a library whose
 # llama_version() is not LLAMA_VERSION below.
 #
-# Usage: native/build-llama.sh [cpu|cuda]
-#   macOS arm64: Metal (and the CPU, with Accelerate); the argument is
+# Usage: native/build-llama.sh [cpu|cuda] [--bench]
+#   macOS arm64: Metal (and the CPU, with Accelerate); cpu or cuda is
 #     ignored. Tested on an M2 Max, macOS 27 (2026-10-20).
 #   Linux x86_64 / aarch64: cpu (default), or cuda (GGML_CUDA; needs the CUDA
 #     toolkit, and builds for CMAKE_CUDA_ARCHITECTURES, default this
@@ -26,6 +28,11 @@
 #   (default: this platform's, under the working directory).
 #   LLAMA_CPP_REPO clones from another place than GitHub (a local clone, say);
 #   the commit is checked either way.
+#   --bench also builds llama-bench (bin/llama-bench) from the same source
+#     with the same backend, in a build directory of its own with llama.cpp's
+#     common library and tools on (LLAMA_BUILD_COMMON, LLAMA_BUILD_TOOLS),
+#     linked statically, so that it is one file and the libraries above are
+#     built as without it. Tested on the M4, macOS 27 (2026-11-08).
 #
 # Requires: git, cmake (≥ 3.14; Ninja if installed, else make), a C/C++17
 # compiler.
@@ -39,7 +46,15 @@ here="$(cd "$(dirname "$0")" && pwd)"
 if command -v ninja >/dev/null 2>&1; then generator="-G Ninja"; else generator=""; fi
 os="$(uname -s)"
 arch="$(uname -m)"
-variant="${1:-cpu}"
+variant=cpu
+bench=0
+for a in "$@"; do
+  case "$a" in
+    cpu|cuda) variant="$a" ;;
+    --bench) bench=1 ;;
+    *) echo "unknown argument: $a (cpu, cuda or --bench)" >&2; exit 1 ;;
+  esac
+done
 
 case "$os-$arch" in
   Darwin-arm64)
@@ -99,3 +114,25 @@ cmake --install "$build/cmake-llama-$platform" --config Release
 
 echo "built $out/lib:"
 ls "$out/lib"
+
+if [ "$bench" = 1 ]; then
+  # llama-bench alone of the tools; its libraries static, the backend the
+  # library's
+  cmake -S "$src" -B "$build/cmake-llama-bench-$platform" $generator \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DLLAMA_BUILD_IS_DEV=OFF \
+    -DLLAMA_BUILD_COMMON=ON \
+    -DLLAMA_BUILD_TESTS=OFF \
+    -DLLAMA_BUILD_TOOLS=ON \
+    -DLLAMA_TOOLS_INSTALL=OFF \
+    -DLLAMA_BUILD_EXAMPLES=OFF \
+    -DLLAMA_BUILD_SERVER=OFF \
+    -DLLAMA_BUILD_APP=OFF \
+    -DLLAMA_OPENSSL=OFF \
+    $backend
+  cmake --build "$build/cmake-llama-bench-$platform" --config Release --target llama-bench
+  mkdir -p "$out/bin"
+  cp "$build/cmake-llama-bench-$platform/bin/llama-bench" "$out/bin/llama-bench"
+  echo "built $out/bin/llama-bench"
+fi

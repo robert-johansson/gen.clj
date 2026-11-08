@@ -66,7 +66,11 @@
    - A forward that fails fails every request in it: their branches stay
      as they were, except the slots it names lost and those of reads it
      had begun in an earlier forward, which are freed with their
-     branches."
+     branches.
+   - A score reads alone, at once, between forwards. One whose read
+     fails naming slots lost (a paged engine's) fails the requests in
+     flight that read them too, as lost (:lost-slots, their branches
+     freed), and the operations waiting for their branches run."
   {:api :experimental}
   (:require [gen.llm.branching :as br])
   (:import [gen.llm.branching Branch]
@@ -147,7 +151,7 @@
 ;; Batching submits only operations: the thread runs them one at a time,
 ;; in order (run-tasks), as a single-thread executor would.
 
-(deftype Worker [^LinkedBlockingQueue queue ^Thread thread open?])
+(deftype Worker [^LinkedBlockingQueue queue ^Thread thread open? ls])
 
 (defn- enqueue!
   "Put task on w's queue: its future. A loud error once w is shut down."
@@ -175,31 +179,32 @@
       (vreset! (.-open? w) false)
       (.offer ^LinkedBlockingQueue (.-queue w) ::stop))))
 
-(declare run-task! schedule! fail-inflight!)
+(declare run-task! schedule! fail-inflight! fail-lost!)
 
 (defn- work
   "The engine thread's loop: each task in order, and while requests are in
-   flight (a Batching engine's), the scheduler's forwards between tasks."
-  [^LinkedBlockingQueue queue]
-  (let [ls (volatile! {:inflight [] :parked [] :expect #{} :deadline 0})]
-    (loop []
-      (let [task (.take queue)]
-        (when-not (= ::stop task)
-          (run-task! ls task)
-          (when (or (empty? (:inflight @ls))
-                    (try (schedule! ls queue)
-                         ;; a scheduler's bug: its callers get it, never a
-                         ;; dead thread
-                         (catch Throwable t (fail-inflight! ls t) true)))
-            (recur)))))))
+   flight (a Batching engine's), the scheduler's forwards between tasks,
+   ls the scheduler's state."
+  [^LinkedBlockingQueue queue ls]
+  (loop []
+    (let [task (.take queue)]
+      (when-not (= ::stop task)
+        (run-task! ls task)
+        (when (or (empty? (:inflight @ls))
+                  (try (schedule! ls queue)
+                       ;; a scheduler's bug: its callers get it, never a
+                       ;; dead thread
+                       (catch Throwable t (fail-inflight! ls t) true)))
+          (recur))))))
 
 (defn- worker
   "A worker on a new daemon thread named name."
   ^Worker [name]
   (let [q (LinkedBlockingQueue.)
-        t (-> (Thread/ofPlatform) (.name (str "gen.llm " name)) (.daemon true) (.unstarted #(work q)))]
+        ls (volatile! {:inflight [] :parked [] :expect #{} :deadline 0})
+        t (-> (Thread/ofPlatform) (.name (str "gen.llm " name)) (.daemon true) (.unstarted #(work q ls)))]
     (.start t)
-    (Worker. q t (volatile! true))))
+    (Worker. q t (volatile! true) ls)))
 
 ;; ---------------------------------------------------------------------------
 ;; The engine's books
@@ -533,9 +538,12 @@
             ;; slot the read lost (a paged engine's pools, which every
             ;; slot's contents live in, consumed by a failed call) loses its
             ;; branch, as a failed advance's would
-            (let [lost (into [] (remove #{scratch}) (:lost-slots (ex-data x)))]
+            (let [lost (into [] (remove #{scratch}) (:lost-slots (ex-data x)))
+                  x' (ex-info (ex-message x) (cond-> (dissoc (ex-data x) :lost-slots) (seq lost) (assoc :lost-slots lost)) x)]
               (lose-slots! e lost)
-              (throw (ex-info (ex-message x) (cond-> (dissoc (ex-data x) :lost-slots) (seq lost) (assoc :lost-slots lost)) x))))
+              ;; and requests in flight reading them fail, as lost
+              (fail-lost! e lost x' "score")
+              (throw x')))
           (finally
             (slots-clear (impl e) scratch)))))))
 
@@ -683,8 +691,11 @@
         ((:finish (first done)) (results-of (first done)))
         (recur rs)))))
 
+(declare run-parked!)
+
 (defn- run-task!
-  "Run or admit task; one that finds a branch busy is parked."
+  "Run or admit task; one that finds a branch busy is parked. The parked
+   tasks run again after one that ended requests in flight (fail-lost!)."
   [ls task]
   (let [^CompletableFuture fut (:fut task)]
     (try
@@ -698,7 +709,10 @@
       (catch Throwable t
         (if (busy? t)
           (vswap! ls update :parked conj task)
-          (.completeExceptionally fut t))))))
+          (.completeExceptionally fut t))))
+    (when (:ended? @ls)
+      (vswap! ls dissoc :ended?)
+      (run-parked! ls))))
 
 (defn- run-parked!
   "The parked tasks run again (in order), after a request ended."
@@ -706,6 +720,32 @@
   (let [ps (:parked @ls)]
     (vswap! ls assoc :parked [])
     (run! #(run-task! ls %) ps)))
+
+(defn- fail-lost!
+  "After an operation run at once lost slots (what, a score, whose read
+   in a paged engine's failed call consumed the pools every slot lives
+   in) and freed them: every request in flight reading one fails with
+   t's error, named lost (:lost-slots), the slots of reads it had begun
+   lost too, so that no read goes on in a slot the books have freed. The
+   parked tasks run again once the operation has ended (run-task!)."
+  [^SlotEngine e lost ^Throwable t what]
+  (let [ls (.-ls ^Worker (.-worker e))
+        lost (set lost)
+        reads? (fn [r] (boolean (some #(contains? lost (:slot %)) (:reads r))))
+        {hit true kept false} (group-by reads? (:inflight @ls))]
+    (when (seq hit)
+      (vswap! ls assoc :inflight (vec kept) :ended? true)
+      (doseq [r hit]
+        (let [begun (keep-indexed (fn [i {:keys [slot]}] (when (pos? (long ((:done r) i))) slot)) (:reads r))
+              more (sort (remove lost begun))
+              all (into lost more)
+              x (ex-info (str "a failed " what " lost this request's branches: " (ex-message t))
+                         (assoc (ex-data t) :lost-slots (vec (sort all)))
+                         t)]
+          (.completeExceptionally ^CompletableFuture (:fut r)
+                                  (br/clean-up x [#(lose-slots! e more)
+                                                  #(unbusy! e r)
+                                                  #(when-let [f (:fail r)] (f all))])))))))
 
 (defn- fail-inflight!
   "Every request in flight (and parked task) failed with t: none of their
@@ -853,6 +893,15 @@
                          w (ReferenceQueue.) state)]
       (vswap! state assoc :cleanable (.register ^Cleaner cleaner e (closer w impl state)))
       e)))
+
+(defn closer-of
+  "The action that closes engine e, as close does (a function of no
+   arguments, run at most once however often it is called), holding
+   nothing of e: a registry of open engines (an engine's exit hook,
+   gen.llm.llama's) that holds it keeps no engine reachable."
+  [^SlotEngine e]
+  (let [^Cleaner$Cleanable c (:cleanable @(books-of e))]
+    (fn [] (.clean c))))
 
 (defn call
   "(f impl) on the engine's thread, for engine-specific operations

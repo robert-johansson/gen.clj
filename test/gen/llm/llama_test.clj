@@ -1,8 +1,8 @@
 (ns gen.llm.llama-test
   "The llama.cpp engine: the Branching contract (gen.llm.branching-contract)
    within llama.cpp's float noise, and what is the engine's own (the
-   vocabulary, the KV cache's contents, a full cache, closing, and a
-   recurrent model's split steps).
+   vocabulary, the KV cache's contents, a full cache, closing, a JVM
+   exiting with engines open, and a recurrent model's split steps).
 
    Needs llama.cpp's libraries (native/build-llama.sh), the compiled binding
    (clojure -T:build java) and a model, given as
@@ -644,3 +644,50 @@
           (is (= (- before (:bytes (:footprint (br/info e)))) (:mlx (budget)))))
         (is (= before (:mlx (budget))) "and closed, gives it back"))
       (is true))))
+
+;; ---------------------------------------------------------------------------
+;; Exiting with engines open (genclj-8dtg)
+;; ---------------------------------------------------------------------------
+
+(defn- child-exit
+  "A JVM of this classpath that loads a model, an engine over it and an
+   engine of its own, reads with both, and exits, closing none, while
+   another thread advances a branch of the first in a loop: {:exit its
+   status :err what it wrote to System.err}. jvm-opts are added."
+  [jvm-opts]
+  (let [java (str (System/getProperty "java.home") "/bin/java")
+        lib (System/getProperty "gen.llama.lib")
+        code (pr-str `(do (require 'gen.llm.llama 'gen.llm.branching)
+                          (let [m# (gen.llm.llama/model ~model-path)
+                                e# (gen.llm.llama/engine {:model m# :max-branches 2 :n-ctx 256})
+                                own# (gen.llm.llama/engine {:model ~model-path :max-branches 2 :n-ctx 256})
+                                started# (promise)]
+                            (gen.llm.branching/open own# [1 2 3])
+                            (future (loop [b# (gen.llm.branching/open e# [1 2 3])]
+                                      (deliver started# true)
+                                      (recur (first (gen.llm.branching/advance [b#] [4])))))
+                            @started#
+                            (Thread/sleep 100)
+                            (System/exit 0))))
+        cmd (-> [java "--enable-native-access=ALL-UNNAMED" "-cp" (System/getProperty "java.class.path")]
+                (cond-> lib (conj (str "-Dgen.llama.lib=" lib)))
+                (into jvm-opts)
+                (into ["clojure.main" "-e" code]))
+        p (-> (ProcessBuilder. ^java.util.List cmd) (.redirectOutput java.lang.ProcessBuilder$Redirect/DISCARD) .start)
+        err (future (slurp (.getErrorStream p)))]
+    (if (.waitFor p 120 java.util.concurrent.TimeUnit/SECONDS)
+      {:exit (.exitValue p) :err @err}
+      (do (.destroyForcibly p) {:exit :timed-out :err @err}))))
+
+(deftest ^:slow an-exit-closes-the-open-engines-and-models
+  ;; a JVM exiting with a model and two engines open, one of them decoding
+  ;; on another thread: the exit hook closes each engine after the
+  ;; operation it runs, then the model, and the JVM exits as asked. On
+  ;; Metal without the hook (-Dgen.llama.close-at-exit=0) it aborts, from
+  ;; ggml-metal's exit-time GGML_ASSERT([rsets->data count] == 0), status
+  ;; 134: checked by hand on the M4 (2026-11-08, Qwen3-0.6B; with the hook
+  ;; the child exits 0 about 1.2 s after its exit call)
+  (when-llama
+    (let [{:keys [exit err]} (child-exit [])]
+      (is (= 0 exit) err)
+      (is (not (re-find #"GGML_ASSERT|did not close|still open" err)) err))))

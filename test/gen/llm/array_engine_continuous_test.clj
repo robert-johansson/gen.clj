@@ -19,8 +19,13 @@
    - an operation on a branch a request in flight holds waits for it
      (and finds it consumed);
    - a forward that fails fails its requests: a read begun in an earlier
-     forward loses its branch, any other branch is kept; a closed engine
-     fails the requests in flight.
+     forward loses its branch, any other branch is kept; a forward whose
+     rows fail to normalize keeps its branches and their blocks, and the
+     next is given the pools it wrote (donation-checked); a score that
+     loses every branch fails the requests in flight as lost, not as an
+     engine bug, and an operation waiting for their branches runs (each
+     failed before its fix, genclj-8ni2); a closed engine fails the
+     requests in flight.
    Planted mutations (planted-bugs-fail-the-clients) fail the concurrent
    clients: a decode row given another request's block table (118
    distributions off by up to 0.9 nats on the JVM backend), a retired
@@ -359,6 +364,102 @@
       (let [[o] (br/advance [other] [4])]
         (is (<= (bc/max-diff (forward-row [1 2 3 4]) (br/logprobs o) 64) band))
         (br/dispose! o)))))
+
+(defn- donation-checked
+  "compile-paged-batch-step whose forwards consume their pools as MLX's
+   donation does, on any backend: a forward given pools an earlier one
+   consumed is loud (:donated)."
+  [compile-step]
+  (fn [m opts]
+    (let [step (compile-step m opts)
+          consumed (java.util.Collections/newSetFromMap (java.util.IdentityHashMap.))]
+      (fn [pools batch]
+        (let [leaves (array/tree-leaves pools)]
+          (when (some #(.contains consumed %) leaves)
+            (throw (ex-info "a forward given consumed pools" {:reason :donated})))
+          (.addAll consumed leaves)
+          (step pools batch))))))
+
+(deftest a-failed-normalization-keeps-the-branches
+  ;; a forward's rows fail to normalize after it has written the pools
+  ;; (consuming those it was given): loud, the branch and its blocks as
+  ;; they were, and the next forward given the pools written, not those
+  ;; consumed. Failed before its fix (genclj-8ni2): the branch was lost
+  (with-open [e (with-redefs-fn {#'qwen3/compile-paged-batch-step (donation-checked qwen3/compile-paged-batch-step)}
+                  #(engine {:max-branches 12}))]
+    (let [p (:prompt contract-opts)
+          more [5 6 7 8 9 10 11 12]                                 ; one forward of 8
+          failed (fn [f]
+                   (let [b (br/open e p)
+                         free (:free (ae/blocks e))
+                         data (with-redefs-fn {#'ae/host-rows (fn [& _] (throw (ex-info "planted" {:reason :planted})))}
+                                #(ts/thrown-data (f b)))]
+                     (is (= :planted (:reason data)))
+                     (is (nil? (:lost-slots data)))
+                     (is (br/live? b) "the branch as it was")
+                     (is (= free (:free (ae/blocks e))) "its blocks as they were")
+                     b))]
+      (testing "a step"
+        (let [[s] (br/advance [(failed #(br/advance [%] [4]))] [4])]
+          (is (<= (bc/max-diff (forward-row (conj p 4)) (br/logprobs s) 128) band) "it steps on")
+          (br/dispose! s)))
+      (testing "a read"
+        (let [{x :branch} (br/extend (failed #(br/extend % more)) more)
+              [s] (br/advance [x] [4])]
+          (is (<= (bc/max-diff (forward-row (into p more)) (br/logprobs x) 128) band) "it reads on")
+          (is (<= (bc/max-diff (forward-row (conj (into p more) 4)) (br/logprobs s) 128) band) "and steps on")
+          (br/dispose! s)))
+      (is (zero? (:live (br/info e)))))))
+
+(deftest a-score-that-loses-every-branch-fails-the-requests-in-flight
+  ;; another caller's extend is in flight, begun, when a score's read
+  ;; fails in a call consuming the pools: the score loses every branch,
+  ;; loudly, and the extend fails as lost (:lost-slots, its branch freed),
+  ;; not as an engine bug (:internal); a fork waiting for the extend's
+  ;; branch then runs (and finds it lost), and the engine reads on. Failed
+  ;; before its fix (genclj-8ni2): the extend's next forward found its
+  ;; slot emptied, :internal; and with the waiting fork not run again when
+  ;; the extend failed, it waited for the next request
+  (with-open [e (engine {:max-branches 12})]
+    (let [scratch 12                                                ; max-branches: the scratch slot
+          p [95 51 72 69 0]
+          ext (vec (take 40 (cycle [33 70 79 82 87 65 82 68 0])))   ; five forwards of 8
+          b (br/open e p)
+          held (br/open e [1 2 3])
+          begun (promise)
+          [scored extended forked]
+          (with-redefs-fn {#'ae/batch-forward!
+                           (let [f @#'ae/batch-forward!
+                                 donating @#'ae/donating]
+                             (fn [ctx reads]
+                               (if (some #(= scratch (:slot %)) reads)
+                                 ;; the score's read: its call consuming the pools fails
+                                 (donating ctx #(throw (ex-info "planted" {:reason :planted})))
+                                 (let [r (f ctx reads)]
+                                   (deliver begun true)
+                                   (Thread/sleep 20)
+                                   r))))}
+            (fn []
+              (let [x (future (ts/thrown-data (br/extend held ext)))]
+                @begun
+                ;; the extend is in flight, begun, for four more forwards;
+                ;; a fork of its branch waits for it
+                (let [fk (future (bc/reason #(br/fork held)))]
+                  (Thread/sleep 5)
+                  [(ts/thrown-data (br/score b [4 5 6])) @x (deref fk 5000 ::waiting)]))))]
+      (is (= :planted (:reason scored)))
+      (is (seq (:lost-slots scored)) "the score names its lost slots")
+      (is (= :planted (:reason extended)) "the extend fails as lost, not as an engine bug")
+      (is (seq (:lost-slots extended)) "named lost")
+      (is (= :not-live forked) "the waiting fork ran when the extend failed")
+      (is (not (br/live? b)))
+      (is (not (br/live? held)))
+      (is (= 0 (:live (br/info e))))
+      (is (= 12 (:free (br/info e))) "every slot free, once")
+      (let [c (br/open e p)
+            {d :branch} (br/extend c ext)]
+        (is (<= (bc/max-diff (forward-row (into p ext)) (br/logprobs d) 64) band) "the engine reads on, from new pools")
+        (br/dispose! d)))))
 
 (deftest closing-fails-the-requests-in-flight
   (let [e (engine)

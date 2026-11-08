@@ -57,6 +57,38 @@
       (is (= (ts/host x) (ts/host (serialize/read (pr-str x))))))))
 
 ;; ---------------------------------------------------------------------------
+;; 16-bit floats widened
+;; ---------------------------------------------------------------------------
+
+(defn- widen-failures
+  "Where (host/halves->floats bits dtype) is not each pattern's float by
+   definition (f), bit for bit: [index pattern got want], the first 3."
+  [^shorts bits dtype f]
+  (let [^floats got (host/halves->floats bits dtype)]
+    (into [] (comp (keep (fn [i] (let [g (Float/floatToRawIntBits (aget got i))
+                                       w (Float/floatToRawIntBits (float (f (aget bits i))))]
+                                   (when-not (== g w) [i (aget bits i) g w]))))
+                   (take 3))
+          (range (alength bits)))))
+
+(deftest sixteen-bit-floats-widen-exactly
+  ;; every float16 and bfloat16 bit pattern, shuffled, widens to the float
+  ;; its definition gives, bit for bit (NaNs' payloads too), and so do
+  ;; the first n for every n below 10, each tail past the fours (genclj-9y6y).
+  ;; Planted (2026-11-08): two entries of each four swapped, and the
+  ;; entries past the last four left 0, each fail it for both dtypes
+  (let [all (let [ps (java.util.ArrayList. ^java.util.Collection (map unchecked-short (range 65536)))]
+              (java.util.Collections/shuffle ps (java.util.Random. 7))
+              (short-array ps))
+        defs {:float16 (fn [b] (Float/float16ToFloat (short b)))
+              :bfloat16 (fn [b] (Float/intBitsToFloat (unchecked-int (bit-shift-left (bit-and (long b) 0xFFFF) 16))))}]
+    (doseq [[dtype f] defs]
+      (testing dtype
+        (is (= [] (widen-failures all dtype f)) "all 65,536 patterns")
+        (doseq [n (range 10)]
+          (is (= [] (widen-failures (java.util.Arrays/copyOf ^shorts all (int n)) dtype f)) (str n " patterns")))))))
+
+;; ---------------------------------------------------------------------------
 ;; Host math: every op on host scalars as gen.array computes it on arrays
 ;; ---------------------------------------------------------------------------
 

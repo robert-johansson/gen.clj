@@ -79,6 +79,20 @@
    model each keep their own thread; a model's adapters are loaded and
    freed under its lock, which every decode reads under.
 
+   Close engines and models before the JVM exits. llama.cpp's Metal
+   backend frees its device as the process exits and asserts that none of
+   its buffers is left (ggml-metal's GGML_ASSERT([rsets->data count] ==
+   0)), so a JVM exiting with a model or an engine open aborts (status
+   134), its work done. A shutdown hook closes what is still open
+   (genclj-8dtg): each engine on its own thread, after the operation it
+   runs (a thread still calling it then gets :closed), then each model no
+   engine uses, under its write lock, after the decodes reading it. It
+   waits at most gen.llama.close-at-exit seconds (default 10; 0, no
+   hook), so an engine thread that never returns (one that called
+   System/exit itself, say) delays the exit by that much, and the JVM then
+   exits with the engine open, as without the hook. An engine or a model
+   made while the hook runs is left open.
+
    llama.cpp's log goes to System.err from warnings up (gen.llama.log:
    none, error, warn, info, debug); libllama is found in gen.llama.lib
    (default native/build/llama/<platform>/lib, gen.llama.LlamaRuntime).
@@ -300,6 +314,57 @@
 
 (defonce ^:private cleaner (Cleaner/create))
 
+;; ---------------------------------------------------------------------------
+;; Closing at exit (genclj-8dtg)
+;; ---------------------------------------------------------------------------
+
+;; What is open, for the exit hook: {token (the action that closes the
+;; engine)} and {a model's books [its lock, its Cleanable]}. Neither holds
+;; an engine or a model, so neither keeps one reachable; an entry leaves
+;; when its value is freed (closed, or by the Cleaner).
+(defonce ^:private open-engines (atom {}))
+(defonce ^:private open-models (atom {}))
+
+(defn- exit-wait
+  "gen.llama.close-at-exit, read once: the seconds the exit hook waits for
+   the open engines and models to close (default 10; 0, no hook)."
+  ^long []
+  (let [v (System/getProperty "gen.llama.close-at-exit" "10")]
+    (or (when (re-matches #"\d+" v) (parse-long v))
+        (throw (ex-info (str "llama: gen.llama.close-at-exit is a whole number of seconds, not " (pr-str v))
+                        {:reason :invalid-option :gen.llama.close-at-exit v})))))
+
+(defn- close-open!
+  "Every open engine closed (each on its thread, after the operation it
+   runs), then every open model no engine uses (under its write lock,
+   after the decodes reading it), what fails written to System.err."
+  []
+  (doseq [close (vals @open-engines)]
+    (try (close)
+         (catch Throwable t (.println System/err (str "gen.llm.llama at exit: an engine did not close: " t)))))
+  (doseq [[books [lock ^Cleaner$Cleanable c]] @open-models]
+    (try (writing lock #(when (empty? (:engines @books)) (.clean c)))
+         (catch Throwable t (.println System/err (str "gen.llm.llama at exit: a model did not close: " t))))))
+
+(defn- at-exit
+  "The exit hook's thread: close-open! on a daemon thread, waited for at
+   most secs seconds, so that an engine thread that never returns (one
+   that called System/exit, say) delays the exit, never stops it."
+  ^Thread [^long secs]
+  (Thread. ^Runnable
+   (fn []
+     (let [t (doto (Thread. ^Runnable close-open! "gen.llm.llama close-at-exit") (.setDaemon true) (.start))]
+       (.join t (* 1000 secs))
+       (when (.isAlive t)
+         (.println System/err (str "gen.llm.llama at exit: engines or models still open after " secs
+                                   " s; exiting with them (llama.cpp's Metal backend may abort)")))))
+   "gen.llm.llama exit"))
+
+(defonce ^:private exit-hook
+  (delay (let [secs (exit-wait)]
+           (when (pos? secs)
+             (.addShutdownHook (Runtime/getRuntime) (at-exit secs))))))
+
 (defn- logged
   "[(f), what llama.cpp logged on this thread while f ran]."
   [f]
@@ -430,6 +495,7 @@
                        (reservations/release! ab))
                      (swap! books assoc :closed? true :adapters #{})
                      (Llama/llama_model_free ptr)
+                     (swap! open-models dissoc books)
                      (reservations/release! books)))))
 
 (defn- adapter-closer
@@ -449,6 +515,7 @@
   ^LlamaModel [path gpu-layers]
   (LlamaRuntime/load)
   (LlamaRuntime/clearLastError)
+  @exit-hook
   (let [[^MemorySegment ptr log] (logged #(with-open [arena (Arena/ofConfined)] (load-model arena path gpu-layers)))]
     (try
       (check-decoder-only ptr)
@@ -458,6 +525,8 @@
             m (LlamaModel. ptr (Llama/llama_model_get_vocab ptr) lock books info)]
         (swap! books assoc :cleanable (.register ^Cleaner cleaner m (model-closer ptr lock books)))
         (reservations/reserve! books (:bytes (:footprint info)) (str "llama.cpp: " (:desc info)))
+        ;; closed at exit if still open (genclj-8dtg)
+        (swap! open-models assoc books [lock (:cleanable @books)])
         m)
       (catch Throwable t
         (Llama/llama_model_free ptr)
@@ -696,6 +765,7 @@
     (replay-checked! splits mem [slot] "clear"))
 
   (slots-close [this]
+    (swap! open-engines dissoc token)
     (reservations/release! this)
     (.shutdown pool)
     (Llama/llama_batch_free (.-struct batch))
@@ -885,9 +955,9 @@
 
 (defn- open-slots
   "LlamaSlots for opts, made on the engine's thread (and its model, when
-   opts give a path), its context's buffers reserved. A failure frees what
-   was made, last first."
-  [opts]
+   opts give a path), its context's buffers reserved, token its key in its
+   books. A failure frees what was made, last first."
+  [opts token]
   (LlamaRuntime/load)
   (LlamaRuntime/clearLastError)
   (let [{:keys [model gpu-layers n-slots adapters] :as opts} (check-options opts)
@@ -901,7 +971,6 @@
             ^LlamaModel m (if owns-model?
                             (owned #(.close ^java.io.Closeable %) (open-model model gpu-layers))
                             model)
-            token (Object.)
             [^MemorySegment ctx log] (attach! m token adapters arena opts undo!)
             _ (check-context ctx n-slots)
             n-batch (long (Llama/llama_n_batch ctx))
@@ -943,7 +1012,11 @@
                     performance cores, else llama.cpp's own)
      :swa-full      a full-size cache for sliding-window layers (default true)"
   ^java.io.Closeable [opts]
-  (slots/engine #(open-slots opts) "llama.cpp"))
+  (let [token (Object.)
+        e (slots/engine #(open-slots opts token) "llama.cpp")]
+    ;; closed at exit if still open (genclj-8dtg)
+    (swap! open-engines assoc token (slots/closer-of e))
+    e))
 
 ;; ---------------------------------------------------------------------------
 ;; The vocabulary (the GGUF's own tokenizer)
