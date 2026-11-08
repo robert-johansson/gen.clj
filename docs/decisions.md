@@ -4699,8 +4699,8 @@ family as well: the night loop's 0.8B and the bake-off's 35B-A3B.
 
 ### Paged attention through metal_kernel: no C++ of ours (route A)
 
-(PROVISIONAL, the lead, 2026-11-07 night, owner to confirm; genclj-9a1l,
-genclj-1daf; refines "1.3.0's scope narrowed")
+(Owner, 2026-11-08: confirmed. Was PROVISIONAL, the lead, 2026-11-07 night;
+genclj-9a1l, genclj-1daf; refines "1.3.0's scope narrowed")
 
 The owner's words were "paged attention and continuous batching (our C++)".
 That assumed mlx-c could not reach paged attention. The spike (branch paged,
@@ -5776,7 +5776,8 @@ default. Flipping it is the owner's call; the default is still static.
 
 ### Token SMC on CUDA: reads from MLX's buffer, rows lent, forks in one call
 
-(PROVISIONAL, owner to confirm; genclj-4acj, 2026-11-08)
+(Owner, 2026-11-08: fix 2, the CUDA runtime's prefetch, confirmed; the rest
+PROVISIONAL, owner to confirm; genclj-4acj)
 
 **Where the gap was.** On fenrir (C2), with Qwen3-0.6B Q8_0 in f16 and 16
 particles, one SMC step took 17.1 ms paged against llama.cpp's 7.3. The
@@ -5861,7 +5862,8 @@ alternated because a JVM's result varies by up to 30%):
 
 ### Qwen3.5's step on Metal: 5-15 float32 rows as 16, dead states released
 
-(PROVISIONAL, owner to confirm; genclj-qu77, 2026-11-08)
+(Owner, 2026-11-08: decisions 1 and 2 confirmed, qmm-rows and release!;
+genclj-qu77)
 
 **What the profile found.** bench/gen/batch_profile.clj times one compiled
 paged batch step on the M4, Qwen3.5-0.8B Q8_0, in ms per step:
@@ -6183,3 +6185,41 @@ CUDA:
 - the llama.cpp comparisons on Qwen3-0.6B, Qwen3.5-0.8B and the Qwen3.6 MoE,
   with none skipped.
 The JVM battery under C2 there passes too (2,418 tests).
+
+### The owner's calls on the overnight work (2026-11-08 morning)
+
+(Owner, 2026-11-08, "I agree to all", to the lead's recommendations.)
+
+1. **Half precision by default for quantized models on CUDA.** Every lead
+   over llama.cpp on NVIDIA was measured in float16, and qmm_sm80 takes half
+   floats only (the addendum to "The sampling path on fenrir").
+   - Only quantized models, only on CUDA. The Mac stays float32: it leads
+     there in either precision, and its tight llama.cpp bands were measured
+     in float32.
+   - Training and gradients stay float32.
+   - Draws change on CUDA: a CHANGELOG Draws line.
+   - **MLX stays on NVIDIA** (genclj-ssiv's decision), with this default.
+2. **The NVIDIA correctness reference is MLX's own CPU forward**
+   (genclj-gddh). A real model's next-token log-probabilities on MLX's CUDA
+   backend are compared with the same forward on MLX's CPU, within a band
+   measured on fenrir; the planted convention errors must fail it.
+   - Not taken: a llama.cpp build that keeps activations in float.
+   - A bug shared by MLX's CPU and CUDA code is left to the Mac's tight
+     llama.cpp bands and the conformance suite against the JVM backend.
+3. **Recompiles: shapes bucketed, then the buckets compiled when the engine
+   opens.** Block-table widths and row counts round up to powers of 2, so the
+   shapes a mixed forward can take are few, and an engine traces the common
+   ones at open. Not taken: pre-tracing alone (the combinations are
+   unbounded); accepting the stalls as warm-up.
+4. **The paged mode is the engine's default; the continuous mode stays
+   opt-in.** The condition was met: paged beats static in float16 SMC on
+   Metal and CUDA. Continuous batching changes when requests run together,
+   and the gathering nondeterminism item is open, so serving code chooses it
+   explicitly.
+5. **Confirmed:**
+   - no C++ of ours: route A ("Paged attention through metal_kernel");
+   - gen.array/release! as experimental, and qmm-rows on M3/M4 ("Qwen3.5's
+     step on Metal");
+   - the CUDA runtime's prefetch from MlxRuntime ("Token SMC on CUDA").
+6. **CLAUDE.md** gains the llama-bench line and the LLM namespaces in its
+   layers table.

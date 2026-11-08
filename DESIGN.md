@@ -765,7 +765,7 @@ decision is appended there, and this summary changes with it.
 - GenLM parity is an epic, 1.2.0's theme, with llama.cpp v0.9.0.
   [epic](docs/decisions.md#genlms-gaps), [theme](docs/decisions.md#120s-theme-language-models)
 - 1.3.0 is the MLX engine and training (Qwen families, LoRA/SFT/GRPO, paged
-  attention and continuous batching in C++ of our own), the rest of
+  attention and continuous batching), the rest of
   mlx-node parity kept for later (kmet 1.4.0, the MSA 1.5.0, inference over
   agents 1.6.0); mlx-node never a dependency. [narrowed](docs/decisions.md#130s-scope-narrowed)
   [decided](docs/decisions.md#mlx-node-parity-on-mlx-c-and-our-own-c), [releases](docs/decisions.md#130-140-and-150), [split](docs/decisions.md#inference-over-agents-best-of-k-and-program-proposals-in-150-the-rest-in-160)
@@ -784,6 +784,13 @@ decision is appended there, and this summary changes with it.
   llama.cpp's vocabulary, gen.array's LLM operations (rms-norm, rope, sdpa;
   quantized-matmul, dequantize, gather-qmm), a Slots engine, MLX's native
   gradients with the tape as reference. [decided](docs/decisions.md#130s-engine-design-the-seven-recommendations-approved)
+- Paged attention is ported kernels launched through MLX (kernels-community's
+  v1 and v2 on Metal, vLLM's v1 on CUDA), with no C++ of ours; the paged mode
+  is the engine's default, the continuous mode opt-in, its shapes bucketed
+  and compiled at open. [route A](docs/decisions.md#paged-attention-through-metal_kernel-no-c-of-ours-route-a), [calls](docs/decisions.md#the-owners-calls-on-the-overnight-work-2026-11-08-morning)
+- On CUDA, quantized models compute in float16 by default, and MLX stays the
+  NVIDIA engine; a model's forward on NVIDIA is checked against MLX's CPU
+  forward, the Mac's against llama.cpp. [calls](docs/decisions.md#the-owners-calls-on-the-overnight-work-2026-11-08-morning)
 
 ### Tests, laws and the book
 
