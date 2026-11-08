@@ -38,6 +38,24 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Changed (experimental): paged attention runs a kernel on MLX's CUDA**
+  (genclj-6qb6, genclj-1daf; **Draws**, the paged and continuous modes
+  on CUDA). On MLX's CUDA backend `gen.array/paged-attention` runs vLLM's
+  paged attention kernel (v1, from vLLM's last commit that has it,
+  ported per THIRD-PARTY-NOTICES, Apache-2.0) through
+  mlx_fast_cuda_kernel, where it ran the composite: float32, float16 and
+  bfloat16 (compute capability 8.0 and up), blocks of 8, 16 or 32
+  positions, head sizes up to 256, tables of up to 16,000 positions (the
+  composite past them). Its values are the composite's within float
+  round-off (float32 2.9e-6, the half floats an output ulp), so a draw at
+  a near-tie may differ. NVRTC compiles each variant (a dtype, head size,
+  block size and size of shared memory) at its first launch in a
+  process, in under a second. Measured on fenrir's RTX PRO 6000
+  (Qwen3-0.6B Q8_0, float16, against the composite): token SMC at 16
+  particles 1158 tokens/s paged (999) and 1202 continuous (989); 8
+  concurrent clients 219 paged (181) and 555 continuous (431), where
+  llama.cpp's CUDA build gives 503.
+
 ### Changes
 
 - **Added (experimental): `gen.array/load-safetensors`, and Hugging Face

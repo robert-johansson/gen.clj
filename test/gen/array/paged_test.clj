@@ -28,8 +28,8 @@
    swapped in the layout, 1); the composite's mask one position short (2);
    on MLX's GPU the kernel given each sequence's length one short (4),
    which shows the kernel ran; on CUDA, bugs planted in the kernel's
-   source: a sequence reading the next one's block table, and the scale
-   dropped (4).
+   source: a sequence reading the next one's block table, its keys read
+   one table entry on, and the scale dropped (4).
    The bands: writes and copies are exact everywhere. Attention on the
    JVM backend (float64) 1e-12; on MLX float32's round-off, and the
    half floats' rounding of the output (below)."
@@ -253,11 +253,16 @@
 
 (def ^:private planted-source-bugs
   "Bugs planted in the CUDA kernel's source (its vars header and body,
-   compiled anew): a sequence reads the next one's block table, and the
-   scores lose their scale."
+   compiled anew): a sequence reads the next one's block table, the keys
+   are read from the next entry of the table (wrapping), and the scores
+   lose their scale. On fenrir's CUDA (2026-11-08) they moved the output
+   by 2.8-4.3, 0.47-1.6 and 2.1-3.7 over the twelve kernel cases."
   {"the next sequence's block table"
    ['header "const int* block_table = block_tables + seq_idx * max_num_blocks_per_seq;"
     "const int* block_table = block_tables + ((seq_idx + 1) % gridDim.y) * max_num_blocks_per_seq;"]
+   "the keys' block read at the next table entry"
+   ['header "        static_cast<int64_t>(block_table[block_idx]);\n\n    // Load a key"
+    "        static_cast<int64_t>(block_table[(block_idx + 1) % num_seq_blocks]);\n\n    // Load a key"]
    "the scale dropped"
    ['body "num_kv_heads, scale[0]," "num_kv_heads, 1.0f,"]})
 

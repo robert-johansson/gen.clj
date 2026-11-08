@@ -29,7 +29,14 @@
    default float), with blocks of gen.bench.block positions (64).
    gen.bench.sections (decode,smc) picks the rows; gen.bench.paged-kernel
    false makes the paged modes attend by gen.array's composite, the
-   backend's kernel (Metal's or CUDA's) declined.
+   backend's kernel (Metal's or CUDA's) declined. On fenrir's CUDA (RTX
+   PRO 6000, 2026-11-08, genclj-6qb6: each engine in a JVM of its own,
+   C2, gen.bench.runs 5), Qwen3-0.6B Q8_0 in float16, token SMC: static
+   797, paged 1158 (999 on the composite), continuous 1202 (989),
+   llama.cpp's CUDA build 2228; 8 clients: 147, 219 (181), 555 (431),
+   503. In float32 SMC 740, 1022 (721), 857 (858), 2214. Qwen3-8B Q8_0
+   in float16: SMC 620, 842 (766), 841 (791), 1484; 8 clients 73, 81
+   (76), 231 (220), 144.
    Its paged mode (gen.bench.engines, of static, paged and llama;
    gen.bench.block-size 16, gen.bench.pool-blocks, gen.bench.min-rows),
    measured on the same Mac (2026-11-07, pool-blocks 128): float32 decode
