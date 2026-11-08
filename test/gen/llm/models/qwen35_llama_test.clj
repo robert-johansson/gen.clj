@@ -61,11 +61,13 @@
    general prompts (median 1.8e-3; 12 of the 20 prompts within 3e-3, as
    a dense model's), 5.85 on the digits (median 0.17-0.24); the argmax
    equal in 199 and 200 of 200. The largest gaps are routing near-ties:
-   every gap above 0.27 is of a reading whose forwards hold a near-tie of
-   the router's top k (its least log p_8/p_9 over the layers and
-   positions read 9e-7 to 5.4e-5, but one of 1.5e-4 on the digits); on
-   the general prompts the readings of least margin 1e-4 or more (99 of
-   200) are within 3.0e-3 (bench/gen/qwen3_llama_noise.clj's margins).
+   the 12 largest of each set are of readings whose forwards hold a
+   near-tie of the router's top k (its least log p_8/p_9 over the layers
+   and positions read 9e-7 to 5.4e-5, but one of 1.5e-4 on the digits);
+   on the general prompts the readings of least margin 1e-4 or more (99
+   of 200) are within 3.0e-3 (bench/gen/qwen3_llama_noise.clj's margins,
+   its docstring the table). This test's 5 prompts measured within the
+   band, and every planted error past mutation-nats on the 44-token one.
    llama.cpp's own spread on Metal on this file reaches 2.65 (general)
    and 7.11 (digits, a fork against a fresh read). The planted errors
    there, the least and the median over the 20 general prompts: the conv

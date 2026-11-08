@@ -25,6 +25,42 @@
    llama.cpp's routing cannot be read to force it on the forward (as
    against-llama's :forced does against a model).
 
+   Measured on the MacBook M2 Max (2026-11-08, Qwen3.6-35B-A3B-Q4_K_M,
+   the forward in float32 against llama.cpp v0.9.0's Metal build, two
+   JVMs): no reading's margin reaches 1e-3 (40 layers of 256 experts),
+   and the 12 largest gaps of each set (0.28-0.78 general, 1.2-5.85
+   digits) are of readings of margin at most 5.4e-5 but one (3.77 at
+   1.5e-4, a digit prompt). The readings kept by θ (of 200 a set; their
+   prompts) and their largest gap:
+     θ        general                 digits
+     0        200 (20) 0.78           200 (20) 5.85
+     1e-5     186 (19) 0.78           145 (16) 5.85
+     3e-5     150 (15) 0.52            81 (10) 3.77
+     1e-4      99 (11) 3.0e-3          28 (3)  3.77
+     2e-4      60 (7)  3.0e-3           4 (1)  0.047
+     3e-4      22 (3)  2.4e-3           4 (1)  0.047
+     5e-4       9 (1)  2.4e-3           0
+   The planted errors on the general prompts' kept readings (whole,
+   chunk, one step; the mutated forward's own margins), the least and the
+   median over the prompts of each one's worst kept gap (prompts kept),
+   at θ 1e-4 and 2e-4: RoPE's traditional pairs 0.163 and 0.511 (12),
+   0.163 and 0.656 (6); the conv state's oldest inputs 0.889 and 5.23
+   (14), 0.889 and 5.23 (12); KV heads tiled 2.65 and 4.67 (9), 2.65 and
+   4.76 (4); the router's top k not renormalized 2.89 and 6.12 (12), 3.74
+   and 7.72 (6); the shared expert ungated 6.80 and 14.2 (7), 6.80 and
+   14.8 (3); the q/k norms skipped 10.9 and 13.0 (7), 10.9 and 12.3 (5);
+   the experts' gate and up swapped 9.63 and 14.1 (9), 10.6 and 14.1 (5);
+   the conv kernel reversed 10.7 and 13.5 (5), 9.32 and 13.8 (3); attn_q's
+   query and gate swapped 13.0 and 15.6 (7), 12.9 and 14.8 (5); the value
+   heads grouped 9.33 and 14.7 (7), 9.36 and 14.2 (3). So at θ 2e-4 a
+   band of about 0.1 would separate them all (RoPE's by 1.6 times), on
+   few readings. An error that shows only in a cached read needs a
+   prompt's chunk and step readings kept: at θ 3e-4 the conv state's
+   least falls to 0.001, a prompt whose :whole reading alone was kept.
+   qwen35-llama-test keeps the unforced band (11.7 on Metal); llama.cpp's
+   experts read through its eval callback would force them (the owner's
+   call, 2026-11-08).
+
    One model in memory at a time: llama.cpp's readings of every prompt
    are taken first (against-llama/reference) and its engine closed, then
    the forward's model loaded and compared with them (compare-readings),

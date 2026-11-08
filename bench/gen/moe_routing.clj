@@ -64,7 +64,18 @@
    With -Dgen.bench.reference=gpu the reference is the same forward in
    float32 on the backend the variants run on (its GPU: Metal's float32
    against its float16, where MLX's CPU would take the longest), each
-   prompt's readings still taken first and its model dropped.
+   prompt's readings still taken first and its model dropped. Measured so
+   on the MacBook M2 Max (Metal, 2026-11-08, the same model and 40
+   prompts, -Xmx8g; the reference's readings 50 s, a variant 25-30 s):
+   - f16: 12.9% of the top-k sets differ (69% of positions); the gap
+     where no flip came before at most 0.10 (median 0.012); the readings'
+     medians 0.13-0.16 (general) and 0.30-0.41 (digits), at most 2.73
+     and 5.91, the argmax equal in 198 and 197 of 200.
+   - f16-forced: its own router differing at 1.1%; the readings' medians
+     0.013 and 0.019-0.023, at most 0.040 and 0.278, the argmax always
+     equal; the planted errors at least 0.054 (RoPE's traditional pairs;
+     median 0.209), the others 2.23.
+   As on CUDA: the flips make float16's gap.
 
    Run on MLX's CUDA, one GPU JVM at a time (the CPU's model about 31 GB
    resident; then CUDA's):

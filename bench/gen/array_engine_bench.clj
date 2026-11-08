@@ -134,7 +134,20 @@
    → 757 (alternated again, float16: main 990, 984, the branch 939, 947,
    without :precompile? 981, 967: the open-time compile costs Qwen3.5's
    SMC about 4%). Open time 0.3-0.5 s → 1.8-2.6 s paged, 2.4-4.4 s
-   continuous (the compile 1.4-3.9 s, float32 the longer)."
+   continuous (the compile 1.4-3.9 s, float32 the longer).
+   Qwen3.6-35B-A3B Q4_K_M on the MacBook M2 Max (64 GB, Metal,
+   2026-11-08; each engine and dtype in a JVM of its own, -Xmx8g,
+   gen.bench.batch 1,16, warm-runs 2; tokens/s, float32 → float16;
+   llama.cpp v0.9.0's Metal build): decode at batch 1 (paged) 36.5 →
+   39.5, llama.cpp 49.1; at 16 214.6 → 224.5, llama.cpp 173.7; token SMC
+   at 16 particles paged 548 → 621, continuous 537-541 → 604, llama.cpp
+   653; 8 continuous clients 110-111 → 118 (read p50 52 → 48 ms, p90 55-56
+   → 50 ms, time to first token p50 0.94-1.05 → 0.88 s, largest 1.3-1.4
+   s), llama.cpp 47.9 (p50 150, p90 161 ms; first token 0.85 s). Open
+   22-30 s (the load about 11 s, 27 shapes compiled in 14 s paged, 34 in
+   12-13.5 s continuous), 0 traces after open. MLX's peak 30.7-32.2 GB in
+   float32, 33.7 GB in float16 (the model loads in float32, then is cast;
+   23.2 GB after)."
   (:require [clojure.string :as str]
             [gen.array :as array]
             [gen.gfi :as gfi]

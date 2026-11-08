@@ -15,7 +15,11 @@
    -0.0039 ± 0.0020 from it, f16-old -0.0025 ± 0.0014. A token's |Δ| at
    the median 0.016 (0.019), p90 0.10 (0.11), at most 0.87 (0.86).
    Float16 predicts as well as float32: its routing flips (bench/gen/
-   moe_routing.clj) move single predictions, not their quality.
+   moe_routing.clj) move single predictions, not their quality. On Metal
+   (the MacBook M2 Max, 2026-11-08, the same text and windows): float32
+   2.9684, float16 -0.0025 ± 0.0015 from it, f16-old -0.0046 ± 0.0018; a
+   token's |Δ| at the median 0.016 (0.019), p90 0.10 (0.12), at most 0.79
+   (0.84).
 
      clojure -J-Dgen.backend=mlx -J-Dgen.llama.lib=<lib> -M:bench -m gen.moe-nll <qwen35moe GGUF>
 
