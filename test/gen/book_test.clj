@@ -70,9 +70,14 @@
     (is (= 1 (runs "(/ 0.0 0.0)\n;=> 1.0")))
     (is (zero? (runs "(/ 1.0 0.0)\n;=> ##Inf")))
     (is (= 1 (runs "1e300\n;=> ##Inf"))))
-  (testing "a float64 check runs where floats are float64, and only there"
+  (testing "a float64 check runs where floats are float64 and the JVM's math is the reference's, and only there"
     (is (zero? (runs "(/ 2.0 3.0)\n;=> 0.667 ; float64")))
-    (is (= (if (ts/f32?) 0 1) (runs "(/ 2.0 3.0)\n;=> 0.668 ; float64"))))
+    (is (= (if (ts/f32?) 0 1) (with-redefs [book/reference-math? (constantly true)]
+                                (runs "(/ 2.0 3.0)\n;=> 0.668 ; float64"))))
+    (is (zero? (with-redefs [book/reference-math? (constantly false)]
+                 (runs "(/ 2.0 3.0)\n;=> 0.668 ; float64")))))
+  (testing "the JVM's math has one fingerprint"
+    (is (= (book/math-fingerprint) (book/math-fingerprint))))
   (testing "data compare element by element"
     (is (zero? (runs "{:a [1.0 (/ 1.0 3.0)]}\n;=> {:a [1.0 0.333]}")))
     (is (= 1 (runs "{:a [1.0 (/ 1.0 3.0)]}\n;=> {:a [1.0 0.334]}")))
@@ -139,8 +144,12 @@
         current (slurp (str book/dir "/" path))]
     (is (zero? (failures #(book/check-figures {path current}))))
     (when (ts/jvm?)
-      (is (= 1 (failures #(book/check-figures {path (str current " ")}))))
-      (is (= 1 (failures #(book/check-figures {"figures/no-such.svg" "<svg/>"})))))))
+      (with-redefs [book/reference-math? (constantly true)]
+        (is (= 1 (failures #(book/check-figures {path (str current " ")}))))
+        (is (= 1 (failures #(book/check-figures {"figures/no-such.svg" "<svg/>"})))))
+      (with-redefs [book/reference-math? (constantly false)]
+        (is (zero? (failures #(book/check-figures {path (str current " ")})))
+            "where the JVM's math is not the reference's, a figure is not compared")))))
 
 (deftest stale-pages-fail
   (let [[file page] (first book/generated)]
