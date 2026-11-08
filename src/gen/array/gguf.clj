@@ -9,7 +9,8 @@
    - A model split over files (llama.cpp's gguf-split, path
      <prefix>-00001-of-0000N.gguf): every file, from the first.
    - The tensor types loaded, as MLX's loader (mlx/io/gguf.cpp,
-     gguf_quants.cpp) loads them: F32, F16 and I32 as arrays, and Q8_0,
+     gguf_quants.cpp) loads them: F32, F16 and I32 as arrays (and BF16,
+     which MLX's loader is not trusted with: below), and Q8_0,
      Q4_0 and Q4_1 as MLX's affine quantization in groups of 32 (the
      quantized words, scales and biases gen.array/dequantize takes), the
      scales and biases in float32 (DESIGN §9, 1.3.0's engine design).
@@ -25,7 +26,8 @@
        exact, as llama.cpp computes them;
      - Q6_K (16 sub-blocks of 16, int8 scales) as float32, d·sc·(q - 32)
        (exact): MLX's affine kernels take groups of 32, 64 or 128, and
-       two sub-blocks of different scales share no affine group.
+       two sub-blocks of different scales share no affine group;
+     - BF16 as bfloat16 (float32 on a backend without it), its bits.
      Every other type is a loud error.
 
    Dimensions: GGML lists a tensor's innermost first; a shape here is
@@ -63,6 +65,7 @@
    groups of 32) or the dtype it is decoded to (:dtype, Q6_K's)."
   {:f32 {:dtype :float32 :bytes 4}
    :f16 {:dtype :float16 :bytes 2}
+   :bf16 {:dtype :bfloat16 :bytes 2}
    :i32 {:dtype :int32 :bytes 4}
    :q8_0 {:values 32 :block 34 :bits 8}
    :q4_0 {:values 32 :block 18 :bits 4}
@@ -298,8 +301,8 @@
     (doseq [{:keys [name type shape]} tensors]
       (when-not (loadable type)
         (throw (ex-info (str "load-gguf: " path ": tensor " name " is " (str/upper-case (clojure.core/name type))
-                             ", a type not supported (F32, F16, I32, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q4_K, Q5_K"
-                             " and Q6_K are)")
+                             ", a type not supported (F32, F16, BF16, I32, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q4_K,"
+                             " Q5_K and Q6_K are)")
                         {:reason :unsupported :path path :tensor name :type type})))
       (when (quantized? type)
         (when-not (str/ends-with? name ".weight")
@@ -564,8 +567,8 @@
    on the host into primitive arrays:
    - a plain type, and Q6_K: {:dtype :shape :data}, data a float[]
      (:float32: F32's values, and Q6_K's, d·sc·(q - 32) in float32 as
-     llama.cpp computes them, exactly), a short[] (:float16: F16's bits)
-     or an int[] (:int32);
+     llama.cpp computes them, exactly), a short[] (:float16: F16's bits;
+     :bfloat16: BF16's) or an int[] (:int32);
    - a quantized type: {:quantized [words scales biases] :shapes [words'
      scales' biases'] :bits}, MLX's affine quantization in groups of 32:
      words an int[] (uint32 bits), scales and biases float[]s.
@@ -599,7 +602,7 @@
          :shape shape
          :data (case type
                  :f32 (let [out (float-array n)] (.get (.asFloatBuffer b) out) out)
-                 :f16 (let [out (short-array n)] (.get (.asShortBuffer b) out) out)
+                 (:f16 :bf16) (let [out (short-array n)] (.get (.asShortBuffer b) out) out)
                  :i32 (let [out (int-array n)] (.get (.asIntBuffer b) out) out)
                  :q6_k (let [out (float-array n)] (decode! (quot n 256) 210 #(q6-k! b out %1 %2)) out))}))))
 
@@ -617,6 +620,14 @@
     short/1 (let [^shorts a data out (double-array (alength a))]
               (dotimes [i (alength a)] (aset out i (double (Float/float16ToFloat (aget a i)))))
               out)))
+
+(defn- bfloat16s-of
+  "A bfloat16's bits (a short[]) as their values, doubles."
+  ^doubles [^shorts a]
+  (let [out (double-array (alength a))]
+    (dotimes [i (alength a)]
+      (aset out i (double (Float/intBitsToFloat (bit-shift-left (bit-and (long (aget a i)) 0xffff) 16)))))
+    out))
 
 (defn- words-of
   "The uint32 words of an int[] (their bits), as doubles."
@@ -637,7 +648,7 @@
     (if quantized
       (let [[words scales biases] quantized]
         (assoc t :quantized [(words-of words) (doubles-of scales) (doubles-of biases)]))
-      (assoc t :data (doubles-of data)))))
+      (assoc t :data (if (= :bfloat16 (:dtype t)) (bfloat16s-of data) (doubles-of data))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Loading

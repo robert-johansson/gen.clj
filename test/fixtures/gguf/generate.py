@@ -74,8 +74,11 @@ The files:
   and F32 in one model.
 - float64-metadata.gguf: float64 metadata values (which MLX's loader
   misreads: gen.backend.mlx.io) before a string, and one F32 tensor.
-- unsupported-q3_k.gguf and unsupported-bf16.gguf: a tensor of a type the
-  loader refuses (Q3_K's bytes are random: only its type is read).
+- bf16.gguf and bf16.edn: BF16 tensors (gguf-py's rounding of random
+  values; a matrix, a vector, a large value and a subnormal one) beside
+  an F32 one, and their values by gguf-py's reader, the reference.
+- unsupported-q3_k.gguf: a tensor of a type the loader refuses (its
+  bytes are random: only its type is read).
 
 With --with-vocabulary <a Qwen3.5 GGUF> <dir>, it writes instead, into
 dir, tiny random Qwen3.5 and Qwen3.5-MoE models with that GGUF's
@@ -411,6 +414,9 @@ def write_reference(path, name):
         shape = [int(d) for d in reversed(t.shape)]
         if t.tensor_type in (Q.F32, Q.F16, Q.I32):
             v = t.data
+        elif t.tensor_type == Q.BF16:
+            # bits, not a quantization: no dequantize_row_* to check against
+            v = gguf.quants.dequantize(t.data, t.tensor_type)
         else:
             v = gguf.quants.dequantize(t.data, t.tensor_type)
             if base is not None:
@@ -536,14 +542,22 @@ def write_float64():
 
 
 def write_unsupported(rng):
-    for name, data, qtype in [("unsupported-q3_k.gguf", rng.integers(0, 256, size=(2, 110), dtype=np.uint8), Q.Q3_K),
-                              ("unsupported-bf16.gguf",
-                               gguf.quants.quantize(rng.normal(size=(2, 32)).astype(np.float32), Q.BF16), Q.BF16)]:
-        path = os.path.join(HERE, name)
-        w = gguf.GGUFWriter(path, "test")
-        w.add_tensor("ok.weight", np.ones((2, 32), dtype=np.float32))
-        w.add_tensor("refused.weight", data, raw_dtype=qtype)
-        finish(w, [path])
+    path = os.path.join(HERE, "unsupported-q3_k.gguf")
+    w = gguf.GGUFWriter(path, "test")
+    w.add_tensor("ok.weight", np.ones((2, 32), dtype=np.float32))
+    w.add_tensor("refused.weight", rng.integers(0, 256, size=(2, 110), dtype=np.uint8), raw_dtype=Q.Q3_K)
+    finish(w, [path])
+
+
+def write_bf16(rng):
+    path = os.path.join(HERE, "bf16.gguf")
+    w = gguf.GGUFWriter(path, "test")
+    bf16 = lambda x: gguf.quants.quantize(np.asarray(x, dtype=np.float32), Q.BF16)
+    w.add_tensor("t.f32.weight", rng.normal(size=(2, 32)).astype(np.float32))
+    w.add_tensor("t.bf16.weight", bf16(rng.normal(size=(3, 32))), raw_dtype=Q.BF16)
+    w.add_tensor("t.bf16.vector", bf16([1.0, -0.0, 3.0e38, 1.0e-40, -2.5, 0.1, 7.0, 1.0e-3]), raw_dtype=Q.BF16)
+    finish(w, [path])
+    write_reference(path, "bf16.edn")
 
 
 def write_with_vocabulary(source, out_dir):
@@ -580,6 +594,7 @@ def main():
     write_kquants(np.random.default_rng(9))
     write_float64()
     write_unsupported(np.random.default_rng(8))
+    write_bf16(np.random.default_rng(10))
     write_small(np.random.default_rng(20261109))
     for moe, stem in [(False, "qwen35"), (True, "qwen35moe")]:
         weights = qwen35_weights(np.random.default_rng(20261108 + moe), moe)

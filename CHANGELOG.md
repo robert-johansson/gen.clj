@@ -40,6 +40,12 @@ other values for the same key, from the same distribution.
 
 ### Changes
 
+- **Changed (experimental): `gen.array/load-gguf` loads BF16** (genclj-9pn4,
+  PROVISIONAL), as bfloat16 on MLX (by the host reader: MLX's loader is
+  not trusted with it) and float32 on the JVM backend, where it was
+  `:unsupported`; test/fixtures/gguf/unsupported-bf16.gguf is now
+  bf16.gguf, with its values (bf16.edn).
+
 - **Added (experimental): K-quants in `gen.array/load-gguf`** (genclj-kqxr,
   PROVISIONAL): Q4_K, Q5_K and Q6_K, and Q5_0 and Q5_1 (Q4_K_M's
   fallbacks for rows not of 256 values), each value the file's exactly
@@ -67,7 +73,8 @@ other values for the same key, from the same distribution.
     comparisons; argmax equal in all), as large as llama.cpp's own spread
     on that file (0.226; 0.052 on Q8_0). Qwen3.5-0.8B as Q4_K_M: 0.414,
     llama.cpp's own 0.460.
-  - Still `:unsupported`: Q2_K, Q3_K, the IQ types, BF16 and the rest.
+  - Still `:unsupported`: Q2_K, Q3_K, the IQ types and the rest (BF16 loads
+    since genclj-9pn4, above).
     `gen.array.protocols/ILoading`'s contract names the new types.
   - Test files: test/fixtures/gguf/kquants.gguf (random blocks) and
     qwen3-small-f16.gguf with its Q4_K_M by llama.cpp's quantizer

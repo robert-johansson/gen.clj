@@ -194,8 +194,9 @@
      {:name :type :shape :offset :bytes}): a map from each tensor's name to
      its value, as MLX's GGUF loader gives them:
        :f32, :i32    an array of float32, int32
-       :f16          an array of float16, or float32 (the same values)
-                     on a backend without float16
+       :f16, :bf16   an array of float16, bfloat16, or float32 (the same
+                     values) on a backend without them (MLX's loader
+                     reads no BF16 here: the host reader does)
        :q8_0, :q4_0, :q4_1, :q5_0, :q5_1
                      [wq scales biases]: MLX's affine quantization in
                      groups of 32 (8 bits for Q8_0, 5 for Q5_0 and Q5_1,

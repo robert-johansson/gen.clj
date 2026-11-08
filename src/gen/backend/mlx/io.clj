@@ -16,7 +16,8 @@
    float64 metadata is refused before MLX misreads it (check-metadata).
 
    A file holding a type MLX's loader does not read as gen.array loads it
-   (Q5_0, Q5_1 and the K-quants, which it would turn into float16) is read
+   (Q5_0, Q5_1 and the K-quants, which it would turn into float16, and
+   BF16, whose reading there is unverified) is read
    by gen.array.gguf's host reader instead, every tensor of it: the
    quantized ones decoded and repacked on the host as MLX's affine
    quantization (the same words, scales and biases as MLX's loader gives

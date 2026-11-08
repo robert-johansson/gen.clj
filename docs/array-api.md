@@ -342,14 +342,14 @@ each capability is an optional protocol of its own:
   its metadata on the host (`gen.array.gguf`, the same on every backend),
   its tensors by the backend's `ILoading` (MLX: `mlx_load_gguf`; the JVM
   backend: `gen.array.gguf`'s reader), every file of a split model.
-  F32, F16 and I32 tensors load as arrays (F16 as float32 on the JVM
-  backend); Q8_0, Q4_0 and Q4_1 as the affine quantization above, groups
-  of 32, with float32 scales and biases (the file's values exactly, on
-  both backends bit for bit). Every other tensor type is loud
-  (`:unsupported`): MLX's loader would make it float16, silently. MLX
-  0.32.4's loader misreads float64 metadata and the process dies, so the
-  MLX backend refuses such a file (`:unsupported`); the JVM backend reads
-  it.
+  F32, F16, BF16 and I32 tensors load as arrays (F16 and BF16 as float32
+  on the JVM backend); Q8_0, Q4_0 and Q4_1 as the affine quantization
+  above, groups of 32, with float32 scales and biases (the file's values
+  exactly, on both backends bit for bit), and the K-quants as its
+  docstring says. Every other tensor type is loud (`:unsupported`): MLX's
+  loader would make it float16, silently. MLX 0.32.4's loader misreads
+  float64 metadata and the process dies, so the MLX backend refuses such
+  a file (`:unsupported`); the JVM backend reads it.
 
 - **`put-along-axis`** (`IOverwriting`) writes values over x's entries at
   indices along an axis: the overwrite, the counterpart of `take-along-axis`
