@@ -116,10 +116,14 @@
    - On Metal: 0.16 on K-quants (Qwen3.6-35B-A3B's Q4_K experts, the
      MacBook M2 Max, 2026-11-08, the general and the digit prompts: 6.4e-3
      and 8.0e-2; the same readings unforced 0.97 and 5.97).
-   - Elsewhere: unmeasured (band's)."
+   - Elsewhere, against llama.cpp's CUDA build (which quantizes the
+     activations to 8 bits): 3.9 on K-quants (fenrir, 2026-11-08, the
+     general and the digit prompts: 0.45 and 1.91; unforced 2.19 and
+     6.24), as Qwen3.5's dense 7.1 is llama.cpp's.
+   - Every other model: band's (unmeasured)."
   [path]
-  (if (and (= "qwen35moe" (architecture path)) (k-quants? path) (.startsWith (System/getProperty "os.name") "Mac"))
-    0.16
+  (if (and (= "qwen35moe" (architecture path)) (k-quants? path))
+    (if (.startsWith (System/getProperty "os.name") "Mac") 0.16 3.9)
     (band path)))
 
 (def ^:private sdpa array/sdpa)
