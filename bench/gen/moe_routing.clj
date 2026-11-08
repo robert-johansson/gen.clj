@@ -61,6 +61,22 @@
    a near-tie moves the hidden state, which flips more experts in later
    layers and positions.
 
+   With -Dgen.bench.reference=gpu the reference is the same forward in
+   float32 on the backend the variants run on (its GPU: Metal's float32
+   against its float16, where MLX's CPU would take the longest), each
+   prompt's readings still taken first and its model dropped. Measured so
+   on the MacBook M2 Max (Metal, 2026-11-08, the same model and 40
+   prompts, -Xmx8g; the reference's readings 50 s, a variant 25-30 s):
+   - f16: 12.9% of the top-k sets differ (69% of positions); the gap
+     where no flip came before at most 0.10 (median 0.012); the readings'
+     medians 0.13-0.16 (general) and 0.30-0.41 (digits), at most 2.73
+     and 5.91, the argmax equal in 198 and 197 of 200.
+   - f16-forced: its own router differing at 1.1%; the readings' medians
+     0.013 and 0.019-0.023, at most 0.040 and 0.278, the argmax always
+     equal; the planted errors at least 0.054 (RoPE's traditional pairs;
+     median 0.209), the others 2.23.
+   As on CUDA: the flips make float16's gap.
+
    Run on MLX's CUDA, one GPU JVM at a time (the CPU's model about 31 GB
    resident; then CUDA's):
      clojure -J-Dgen.backend=mlx -J-Dgen.llama.lib=<lib> -M:bench -m gen.moe-routing Qwen3.6-35B-A3B-Q4_K_M.gguf"
@@ -321,7 +337,11 @@
 (defn -main [model & _]
   (let [names (str/split (System/getProperty "gen.bench.variants" "f32,f32-forced,f16-old,f16-old-forced,f16,f16-forced") #",")
         _ (System/setProperty "gen.bench.prompts" (System/getProperty "gen.bench.prompts" "all"))
-        cpu ((native "gen.backend.mlx" (quote make-backend)) {:device :cpu})]
+        ;; gen.bench.reference=gpu: the reference on the backend the
+        ;; variants run on (Metal's float32 against its float16)
+        cpu (if (= "gpu" (System/getProperty "gen.bench.reference" "cpu"))
+              array/*backend*
+              ((native "gen.backend.mlx" (quote make-backend)) {:device :cpu}))]
     (println "backend" (array/backend-name array/*backend*) (array/device array/*backend*) "model" model "variants" names)
     (with-open [vocab ^java.io.Closeable ((native "gen.llm.llama" (quote vocabulary)) model)]
       (let [sets ((native "gen.llama-noise" (quote prompt-sets)) vocab)
