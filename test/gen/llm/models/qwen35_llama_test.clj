@@ -77,6 +77,30 @@
    pairs 0.16 and 0.48; the value heads grouped 7.41 and 14.2; the
    experts' gate and up swapped 9.63 and 14.2; the router's top k not
    renormalized 2.89 and 6.13; the shared expert ungated 7.23 and 13.8.
+   With llama.cpp's experts forced (the owner's call, 2026-11-08): on a
+   mixture of experts llama.cpp's engine records the experts each layer
+   picks at each position (gen.llm.llama's :record #{\"ffn_moe_topk\"},
+   its eval callback; against-llama/reference's :experts), and each
+   reading is compared again with them forced on the forward
+   (compare-readings' :forced), within against-llama/forced-band; the
+   planted errors must pass it too. On Metal it is 0.16 nats: twice the
+   largest |Δ log p| (8.0e-2, rounded up) the bench measured forced on
+   the MacBook (2026-11-08, the readings recording the experts, two
+   JVMs): 6.4e-3 on the general prompts (median 1.1e-3), 8.0e-2 on the
+   digits (median 5.5e-3 to 7.3e-3; the chat templates' within 1.6e-2,
+   the bare digit runs 2.6e-2 to 8.0e-2); the argmax equal in all 400,
+   the top 5 in 399. The same readings unforced: 0.97 and 5.97. This
+   test's prompts forced: 1.1e-3 to 2.0e-3 up to 15 tokens, 6.8e-2 (44)
+   and 9.2e-2 (157); unforced 0.19 and 1.45. The planted errors forced,
+   the least and the median over the general prompts: the conv state's
+   oldest inputs 2.23 and 4.47; the conv kernel reversed 8.97 and 12.1;
+   attn_q's query and gate swapped 10.6 and 16.5; KV heads tiled 2.43
+   and 4.21; the q/k norms skipped 9.09 and 13.1; RoPE's traditional
+   pairs 0.056 and 0.20 (0.95 on this test's 44 tokens); the value heads
+   grouped 6.62 and 13.3; the experts' gate and up swapped 6.21 and 12.2;
+   the router's top k not renormalized 2.97 and 6.41; the shared expert
+   ungated 7.59 and 13.6. So every one but RoPE's pairs is past the
+   forced band on every prompt, where the unforced 11.7 held them all.
    Off the Mac the band is 7.1 nats, and 12.3 on a model of K-quants
    (against-llama/band): twice the largest |Δ log p| (rounded up) that
    the bench measured on fenrir as qwen3-llama-test's (2026-11-08, MLX's

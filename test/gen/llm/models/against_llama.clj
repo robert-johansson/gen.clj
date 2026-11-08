@@ -22,7 +22,11 @@
      reference's argmax), against the reference advanced so.
    The reference's readings are taken first (reference), so that a planted
    error (below) changes only the forward under test, even where the
-   reference is the same forward.
+   reference is the same forward. On a mixture of experts they can hold
+   the reference's experts (a model's, or llama.cpp's from an engine
+   recording them through its eval callback), which compare-readings'
+   :forced forces on the forward: the router's near-ties, where a float's
+   difference picks other experts, then move nothing (forced-band).
 
    And the planted convention errors (mutations), as with-redefs-fn's
    redefinitions of gen.array's operations, each self-consistent:
@@ -110,8 +114,8 @@
    where unmeasured (every other model). qwen35-llama-test's docstring
    gives the measurements.
    - On Metal: 0.16 on K-quants (Qwen3.6-35B-A3B's Q4_K experts, the
-     MacBook M2 Max, 2026-11-08: 6.4e-3 on the general prompts, 8.0e-2 on
-     the digits; unforced 0.97 and 5.97).
+     MacBook M2 Max, 2026-11-08, the general and the digit prompts: 6.4e-3
+     and 8.0e-2; the same readings unforced 0.97 and 5.97).
    - Elsewhere: unmeasured (band's)."
   [path]
   (if (and (= "qwen35moe" (architecture path)) (k-quants? path) (.startsWith (System/getProperty "os.name") "Mac"))

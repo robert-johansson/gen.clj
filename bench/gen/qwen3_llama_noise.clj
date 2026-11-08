@@ -67,7 +67,15 @@
    (against-llama/reference's :experts, in the readings file too), and
    every comparison, the planted errors' too, is made twice: unforced, and
    with llama.cpp's experts forced on the forward (compare-readings'
-   :forced). Then the gap is the forward's, not its routing's.
+   :forced). Then the gap is the forward's, not its routing's. Measured
+   on the MacBook (2026-11-08, Qwen3.6-35B-A3B-Q4_K_M, two JVMs), forced
+   against unforced on the same readings: the general prompts 6.4e-3
+   (median 1.1e-3) against 0.97, the digits 8.0e-2 (median 5.5e-3 to
+   7.3e-3) against 5.97; the argmax equal in 400 of 400 (398 unforced).
+   The planted errors forced, the least over the general prompts: RoPE's
+   traditional pairs 0.056 (median 0.20), the rest 2.23 (the conv state's
+   oldest inputs) to 10.6 (attn_q's query and gate swapped).
+   qwen35-llama-test's docstring has them all, and its forced band.
 
    One model in memory at a time: llama.cpp's readings of every prompt
    are taken first (against-llama/reference) and its engine closed, then
