@@ -92,14 +92,16 @@
    pairs 1.19, outside the band 0.80 on 2 of the 5 prompts (the others
    7.25 to 23.0).
 
-   A mixture of experts' float16 is checked with the CPU's experts forced
-   too (float16-forward-with-the-cpu-s-experts-is-the-cpu-s), where its
-   band is tight and the planted errors are asserted outside it: the
-   router's flips at near-ties are float16's own, and forcing the CPU's
-   experts leaves the rest of the forward to check. The bench's planted
-   errors so (the least and the median over the 20 general prompts):
-   RoPE's traditional pairs 0.057 and 0.204 (at most 0.857); the others
-   2.25 (the conv state's oldest inputs) to 10.8 at least.
+   A mixture of experts is checked with the CPU's experts forced too, in
+   both dtypes, where the bands are tight and the planted errors are
+   asserted outside them: a flip at a near-tie of the router is the
+   rounding's own, and forcing the CPU's experts leaves the rest of the
+   forward to check. Forced, float32 is 6.39e-5 and 5.37e-4 away (the
+   band 1.1e-3, where unforced it is 0.80), float16 3.97e-2 and 0.172
+   (0.35). The bench's planted errors so, in float32 and float16 alike
+   (the least and the median over the 20 general prompts): RoPE's
+   traditional pairs 0.057 and 0.20 (at most 0.83 to 0.86); the others
+   2.24 (the conv state's oldest inputs) to 10.8 at least.
 
    The Thor (sm_110, aarch64): unmeasured. The test runs there as it is,
    given MLX's CUDA build for sm_110, llama.cpp's aarch64 library (for
@@ -153,7 +155,7 @@
     (get-in {:qwen3 {:float32 5.1e-4 :float16 0.19}
              :qwen35 {:float32 7.5e-4 :float16 0.48}
              :qwen35-k {:float32 0.80 :float16 12.2}
-             :qwen35-k-forced {:float16 0.35}}
+             :qwen35-k-forced {:float32 1.1e-3 :float16 0.35}}
             [(cond (and qwen35? k? forced?) :qwen35-k-forced (and qwen35? k?) :qwen35-k qwen35? :qwen35 :else :qwen3) dtype])))
 
 (def ^:private prompts
@@ -218,6 +220,12 @@
 (deftest ^:slow float16-forward-is-the-cpu-s
   (ts/when-native :cuda available?
     (check :float16 false false)))
+
+(deftest ^:slow float32-forward-with-the-cpu-s-experts-is-the-cpu-s
+  (ts/when-native :cuda available?
+    (if (:experts (first @reference))
+      (check :float32 true true)
+      (println "cuda-reference-test: the CPU's experts forced on a mixture of experts only"))))
 
 (deftest ^:slow float16-forward-with-the-cpu-s-experts-is-the-cpu-s
   (ts/when-native :cuda available?
