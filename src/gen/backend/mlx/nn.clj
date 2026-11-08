@@ -26,14 +26,15 @@
    clamped first, as take's."
   {:api :internal}
   (:require [gen.array.shape :as sh]
-            [gen.backend.mlx.array :refer [code device fence stream wrap wrap-all]]
+            [gen.backend.mlx.array :refer [code device fence stream with-device wrap wrap-all]]
             [gen.backend.mlx.gated-delta :as gated-delta]
             [gen.backend.mlx.paged :as paged]
             [gen.backend.mlx.paged-attention :as paged-attention]
             [gen.backend.mlx.paged-attention-cuda :as paged-attention-cuda]
             [gen.backend.mlx.operands :refer [dtype-on operand scalar-handle shape-of with-operands with-temps]]
             [gen.backend.mlx.transforms :refer [*differentiating*]])
-  (:import [gen.mlx Mlx MlxRuntime]))
+  (:import [gen.mlx Mlx MlxRuntime]
+           [java.lang.foreign Arena MemorySegment ValueLayout]))
 
 (set! *warn-on-reflection* true)
 
@@ -174,12 +175,67 @@
   ^long [^long h s]
   (Mlx/mlx_swapaxes h (int -1) (int -2) (long s)))
 
+(def ^:private metal-arch
+  (delay (when @mac?
+           (with-device :gpu
+             (fn [d]
+               (let [info (Mlx/mlx_device_info_get (long d))]
+                 (try (with-open [arena (Arena/ofConfined)]
+                        (let [p (.allocate arena ValueLayout/ADDRESS)]
+                          (Mlx/mlx_device_info_get_string p info "architecture")
+                          (.getString (.reinterpret ^MemorySegment (.get p ValueLayout/ADDRESS 0) Long/MAX_VALUE) 0)))
+                      (finally (Mlx/mlx_device_info_free info)))))))))
+
+(defn metal-architecture
+  "The Metal GPU's architecture name from MLX's device info (applegpu_g16g
+   on the M4: generation 16, size g), or nil off macOS."
+  []
+  @metal-arch)
+
+(defn qmm-rows
+  "The rows (at least m) that a transposed affine quantized product of m
+   rows of x of dtype is computed with on a Metal GPU of architecture arch
+   (MLX's name, metal-architecture's): 16 for 5 <= m < 16 rows of float32
+   on generations 15 and 16 (M3, M4; not an Ultra, size d), zero rows
+   after x's; m elsewhere. Below its qmv batch limit (13 or 15 rows on
+   those GPUs) MLX 0.32.4 multiplies the rows by qmv_wide, which reads the
+   weights again for each 5 rows; from it, by qmm, which reads them once.
+   Measured on the M4 (2026-11-08, genclj-qu77; Qwen3.5-0.8B's Q8_0
+   matrices, bench/gen/batch_profile.clj): in float32, its output
+   projection of 8 rows took 9.6 ms by qmv_wide and 5.5 as 16 rows by qmm,
+   its feed-forwards 9.7 and 6.8, and from 5 rows the 16 cost the same or
+   less in every matrix (below 5, more); in float16 qmv_wide was the faster
+   up to 12 rows (4.5 against 5.9 ms at 8), so the half floats are left as
+   they are. Each row of a product is its own sum, so x's rows are those
+   of a 16-row product (summed in another order than qmv_wide's: within
+   float round-off of it)."
+  ^long [arch dtype ^long m]
+  (let [^String arch arch
+        n (if arch (.length arch) 0)
+        gen (when (>= n 3) (parse-long (subs arch (- n 3) (- n 1))))]
+    (if (and (= :float32 dtype) gen (<= 15 (long gen) 16) (not= \d (.charAt arch (dec n))) (<= 5 m 15))
+      16
+      m)))
+
 (defn- quantized-matmul [b x wq scales biases {:keys [mode group-size bits transpose?] :as opts}]
   (let [d (dtype-on b x)
         s (stream b)
         sx (shape-of x)
+        rows (long (reduce clojure.core/* 1 (pop sx)))
+        k (long (peek sx))
+        pad (if (and transpose? (= :affine mode) (= :gpu (device b)) (> (count sx) 1))
+              (qmm-rows @metal-arch d rows)
+              rows)
         qmm (fn ^long [^long hx ^long hw ^long hs ^long hb]
-              (Mlx/mlx_quantized_matmul hx hw hs hb (boolean transpose?) (int group-size) (int bits) (mode-name mode) s))]
+              (if (= pad rows)
+                (Mlx/mlx_quantized_matmul hx hw hs hb (boolean transpose?) (int group-size) (int bits) (mode-name mode) s)
+                ;; x's rows (a matrix [rows K]) and zero rows to pad, the
+                ;; product's first rows (qmm-rows)
+                (with-temps [t]
+                  (let [z (t (Mlx/mlx_zeros (int-array [(- pad rows) k]) (int (code d)) s))
+                        xp (t (Mlx/mlx_concatenate_axis (t :vector (MlxRuntime/vectorOf (long-array [hx z]))) (int 0) s))
+                        out (t (Mlx/mlx_quantized_matmul xp hw hs hb (boolean transpose?) (int group-size) (int bits) (mode-name mode) s))]
+                    (Mlx/mlx_slice out (int-array [0 0]) (int-array [rows (first (shape-of wq))]) (int-array [1 1]) s)))))]
     (with-operands b :quantized-matmul [hx x nil hw wq nil hs scales nil hb biases nil]
       (cond
         (= d :float64)

@@ -407,6 +407,67 @@
                          (catch Throwable t [(str "threw " (ex-message t))])))))))))
 
 ;; ---------------------------------------------------------------------------
+;; Dropped states released (genclj-qu77)
+;; ---------------------------------------------------------------------------
+
+(defn- watched-releases
+  "(f) with the engine's groups watched (the paged modes' groups of
+   states, the static mode's of caches): {:made :released :read-after
+   :unreleased}, the groups made and released (what they hold, by
+   identity), the reads of a released group's arrays after its release
+   (by a step, given them, or rows taken, sliced, grown or concatenated
+   from them), and the groups made but never released: counts."
+  [f]
+  (let [made (java.util.IdentityHashMap.)
+        released (java.util.IdentityHashMap.)
+        dead (java.util.IdentityHashMap.)
+        read-after (atom 0)
+        check! (fn [x] (when (some #(.containsKey dead %) (filter array/backend-array? (array/tree-leaves x)))
+                         (swap! read-after inc)))
+        watch (fn [v] (let [g @v] (fn [& args] (run! check! args) (apply g args))))
+        new-group @#'ae/new-states-group!
+        new-cache-group @#'ae/new-group!
+        release @#'array/release!
+        watch-compiled (fn [v] (let [c @v] (fn [m opts] (let [g (c m opts)] (fn [& args] (run! check! args) (apply g args))))))]
+    (with-redefs-fn {#'ae/new-states-group! (fn [state states n] (locking made (.put made states true)) (new-group state states n))
+                     #'ae/new-group! (fn [state cache] (locking made (.put made cache true)) (new-cache-group state cache))
+                     #'qwen35/select-rows (watch #'qwen35/select-rows)
+                     #'qwen35/grow (watch #'qwen35/grow)
+                     #'qwen35/concat-rows (watch #'qwen35/concat-rows)
+                     #'qwen35/step (watch #'qwen35/step)
+                     #'qwen35/compile-step (watch-compiled #'qwen35/compile-step)
+                     #'array/release! (fn [t]
+                                        (locking made
+                                          (.put released t true)
+                                          (doseq [x (filter array/backend-array? (array/tree-leaves t))] (.put dead x true)))
+                                        (release t))
+                     #'ae/take-rows (watch #'ae/take-rows)
+                     #'ae/slice-rows (let [g @#'ae/slice-rows] (fn [states ^long from ^long to] (check! states) (g states from to)))
+                     #'qwen35/compile-paged-batch-step (wrapped-step (fn [layers batch held] (check! [layers held]) [layers batch held]))
+                     #'qwen35/compile-paged-step (watch-compiled #'qwen35/compile-paged-step)}
+      f)
+    {:made (count made) :released (count released) :read-after @read-after
+     :unreleased (count (remove #(.containsKey released %) (keys made)))}))
+
+(deftest dropped-groups-are-released
+  ;; the static, paged and continuous modes: every group (the static
+  ;; mode's caches, the paged modes' GatedDeltaNet states) the clients'
+  ;; reads made is released once no slot is in it (array/release!: on MLX
+  ;; its buffers go back at once), and none is read after. Planted
+  ;; (2026-11-08, JVM and Metal): a group released while others still
+  ;; hold it fails the second check (and on Metal throws, a donated array
+  ;; read); none released, the third.
+  (doseq [mode [{:paged? false :continuous? false} {:continuous? false} {}]]
+    (testing mode
+      (let [w (watched-releases #(with-open [e (engine :dense mode)]
+                                   (let [failures (clients-failures :dense e 3)]
+                                     (is (= [] failures))
+                                     (is (zero? (:live (br/info e)))))))]
+        (is (< 10 (:made w)) (pr-str w))
+        (is (zero? (:read-after w)) (pr-str w))
+        (is (zero? (:unreleased w)) (pr-str w))))))
+
+;; ---------------------------------------------------------------------------
 ;; Misuse
 ;; ---------------------------------------------------------------------------
 

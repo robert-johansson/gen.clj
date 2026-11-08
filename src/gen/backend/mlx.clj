@@ -640,6 +640,13 @@
   p/IHostFloats
   (-to-floats [_ x] (guarded :->floats (operands/to-floats x)))
 
+  p/IReleasing
+  (-release! [_ xs]
+    ;; as a compiled call's donated inputs: each repointed at the husk, its
+    ;; bytes off the count of new ones
+    (doseq [x xs] (transforms/donate! x))
+    (MlxRuntime/settleFresh))
+
   p/INativeGrad
   (-native-grad? [_] (= grad-mode :native))
 
