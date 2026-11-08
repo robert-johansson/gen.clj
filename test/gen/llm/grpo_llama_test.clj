@@ -43,8 +43,8 @@
    - llama.cpp: every argmax the same, max |Δ log p| 0.903 against the
      forward where the base's own gap is 0.731 (both above the band of
      0.65 then, inside the band of 2.4 measured since over prompts of
-     digits, genclj-fc6u); its greedy pass rate 0.781 (the array
-     engine's 0.789).
+     digits, genclj-fc6u; a rerun on 2026-11-08, 1.07 against 0.731); its
+     greedy pass rate 0.781 (the array engine's 0.789).
    Prints the numbers. Needs the MLX backend, llama.cpp's libraries and
    Qwen3-0.6B's GGUF as -J-Dgen.llama.test-model (as gen.llm.sft-llama-
    test); skipped with a note otherwise. Rounds, the learning rate and
