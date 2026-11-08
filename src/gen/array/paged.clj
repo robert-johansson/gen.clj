@@ -209,7 +209,8 @@
         (put-blocks pool (array/take pool (array/astype src :int32) 0) dst)))))
 
 ;; ---------------------------------------------------------------------------
-;; paged-attention: a query a sequence over its blocks
+;; paged-attention: a query a sequence over its blocks, or a run of T
+;; queries (genclj-6qb6)
 ;; ---------------------------------------------------------------------------
 
 (defn gathered
@@ -240,6 +241,20 @@
                             [b 1 1 t])]
     (array/reshape (array/sdpa (array/reshape q [b hq 1 d]) k v {:mask mask :scale scale}) [b hq d])))
 
+(defn- run-attention-composite
+  "paged-attention of T queries a sequence (q [B T Hq D], lens [B T],
+   genclj-6qb6): each sequence's blocks gathered once, then one sdpa of
+   its T queries over them, query t seeing the first lens[b t]
+   positions: [B T Hq D]."
+  [q k-pool v-pool tables lens {:keys [scale]}]
+  (let [[b t] (array/shape q)
+        [k v] (gathered k-pool v-pool tables)
+        tk (nth (array/shape k) 2)
+        mask (array/< (array/arange 0 tk 1 {:dtype :int32})
+                      (array/reshape (array/astype lens :int32) [b 1 t 1]))]
+    (-> (array/sdpa (array/transpose q [0 2 1 3]) k v {:mask mask :scale scale})   ; [B Hq T D]
+        (array/transpose [0 2 1 3]))))
+
 (defn- fused-attention
   "paged-attention's value by backend b's kernel (p/IFused), or nil where
    b has none or declines: then the composite runs."
@@ -262,9 +277,10 @@
       (check-ints op :tables tables)
       (check-ints op :lens lens)
       (let [sq (array/shape q)
-            [b hq dq] sq]
-        (when-not (and (= 3 (count sq)) (= d dq))
-          (throw (invalid op (str "q must be [B Hq D] with the pools' D " d ", not " sq) {:q sq :d d})))
+            run? (= 4 (count sq))
+            [b hq dq] (if run? [(sq 0) (sq 2) (sq 3)] sq)]
+        (when-not (and (#{3 4} (count sq)) (= d dq))
+          (throw (invalid op (str "q must be [B Hq D] or [B T Hq D] with the pools' D " d ", not " sq) {:q sq :d d})))
         (when-not (and (pos? (long hq)) (zero? (rem (long hq) (long hk))))
           (throw (invalid op (str "q's heads (" hq ") must be a multiple of the pools' (" hk ")") {:q sq :kv-heads hk})))
         (when-not (= (array/dtype q) (array/dtype k-pool))
@@ -272,8 +288,10 @@
                           {:dtypes [(array/dtype q) (array/dtype k-pool)]})))
         (when-not (and (= 2 (count (array/shape tables))) (= b (first (array/shape tables))) (pos? (long (second (array/shape tables)))))
           (throw (invalid op (str "tables must be [B MB] for " b " queries, not " (array/shape tables)) {:tables (array/shape tables)})))
-        (when-not (= [b] (array/shape lens))
-          (throw (invalid op (str "lens must be [B] for " b " queries, not " (array/shape lens)) {:lens (array/shape lens)})))
+        (let [want (if run? [b (sq 1)] [b])]
+          (when-not (= want (array/shape lens))
+            (throw (invalid op (str "lens must be " (if run? "[B T] " "[B] ") want " for queries " sq ", not " (array/shape lens))
+                            {:lens (array/shape lens)}))))
         (check-range op :tables tables 0 (first (array/shape k-pool)) false)
         (check-range op :lens lens 0 (inc (c/* (long (second (array/shape tables))) (long (nth (array/shape k-pool) 3)))) false)
         (let [{:keys [scale]} opts]
@@ -281,5 +299,7 @@
             (throw (invalid op (str ":scale must be a finite host number, not " (pr-str scale)) {:scale scale})))
           (let [opts {:scale (double (or scale (c// 1.0 (Math/sqrt (double d)))))}
                 bk (array/backend-of op [q k-pool v-pool tables lens])]
-            (or (fused-attention bk [q k-pool v-pool tables lens opts])
-                (paged-attention-composite q k-pool v-pool tables lens opts))))))))
+            (if run?
+              (run-attention-composite q k-pool v-pool tables lens opts)
+              (or (fused-attention bk [q k-pool v-pool tables lens opts])
+                  (paged-attention-composite q k-pool v-pool tables lens opts)))))))))

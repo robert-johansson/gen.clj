@@ -389,7 +389,9 @@ each capability is an optional protocol of its own:
   lives at offset p mod BS of block p/BS. `paged-write` writes N
   positions' keys and values at their slots (block·BS + offset);
   `copy-blocks` copies blocks (copy-on-write for forks); `paged-attention`
-  attends one query a sequence over its first lens[b] positions. Each is
+  attends one query a sequence over its first lens[b] positions, or a run
+  of T queries a sequence (q [B T Hq D], lens [B T]: a prefill chunk, a
+  draft's tokens; genclj-6qb6) each over its own first lens[b t]. Each is
   a composite: writes are put-along-axis on the pools' elements (MLX
   writes by two scatters on the block and offset axes, `IFused`'s
   `:paged-write`, in place under `compile`'s `:donate`), attention gathers each
@@ -400,7 +402,9 @@ each capability is an optional protocol of its own:
   (tables of about 8,000 positions) v2, by partitions of 512 positions
   and a reduction (genclj-6qb6). MLX's CUDA runs vLLM's own v1 kernel
   (through mlx_fast_cuda_kernel; gen.backend.mlx.paged-attention-cuda),
-  up to 16,000 positions, and the composite past them. Indices
+  up to 16,000 positions, and the composite past them. A run is always
+  the composite: its sequence's blocks gathered once, then sdpa (on
+  Metal about 1 ms of a prefill forward's 23 to 139). Indices
   are checked where readable (`concrete?`); on MLX the kernel clamps
   block ids and lengths. The books (allocator, tables) are host values,
   gen.llm.paged's.

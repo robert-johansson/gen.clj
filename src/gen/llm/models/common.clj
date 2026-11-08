@@ -11,7 +11,6 @@
   (:refer-clojure :exclude [+ - * / < > <= >= ==])
   (:require [clojure.core :as c]
             [gen.array :as array :refer [+ * <=]]
-            [gen.array.paged :as paged]
             [gen.llm.lora :as lora]))
 
 (set! *warn-on-reflection* true)
@@ -115,9 +114,11 @@
    row, over the pools kp, vp its keys and values were written into
    (qwen3/paged-batch-step's batch, its {:positions :tables :chunk :d}):
    the first d rows (decode rows) each by paged attention over its
-   table's blocks to its position, the rest (a prefill chunk of one
-   sequence) over the chunk table's blocks gathered, each to its own
-   position (a causal mask): [R heads head-dim]."
+   table's blocks to its position, the rest prefill chunks, K of them
+   (:chunk's rows [K MB]) of (R - d)/K rows each, a run of one sequence
+   at consecutive positions: each chunk's rows read by gen.array's
+   paged-attention of a run, over its table's blocks, each to its own
+   position (causal). [R heads head-dim]."
   [q kp vp {:keys [positions tables chunk d]}]
   (let [[r heads head-dim] (array/shape q)
         r (long r)
@@ -127,13 +128,11 @@
                                          (+ (if (c/== d r) positions (array/slice positions 0 0 d)) 1)))
         chunked (when chunk
                   (let [n (c/- r d)
-                        [gk gv] (paged/gathered kp vp chunk)                           ; [1 Hk T D]
-                        t (nth (array/shape gk) 2)
-                        qc (array/transpose (array/reshape (array/slice q 0 d r) [1 n heads head-dim]) [0 2 1 3])
-                        mask (<= (array/arange 0 t 1 {:dtype :int32})
-                                 (array/reshape (array/slice positions 0 d r) [1 1 n 1]))]
-                    (-> (array/sdpa qc gk gv {:mask mask})                             ; [1 heads n D]
-                        (array/transpose [0 2 1 3])
+                        k (long (first (array/shape chunk)))
+                        t (quot n k)
+                        rows (fn [y] (if (zero? d) y (array/slice y 0 d r)))]
+                    (-> (array/paged-attention (array/reshape (rows q) [k t heads head-dim]) kp vp chunk
+                                               (array/reshape (+ (rows positions) 1) [k t]))
                         (array/reshape [n heads head-dim]))))]
     (cond (and decoded chunked) (array/concatenate [decoded chunked] 0)
           decoded decoded

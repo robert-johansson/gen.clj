@@ -1503,6 +1503,11 @@
    (paged-write's layouts), sequence b's blocks the row b of tables
    [B MB] (block ids, an int array) and its positions the first lens[b]
    of them (lens an int array [B], each at most MB·BS; 0 gives zeros).
+   A run of T queries a sequence (a prefill chunk, speculative decoding's
+   drafts; genclj-6qb6): q [B T Hq D] and lens [B T], query t of sequence
+   b over the first lens[b t] positions (causal: its own position plus
+   one, its run's keys written first), [B T Hq D]; its composite gathers
+   each sequence's blocks once (no backend kernel yet).
    Query head h reads KV head ⌊h / (Hq/Hk)⌋. q and the pools share one
    float dtype. Options: :scale (1/√D). Table entries past a sequence's
    blocks are never read, but must be blocks of the pool. Tables and lens

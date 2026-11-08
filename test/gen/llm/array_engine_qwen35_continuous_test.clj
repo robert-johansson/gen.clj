@@ -400,24 +400,26 @@
                         [layers batch held]))))}
    "a chunk started from zeros where its read had states (its last chunk's lost)"
    {#'ae/chunk-states (let [f @#'ae/chunk-states]
-                        (fn [ctx slot]
-                          (let [{:keys [held] :as s} (f ctx slot)]
-                            (if held {:fresh (mapv #(update-vals % array/zeros-like) held)} s))))}
+                        (fn [ctx slots]
+                          (let [{:keys [held fresh] :as s} (f ctx slots)]
+                            (cond held {:fresh (mapv #(update-vals % array/zeros-like) held)}
+                                  (< 1 (count slots)) {:fresh (mapv #(update-vals % array/zeros-like) fresh)}
+                                  :else s))))}
    "a chunk's padding rows writing its states"
    {#'qwen35/compile-paged-batch-step (wrapped-step (fn [layers batch held] [layers (dissoc batch :chunk-len) held]))}
    "a chunk's tokens run as sequences of their own"
    {#'qwen35/delta-rule (let [f @#'qwen35/delta-rule]
                           (fn [cfg w qkv beta g entry end]
                             (let [[b t] (array/shape qkv)]
-                              ;; a batch's chunk (its end given), not the
-                              ;; reference's prefill
-                              (if (and end (= 1 b) (< 1 t))
-                                ;; each token from the chunk's start states
-                                (let [rep (fn [x] (array/reshape x [t 1 (peek (array/shape x))]))
-                                      tile (fn [x] (array/concatenate (vec (repeat t x)) 0))
+                              ;; a batch's chunks (their ends given), not
+                              ;; the reference's prefill
+                              (if (and end (< 1 t))
+                                ;; each token from its chunk's start states
+                                (let [rep (fn [x] (array/reshape x [(* b t) 1 (peek (array/shape x))]))
+                                      tile (fn [x] (array/take x (i32 (for [k (range b) _ (range t)] k)) 0))
                                       [y e] (f cfg w (rep qkv) (rep beta) (rep g) (update-vals entry tile) nil)]
-                                  [(array/reshape y (into [1 t] (subvec (array/shape y) 2)))
-                                   (update-vals e #(array/slice % 0 (dec t) t))])
+                                  [(array/reshape y (into [b t] (subvec (array/shape y) 2)))
+                                   (update-vals e #(array/take % (i32 (for [k (range b)] (+ (* k t) (dec t)))) 0))])
                                 (f cfg w qkv beta g entry end)))))}
    "a freed slot's states kept for the next read into it"
    {#'ae/paged-clear! (fn [state slot]
@@ -445,6 +447,91 @@
                  #(with-open [e (engine :dense)]
                     (try (clients-failures :dense e 4)
                          (catch Throwable t [(str "threw " (ex-message t))])))))))))
+
+;; ---------------------------------------------------------------------------
+;; Several prompts in one forward (genclj-6qb6)
+;; ---------------------------------------------------------------------------
+
+(def ^:private prompts
+  "Prompts of 5, 7, 3, 8 and 12 tokens: in a budget of 40 tokens the
+   first's 5 make chunks of 8 rows, four of them (a power of 2) in one
+   forward, the last read in a forward of its own."
+  (mapv (fn [n i] (vec (take n (drop i (cycle [95 51 72 69 0 67 65 80 73 84 65 76 13 7 99 42])))))
+        [5 7 3 8 12] (range)))
+
+(defn- several-prompts
+  "The prompts read by slots-forward on e's slots 10 and on, in one
+   forward and then one for the rest, odd ones with their targets (each
+   token's next): [failures (against the forward) stats-delta]."
+  [k e]
+  (let [reads (vec (map-indexed (fn [i p] {:slot (+ 10 i) :pos 0 :tokens p :targets (when (odd? i) (subvec p 1))}) prompts))
+        rest-of (fn [rd {:keys [read]}]
+                  (let [n (long read)]
+                    (when (< n (count (:tokens rd)))
+                      (assoc rd :pos n :tokens (subvec (:tokens rd) n)
+                             :targets (when-let [tg (:targets rd)] (subvec tg (min n (count tg))))))))
+        [d [r1 r2 rest-reads]]
+        (delta #(ae/stats e)
+               (fn [] (slots/call e (fn [s]
+                                      (let [r1 (slots/slots-forward s reads)
+                                            rest-reads (vec (keep identity (map rest-of reads r1)))
+                                            r2 (slots/slots-forward s rest-reads)]
+                                        (doseq [rd reads] (slots/slots-clear s (:slot rd)))
+                                        [r1 r2 rest-reads])))))
+        by-slot (zipmap (map :slot rest-reads) r2)]
+    [(vec (for [[i p rd r] (map vector (range) prompts reads r1)
+                :let [r' (by-slot (:slot rd))
+                      lp (or (:logprobs r') (:logprobs r))
+                      scores (into (vec (:scores r)) (:scores r'))]
+                failure (concat
+                         (when-not (<= (bc/max-diff (let [ctx p] (forward-row k ctx)) lp 64) band)
+                           [(format "prompt %d's row: |Δ| %.3g" i (bc/max-diff (let [ctx p] (forward-row k ctx)) lp 64))])
+                         (when (:targets rd)
+                           (if-not (= (count (:targets rd)) (count scores))
+                             [(format "prompt %d: %d scores" i (count scores))]
+                             (keep (fn [[j s]]
+                                     (let [ctx (subvec p 0 (inc j))
+                                           dd (Math/abs (- (double (aget (forward-row k ctx) (int (p (inc j))))) (double s)))]
+                                       (when-not (<= dd band) (format "prompt %d's score %d: |Δ| %.3g" i j dd))))
+                                   (map-indexed vector scores)))))]
+            failure))
+     d]))
+
+(defn- rolled-chunks
+  "batch with its chunks' tables rolled by one: chunk i reading chunk
+   i + 1's blocks."
+  [{:keys [chunk] :as batch}]
+  (let [n (when chunk (first (array/shape chunk)))]
+    (if (and n (< 1 (long n)))
+      (assoc batch :chunk (array/concatenate [(array/slice chunk 0 1 n) (array/slice chunk 0 0 1)] 0))
+      batch)))
+
+(def ^:private planted-chunk-bugs
+  "Mutations of a forward's chunks, each failing several-prompts."
+  {"a chunk's tokens written at the wrong offsets (its slots reversed)"
+   {#'paged/prepare (let [f paged/prepare]
+                      (fn [a s ^long n ^long bs]
+                        (let [[a s' slots copies] (f a s n bs)]
+                          [a s' (if (< 1 n) (vec (reverse slots)) slots) copies])))}
+   "a chunk reading the next chunk's blocks"
+   {#'qwen35/compile-paged-batch-step (wrapped-step (fn [layers batch held] [layers (rolled-chunks batch) held]))}})
+
+(deftest several-prompts-share-a-forward
+  (doseq [k (keys files)]
+    (testing k
+      (with-open [e (engine k {:n-batch 40})]
+        (let [[failures d] (several-prompts k e)]
+          (is (= [] failures))
+          (is (= 2 (:forwards d)) (pr-str d))
+          (is (= 5 (:chunks d)) "four chunks in the first forward (a power of 2), the last prompt in the second")
+          (is (zero? (:live (br/info e))))))))
+  (testing "planted bugs fail it"
+    (doseq [[what redefs] (merge planted-chunk-bugs (select-keys planted ["a chunk's tokens run as sequences of their own"]))]
+      (testing what
+        (is (seq (with-redefs-fn redefs
+                   #(with-open [e (engine :dense {:n-batch 40})]
+                      (try (first (several-prompts :dense e))
+                           (catch Throwable t [(str "threw " (ex-message t))]))))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Dropped states released (genclj-qu77)

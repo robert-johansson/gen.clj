@@ -33,7 +33,9 @@
    Planted mutations fail the contract checks named in
    planted-bugs-fail-the-contract: copy-on-write skipped (a fork's step
    writes into its parent's block), a step's rows given to its slots in
-   reverse, and the attention blind to each row's last position."
+   reverse, and the attention blind to each row's last position, a
+   step's (the single-query read) or a run's (gen.array/paged-attention
+   of a run, by which a run reads since genclj-6qb6)."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gen.array :as array]
             [gen.llm.array-engine :as ae]
@@ -344,9 +346,15 @@
    "a step's rows given to its slots in reverse"
    [{#'ae/host-rows (let [rows @#'ae/host-rows] (fn [pool logits what] (vec (rseq (rows pool logits what)))))}
     [:fork-matches-fresh :batch-matches-single]]
-   "the attention blind to each row's last position"
+   "a step's attention blind to each row's last position"
    [{#'array/paged-attention (let [pa array/paged-attention]
-                               (fn [q kp vp tables lens & more] (apply pa q kp vp tables (array/maximum (array/- lens 1) 1) more)))}
+                               (fn [q kp vp tables lens & more]
+                                 (apply pa q kp vp tables (if (= 3 (array/ndim q)) (array/maximum (array/- lens 1) 1) lens) more)))}
+    [:fork-matches-fresh]]
+   "a run's attention blind to each row's last position (genclj-6qb6)"
+   [{#'array/paged-attention (let [pa array/paged-attention]
+                               (fn [q kp vp tables lens & more]
+                                 (apply pa q kp vp tables (if (= 4 (array/ndim q)) (array/maximum (array/- lens 1) 1) lens) more)))}
     [:fork-matches-fresh]]})
 
 (deftest planted-bugs-fail-the-contract

@@ -9,7 +9,10 @@
       gen.backend.mlx.paged);
    2. paged-attention is sdpa over each sequence's dense keys and values
       alone (array/sdpa, [1 Hq 1 D] over [1 Hk L D]), for lengths 0 to
-      past several blocks, grouped heads, block sizes 8, 16 and 32;
+      past several blocks, grouped heads, block sizes 8, 16 and 32; and
+      of a run (q [B T Hq D], lens [B T]; genclj-6qb6), each query is the
+      dense sdpa over its own first positions (causal), and the
+      single-query read (MLX's kernel on its GPU);
    3. copy-blocks copies blocks, every one read before any is written,
       and leaves the others;
    4. on MLX's GPU the kernel is the composite, in float32, float16 and
@@ -28,6 +31,8 @@
    its blocks in reverse (3);
    a key's groups of x read in the other order (the D/x and x axes
    swapped in the layout, 1); the composite's mask one position short (2);
+   a run's causal mask one position long, and a run reading the next
+   sequence's blocks (2);
    on MLX's GPU the kernel given each sequence's length one short (4),
    which shows the kernel ran; on CUDA, bugs planted in the kernel's
    source: a sequence reading the next one's block table, its keys read
@@ -203,6 +208,82 @@
     (let [[kp vp tables lens dn] (written (first cases))]
       (is (< 0.01 (max-diff (array/paged-attention (:q dn) kp vp tables lens {:scale 0.1})
                             (array/paged-attention (:q dn) kp vp tables lens)))))))
+
+;; ---------------------------------------------------------------------------
+;; 2b. paged-attention of a run: T queries a sequence (genclj-6qb6)
+;; ---------------------------------------------------------------------------
+
+(def ^:private run-t 5)
+
+(defn- run-lens
+  "lens [B T] of runs of run-t queries ending each sequence of lens: query
+   t at position max(0, L - T) + t sees the positions up to its own
+   (causal); a sequence shorter than T pads its run after its last
+   position, repeating it (as the engine pads a chunk); an empty one 0."
+  [lens]
+  (vec (for [l lens]
+         (let [l (long l) s (max 0 (- l run-t))]
+           (vec (for [t (range run-t)] (min (+ s t 1) l)))))))
+
+(defn- prefixes
+  "dn with each sequence's dense keys and values its first ls positions,
+   and the queries q."
+  [{:keys [k v] :as dn} ls q]
+  (let [cut (fn [xs] (mapv (fn [x l] (when (pos? (long l)) (array/slice x 1 0 l))) xs ls))]
+    (assoc dn :k (cut k) :v (cut v) :q q)))
+
+(defn- run-gap
+  "max |Δ| between paged-attention of a run (q [B T Hq D], lens [B T])
+   and, for each t, each sequence's dense sdpa over its first lens[b t]
+   positions (reference), and the gap to the T single-query reads
+   (paged-attention of q[:, t], MLX's kernel on its GPU): [dense single]."
+  [c]
+  (let [[kp vp tables _ dn] (written c)
+        [b hq d] (array/shape (:q dn))
+        q (normal (+ 2000 (long (:seed c))) [b run-t hq d] (:dtype c))
+        rl (run-lens (:lens c))
+        out (array/paged-attention q kp vp tables (array/array rl {:dtype :int32}))
+        at (fn [x t] (array/reshape (array/slice x 1 t (inc t)) [b hq d]))]
+    (reduce (fn [[g1 g2] t]
+              (let [lt (mapv #(% t) rl)]
+                [(max g1 (max-diff (at out t) (reference (prefixes dn lt (at q t)) lt)))
+                 (max g2 (max-diff (at out t) (array/paged-attention (at q t) kp vp tables (array/array lt {:dtype :int32}))))]))
+            [0.0 0.0] (range run-t))))
+
+(def ^:private run-band
+  "max |Δ| between a run's composite and the dense sdpa (float64's or
+   float32's round-off, as attention-band), and the single-query reads
+   (on MLX's GPU its kernel: the kernel band's float32)."
+  {:dense (if (ts/jvm?) 1e-12 1e-5) :single (if (ts/jvm?) 1e-12 1e-5)})
+
+(def ^:private planted-run-bugs
+  {"the causal mask off by one (each query sees the next position)"
+   [#'paged/run-attention-composite
+    (fn [f] (fn [q kp vp tables lens opts] (f q kp vp tables (array/+ lens 1) opts)))]
+   "a run reading the next sequence's blocks"
+   [#'paged/run-attention-composite
+    (fn [f] (fn [q kp vp tables lens opts]
+              (let [n (first (array/shape tables))]
+                (f q kp vp (array/concatenate [(array/slice tables 0 1 n) (array/slice tables 0 0 1)] 0) lens opts))))]})
+
+(deftest a-run-is-its-queries-read-alone
+  (doseq [c cases]
+    (testing (pr-str (dissoc c :seed))
+      (let [[dense single] (run-gap c)]
+        (is (<= dense (:dense run-band)) "each sequence's dense sdpa, causal")
+        (is (<= single (:single run-band)) "the single-query reads"))))
+  (testing "planted bugs fail it"
+    (doseq [[label [v wrap]] planted-run-bugs]
+      (let [[dense single] (with-redefs-fn {v (wrap @v)} #(run-gap (first cases)))]
+        (is (< 0.1 dense) label)
+        (is (< 0.1 single) label))))
+  (testing "a run of one query is the single-query read"
+    (let [[kp vp tables lens dn] (written (first cases))
+          [b hq d] (array/shape (:q dn))]
+      (is (<= (max-diff (array/reshape (array/paged-attention (array/reshape (:q dn) [b 1 hq d]) kp vp tables (array/reshape lens [b 1]))
+                                       [b hq d])
+                        (array/paged-attention (:q dn) kp vp tables lens))
+              (:single run-band))))))
 
 ;; ---------------------------------------------------------------------------
 ;; 3. copy-blocks
@@ -409,10 +490,15 @@
     (is (= :invalid-args (reason #(array/paged-attention (normal 2 [2 3 16] :float32) kp vp tables lens))) "heads not a multiple")
     (is (= :invalid-args (reason #(array/paged-attention q kp vp (array/array [[0 1]] {:dtype :int32}) lens))) "a table short")
     (is (= :unknown-options (reason #(array/paged-attention q kp vp tables lens {:scales 1.0}))))
+    (is (= :invalid-args (reason #(array/paged-attention (array/reshape q [2 1 4 16]) kp vp tables lens))) "a run's lens [B], not [B T]")
+    (is (= :invalid-args (reason #(array/paged-attention (array/reshape q [1 2 4 16]) kp vp tables (array/array [[5 3]] {:dtype :int32}))))
+        "a run's tables not one a sequence")
     (is (= :invalid-args (reason #(array/copy-blocks kp (array/array [0] {:dtype :int32}) (array/array [1 2] {:dtype :int32})))))
     (when (ts/jvm?)
       (testing "values checked where readable"
         (is (= :invalid-args (reason #(array/paged-write kp vp k k (array/array [1 12] {:dtype :int32})))) "a slot past the pool")
         (is (= :repeated-indices (reason #(array/paged-write kp vp k k (array/array [6 6] {:dtype :int32})))) "a slot twice")
         (is (= :invalid-args (reason #(array/paged-attention q kp vp tables (array/array [9 3] {:dtype :int32})))) "a length past the table")
+        (is (= :invalid-args (reason #(array/paged-attention (array/reshape q [2 1 4 16]) kp vp tables (array/array [[9] [3]] {:dtype :int32}))))
+            "a run's length past the table")
         (is (= :invalid-args (reason #(array/paged-attention q kp vp (array/array [[0 3] [2 0]] {:dtype :int32}) lens))) "a block past the pool")))))

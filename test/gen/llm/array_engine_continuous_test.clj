@@ -287,6 +287,93 @@
         (br/dispose! [root a' b])))))
 
 ;; ---------------------------------------------------------------------------
+;; Several prompts in one forward (genclj-6qb6)
+;; ---------------------------------------------------------------------------
+
+(def ^:private prompts
+  "Prompts of 5, 7, 3, 8 and 12 tokens: in a budget of 40 tokens the
+   first's 5 make chunks of 8 rows, four of them (a power of 2) in one
+   forward, the last read in a forward of its own."
+  (mapv (fn [n i] (vec (take n (drop i (cycle [95 51 72 69 0 67 65 80 73 84 65 76 13 7 99 42])))))
+        [5 7 3 8 12] (range)))
+
+(defn- several-prompts
+  "The prompts read by slots-forward on e's slots 10 and on, in one
+   forward and then one for the rest, odd ones with their targets (each
+   token's next): [failures (against the forward) stats-delta]."
+  [e]
+  (let [reads (vec (map-indexed (fn [i p] {:slot (+ 10 i) :pos 0 :tokens p :targets (when (odd? i) (subvec p 1))}) prompts))
+        rest-of (fn [rd {:keys [read]}]
+                  (let [n (long read)]
+                    (when (< n (count (:tokens rd)))
+                      (assoc rd :pos n :tokens (subvec (:tokens rd) n)
+                             :targets (when-let [tg (:targets rd)] (subvec tg (min n (count tg))))))))
+        [d [r1 r2 rest-reads]]
+        (delta #(ae/stats e)
+               (fn [] (slots/call e (fn [s]
+                                      (let [r1 (slots/slots-forward s reads)
+                                            rest-reads (vec (keep identity (map rest-of reads r1)))
+                                            r2 (slots/slots-forward s rest-reads)]
+                                        (doseq [rd reads] (slots/slots-clear s (:slot rd)))
+                                        [r1 r2 rest-reads])))))
+        by-slot (zipmap (map :slot rest-reads) r2)]
+    [(vec (for [[i p rd r] (map vector (range) prompts reads r1)
+                :let [r' (by-slot (:slot rd))
+                      lp (or (:logprobs r') (:logprobs r))
+                      scores (into (vec (:scores r)) (:scores r'))]
+                failure (concat
+                         (when-not (<= (bc/max-diff (let [ctx p] (forward-row ctx)) lp 64) band)
+                           [(format "prompt %d's row: |Δ| %.3g" i (bc/max-diff (let [ctx p] (forward-row ctx)) lp 64))])
+                         (when (:targets rd)
+                           (if-not (= (count (:targets rd)) (count scores))
+                             [(format "prompt %d: %d scores" i (count scores))]
+                             (keep (fn [[j s]]
+                                     (let [ctx (subvec p 0 (inc j))
+                                           dd (Math/abs (- (double (aget (forward-row ctx) (int (p (inc j))))) (double s)))]
+                                       (when-not (<= dd band) (format "prompt %d's score %d: |Δ| %.3g" i j dd))))
+                                   (map-indexed vector scores)))))]
+            failure))
+     d]))
+
+(defn- rolled-chunks
+  "batch with its chunks' tables rolled by one: chunk i reading chunk
+   i + 1's blocks."
+  [{:keys [chunk] :as batch}]
+  (let [n (when chunk (first (array/shape chunk)))]
+    (if (and n (< 1 (long n)))
+      (assoc batch :chunk (array/concatenate [(array/slice chunk 0 1 n) (array/slice chunk 0 0 1)] 0))
+      batch)))
+
+(def ^:private planted-chunk-bugs
+  "Mutations of a forward's chunks, each failing several-prompts."
+  {"a chunk's tokens written at the wrong offsets (its slots reversed)"
+   {#'paged/prepare (let [f paged/prepare]
+                      (fn [a s ^long n ^long bs]
+                        (let [[a s' slots copies] (f a s n bs)]
+                          [a s' (if (< 1 n) (vec (reverse slots)) slots) copies])))}
+   "a chunk reading the next chunk's blocks"
+   {#'qwen3/compile-paged-batch-step
+    (let [compile-step qwen3/compile-paged-batch-step]
+      (fn [m opts]
+        (let [f (compile-step m opts)]
+          (fn [pools batch] (f pools (rolled-chunks batch))))))}})
+
+(deftest several-prompts-share-a-forward
+  (with-open [e (engine {:n-batch 40})]
+    (let [[failures d] (several-prompts e)]
+      (is (= [] failures))
+      (is (= 2 (:forwards d)) (pr-str d))
+      (is (= 5 (:chunks d)) "four chunks in the first forward (a power of 2), the last prompt in the second")
+      (is (zero? (:live (br/info e))))))
+  (testing "planted bugs fail it"
+    (doseq [[what redefs] planted-chunk-bugs]
+      (testing what
+        (is (seq (with-redefs-fn redefs
+                   #(with-open [e (engine {:n-batch 40})]
+                      (try (first (several-prompts e))
+                           (catch Throwable t [(str "threw " (ex-message t))]))))))))))
+
+;; ---------------------------------------------------------------------------
 ;; One caller
 ;; ---------------------------------------------------------------------------
 
