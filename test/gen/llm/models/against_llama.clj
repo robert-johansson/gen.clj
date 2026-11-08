@@ -213,16 +213,58 @@
   "(f), a forward of a qwen35 model at the positions positions (one a row
    of its tokens), each of its mixture-of-experts layers' top k the
    experts' (position → layer → indices, reference's :experts), weighted
-   by the model's own router; (f) when experts is nil."
+   by the model's own router; (f) when experts is nil. A layer's indices
+   nil at a position (llama.cpp's last layer computes only the rows whose
+   logits a decode reads) leave the model's own there: that row feeds no
+   logits read. A position whose experts are not one per layer of the
+   forward, or not k a layer, is a loud error."
   [experts positions f]
   (if-not experts
     (f)
-    (let [layer (atom -1)]
-      (with-redefs-fn {#'qwen35/top-k (fn [p _k]
-                                        (let [l (swap! layer inc)
-                                              idx (array/array (mapv #(get-in experts [% l]) positions) {:dtype :int32})]
-                                          [idx (array/take-along-axis p idx -1)]))}
-        f))))
+    (let [layer (atom -1)
+          out (with-redefs-fn
+                {#'qwen35/top-k (fn [p k]
+                                  (let [l (swap! layer inc)
+                                        rows (mapv #(get-in experts [% l]) positions)
+                                        k (long k)]
+                                    (when-let [bad (first (remove #(or (nil? %) (== k (count %))) rows))]
+                                      (throw (ex-info (str "forced experts " bad " at layer " l " are not " k)
+                                                      {:layer l :experts bad :k k})))
+                                    (if (every? some? rows)
+                                      (let [idx (array/array rows {:dtype :int32})]
+                                        [idx (array/take-along-axis p idx -1)])
+                                      (let [[own] (top-k p k)
+                                            forced? (array/array (mapv some? rows) {:dtype :bool})
+                                            idx (array/where (array/expand-dims forced? -1)
+                                                             (array/array (mapv #(or % (vec (repeat k 0))) rows) {:dtype :int32})
+                                                             own)]
+                                        [idx (array/take-along-axis p idx -1)]))))}
+                f)
+          layers (inc (long @layer))]
+      (when-let [p (first (remove #(== layers (count (get experts %))) positions))]
+        (throw (ex-info (str "the forced experts at position " p " are of " (count (get experts p))
+                             " layers, the forward's " layers)
+                        {:position p :layers layers :forced (count (get experts p))})))
+      out)))
+
+(defn- llama-recording?
+  "Does the Branching engine e record llama.cpp's experts (gen.llm.llama's
+   :record of ffn_moe_topk)?"
+  [e]
+  (contains? (:record (br/info e)) "ffn_moe_topk"))
+
+(defn- llama-experts
+  "The experts llama.cpp's engine e recorded since the last call
+   (gen.llm.llama's recorded and experts), the decodes of one chain of
+   branches: [position [layer [k indices], nil where its layer computed
+   no row]]."
+  [e]
+  (let [by-slot ((requiring-resolve 'gen.llm.llama/experts) ((requiring-resolve 'gen.llm.llama/recorded) e))
+        by-pos (apply merge (vals by-slot))]
+    (when (seq by-pos)
+      (when-not (= (sort (keys by-pos)) (range (count by-pos)))
+        (throw (ex-info "llama.cpp's recorded experts are not of positions 0 to n" {:positions (sort (keys by-pos))})))
+      (mapv by-pos (range (count by-pos))))))
 
 (defn reference
   "The readings of the reference ref on the prompt's tokens (a vector of
@@ -234,7 +276,10 @@
    hold :experts too, the experts its layers' top k picked at each
    position (the prompt's, then the steps' tokens'): [position [layer [k
    indices]]], which compare-readings can force on the forward under test
-   (genclj-fxag)."
+   (genclj-fxag). So do llama.cpp's, from an engine recording its experts
+   (gen.llm.llama's :record #{\"ffn_moe_topk\"}, through its eval
+   callback): its last layer's nil but at the positions read (the
+   prompt's last, the steps')."
   [ref tokens steps]
   (if (map? ref)
     (array/with-backend (model-backend ref)
@@ -249,12 +294,15 @@
                   lp' (logprobs lg)]
               (recur (inc i) c' lp' (cond-> (update out :steps conj [t lp'])
                                       moe? (update :experts into ex))))))))
-    (let [root (br/open ref tokens)]
+    (let [record? (llama-recording? ref)
+          _ (when record? (llama-experts ref))
+          root (br/open ref tokens)]
       (try
         (let [lp (br/logprobs root)]
           (loop [i 1 b (br/fork root) lp lp out {:tokens tokens :root lp :steps []}]
             (if (> i steps)
-              (do (br/dispose! b) out)
+              (do (br/dispose! b)
+                  (cond-> out record? (assoc :experts (llama-experts ref))))
               (let [t (first (top-tokens lp 1))
                     [b'] (br/advance [b] [t])
                     lp' (br/logprobs b')]
