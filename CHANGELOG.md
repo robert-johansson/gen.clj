@@ -48,7 +48,8 @@ other values for the same key, from the same distribution.
   2^24 comparisons (a prefill chunk of over 256 tokens) still pick. The
   same indices and values: no draw changes. Qwen3.6-35B-A3B Q4_K_M in
   float16 on fenrir's RTX PRO 6000, tokens/s: batch-1 decode 47.9 → 79.6,
-  16 rows 488 → 612 (llama.cpp 210 and 982).
+  16 rows 488 → 612 (llama.cpp 210 and 982), 8 clients of the continuous
+  mode 124 → 150 (llama.cpp 161).
 - **Added (experimental): token SMC and completions read the LM's rows
   lent, and an LM forks a step's parents in one call** (genclj-4acj).
   `gen.llm.lm/batch-next-logprobs-lent` gives an LM's rows without
