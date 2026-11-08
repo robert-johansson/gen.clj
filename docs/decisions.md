@@ -6494,3 +6494,76 @@ optional protocol ICaching.
    16 GB Mac the limit is 1 GB, so its steps would likely miss the cache even
    without the warm-up. Unmeasured; whether ram/16 should change is the
    owner's call.
+
+### The Qwen3.6 MoE on the MacBook's Metal
+
+(The owner's request, 2026-11-08; the MoE's Metal band, PROVISIONAL, and the
+check's form, the owner's: the loose band now, forced experts next;
+genclj-h80d's MacBook)
+
+**It runs** on the MacBook (M2 Max, 64 GB) under a memory guard.
+- **What it needed:**
+  - the owner's big apps closed;
+  - -Xmx8g (the JVM's default heap, a quarter of RAM, let garbage grow
+    16 GB during the load);
+  - llama.cpp's readings to EDN in one JVM and ours in a second, never both
+    resident (`gen.bench.readings-out/-in`; qwen35-llama-test closes
+    llama.cpp before loading ours);
+  - a guard that tolerates pressure "warn" for up to 30 s at a time (the
+    owner's call).
+- **Why "warn" fired:** macOS compressed the just-loaded model rather than
+  drop the 23 GB of clean, cached GGUF pages. The pressure went to "warn"
+  while 41% was still free.
+- **The model is 28.4 GB in MLX:** Q4_K at 6 bits a value (4-bit words, and a
+  float32 scale and bias per group of 32), 24.5 GB.
+
+**The band on Metal.** Our float32 forward against llama.cpp's Metal build:
+- general prompts: max 0.78, median 1.8e-3, argmax equal in 199 of 200;
+- digit prompts: max 5.85, median 0.17–0.24.
+llama.cpp's own spread on this file is 2.65 and 7.11. The rule gives 11.7
+for Metal K-quants, which is set. qwen35-llama-test passes on the MoE.
+- Planted errors, least / median over the general prompts: RoPE's pairs
+  0.16 / 0.48, the conv state's oldest 2.34 / 5.81, KV tiled 2.65 / 4.52,
+  the router not renormalized 2.89 / 6.13, the rest at least 7.2. Most fit
+  inside 11.7, as off the Mac.
+- **Tie-free readings** (the noise bench's docstring has the tables), where
+  our router's least margin over the forward is at least θ:
+  - θ 2e-4 keeps 7 of 20 general prompts and 1 of 20 digit prompts, all
+    within 0.047, and every planted error fails a band of 0.1 (RoPE's by
+    1.6×);
+  - θ 1e-4 keeps more, but a digit reading jumps 3.77;
+  - at θ 3e-4 and above only whole reads stay, which can't see cached-read
+    errors.
+  - Not taken (the owner): a tie-free check in the test.
+- **Next (the owner): forced experts against llama.cpp,** llama.cpp's choices
+  read through its eval callback (genclj, moeforce).
+
+**Speed against llama.cpp's Metal build** (tokens/s, float32 → float16,
+2–3 JVMs):
+
+| | Ours | llama.cpp |
+|---|---|---|
+| Decode, batch 1 | 35.9–36.5 → 39.4–39.5 | 48.3–49.1 |
+| Decode, 16 rows | 172–215 → 176–225 | 174 |
+| SMC 16, paged | 544–548 → 621–622 | 653–656 |
+| 8 continuous clients | 99–111 → 93–118 | 47.8 |
+| 8 clients, read p90 | 55–61 → 50–64 ms | 161 ms |
+
+Open takes 14–30 s, with 0 traces after. MLX's peak is 30.7–32.2 GB in
+float32 and 33.7 GB in float16, which loads in float32 and then casts.
+
+**float16 on Metal:** 12.9% of top-k sets flip. Forced to float32's experts,
+the gap is within 0.040 (general) and 0.278 (digits). The NLL is
+−0.0025 ± 0.0015 nats from float32's. As on CUDA, float16 would be sound
+for the MoE.
+
+**For the owner:**
+1. **The Mac's default for the MoE** stays float32 for now (the agent's
+   recommendation): float16 loads at a higher peak (33.7 against 30.7 GB).
+   Alternatives: float16 now (about 13% faster SMC, equal NLL); float16
+   after the loader casts at load.
+2. **The loader's memory on Macs** (later work):
+   - cap the heap, or document -Xmx8g for big models;
+   - cast at load;
+   - read the GGUF with F_NOCACHE so it doesn't sit in the file cache.
+3. array-engine-bench prints its tables by engine, not by section.
