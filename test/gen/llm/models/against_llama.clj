@@ -101,6 +101,23 @@
       (cond (and qwen35? k?) 11.7 qwen35? 0.035 k? 0.47 :else 0.075)
       (cond (and qwen35? k?) 12.3 qwen35? 7.1 :else 2.4))))
 
+(defn forced-band
+  "The band of the forward against llama.cpp with llama.cpp's experts
+   forced on it (compare-readings' :forced, the readings of an engine
+   recording them: reference's :experts) on the mixture of experts at
+   path, per platform as band's: twice the largest |Δ log p| that
+   bench/gen/qwen3_llama_noise.clj measured forced, rounded up; band's
+   where unmeasured (every other model). qwen35-llama-test's docstring
+   gives the measurements.
+   - On Metal: 0.16 on K-quants (Qwen3.6-35B-A3B's Q4_K experts, the
+     MacBook M2 Max, 2026-11-08: 6.4e-3 on the general prompts, 8.0e-2 on
+     the digits; unforced 0.97 and 5.97).
+   - Elsewhere: unmeasured (band's)."
+  [path]
+  (if (and (= "qwen35moe" (architecture path)) (k-quants? path) (.startsWith (System/getProperty "os.name") "Mac"))
+    0.16
+    (band path)))
+
 (def ^:private sdpa array/sdpa)
 (def ^:private rope array/rope)
 (def ^:private rms-norm array/rms-norm)

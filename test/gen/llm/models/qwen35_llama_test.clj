@@ -109,6 +109,7 @@
    top k not renormalized 2.78 and 6.08; the shared expert ungated 7.18
    and 13.8."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
+            [gen.llm.branching :as br]
             [gen.llm.models.against-llama :as against]
             [gen.llm.models.qwen35 :as qwen35]
             [gen.test-support :as ts]))
@@ -120,6 +121,11 @@
   ;; Per platform and quantization, from the measurements above
   ;; (against-llama/band); 0 without a test model (the tests skip)
   (if (and model-path (.isFile (java.io.File. ^String model-path))) (against/band model-path) 0.0))
+
+(def ^:private forced-band
+  ;; The band with llama.cpp's experts forced on a mixture of experts
+  ;; (against-llama/forced-band); 0 without a test model
+  (if (and model-path (.isFile (java.io.File. ^String model-path))) (against/forced-band model-path) 0.0))
 
 (def ^:private mutation-nats
   "What a planted convention error must exceed, on every platform:
@@ -175,16 +181,25 @@
    (apply str (repeat 6 (str "A recurrent layer keeps a state of fixed size, which each token decays, "
                              "corrects and reads; attention keeps every token. ")))])
 
+(defn- experts?
+  "Is the GGUF file at path a mixture of experts (its architecture's
+   expert_count)?"
+  [path]
+  (let [md (:metadata ((requiring-resolve 'gen.array.gguf/header) path))]
+    (pos? (long (or (get md (str (get md "general.architecture") ".expert_count")) 0)))))
+
 (defn- setup
   "[readings model]: llama.cpp's readings of each of prompts
    (against-llama/reference's, 4 greedy steps) and the forward's model, of
-   the test model, made once. llama.cpp's engine is closed before the
-   model loads, so that the two are never in memory at once (on
-   Qwen3.6-35B-A3B 21 and 28 GB, more than a 64 GB Mac holds beside its
-   own)."
+   the test model, made once; on a mixture of experts with llama.cpp's
+   experts (:experts, its engine recording them). llama.cpp's engine is
+   closed before the model loads, so that the two are never in memory at
+   once (on Qwen3.6-35B-A3B 21 and 28 GB, more than a 64 GB Mac holds
+   beside its own)."
   []
   (or @shared
-      (let [rs (with-open [^java.io.Closeable e ((llama 'engine) {:model model-path :max-branches 4 :n-ctx 1024})]
+      (let [rs (with-open [^java.io.Closeable e ((llama 'engine) (cond-> {:model model-path :max-branches 4 :n-ctx 1024}
+                                                                   (experts? model-path) (assoc :record #{"ffn_moe_topk"})))]
                  (mapv #(against/reference e ((llama 'tokenize) e %) 4) prompts))]
         (reset! shared [rs (qwen35/load model-path)]))))
 
@@ -229,6 +244,12 @@
               (is top5? (str what ": the top 5")))
             (is (< mutation-nats (against/mutated e m tokens :value-heads-grouped)) "the value heads grouped"))))))))
 
+(defn- forced
+  "Readings r with llama.cpp's experts forced on the forward
+   (compare-readings' :forced)."
+  [r]
+  (assoc r :forced (:experts r)))
+
 (deftest log-probabilities-are-llama-cpp-s
   (when-qwen35
     (let [[rs m] (setup)]
@@ -237,11 +258,127 @@
           (doseq [{:keys [what max-diff argmax? top5?]} (against/compare-readings m r band)]
             (is (<= max-diff band) (str what ": |Δ log p| " max-diff))
             (is argmax? (str what ": the argmax"))
-            (is top5? (str what ": the top 5"))))))))
+            (is top5? (str what ": the top 5")))
+          (when (:experts r)
+            (testing ", llama.cpp's experts forced"
+              (doseq [{:keys [what max-diff argmax? top5?]} (against/compare-readings m (forced r) forced-band)]
+                (is (<= max-diff forced-band) (str what ": |Δ log p| " max-diff))
+                (is argmax? (str what ": the argmax"))
+                (is top5? (str what ": the top 5"))))))))))
 
 (deftest planted-convention-errors-fail-by-nats
   (when-qwen35
     (let [[rs m] (setup)
           readings (nth rs 3)]
       (doseq [mutation (sort (keys (against/mutations-of m)))]
-        (is (< mutation-nats (against/mutated m readings mutation)) (name mutation))))))
+        (is (< mutation-nats (against/mutated m readings mutation)) (name mutation))
+        (when (:experts readings)
+          (is (< forced-band (against/mutated m (forced readings) mutation))
+              (str (name mutation) ", llama.cpp's experts forced")))))))
+
+;; ---------------------------------------------------------------------------
+;; llama.cpp's experts (gen.llm.llama's :record, its eval callback) forced
+;; on the tiny MoE (opt-in, as above)
+;; ---------------------------------------------------------------------------
+
+(def ^:private forced-vocab-band
+  "The tiny MoE's band with llama.cpp's experts forced: 0.04, twice the
+   largest |Δ log p| (1.9e-2, rounded up) measured on Metal (Mac mini M4,
+   2026-11-08) over vocab-prompts, F32 and Q8_0, each read whole, as a
+   chunk and through 8 steps; unforced the largest is 2.3e-2 (a routing
+   flip on the Q8_0's 44 tokens, forced 1.2e-2). Random weights: the
+   rest of the gap is not the routing's. llama.cpp's readings recording
+   its experts are within 2.2e-4 of its readings without (the callback
+   computes the graph in pieces)."
+  0.04)
+
+(defn- layer-off
+  "A planted bug: each layer the experts of the layer before (the first
+   the last's)."
+  [experts]
+  (mapv (fn [ls] (into [(peek ls)] (pop ls))) experts))
+
+(defn- position-off
+  "A planted bug: each position the experts of the next (the last the
+   first's)."
+  [experts]
+  (conj (vec (rest experts)) (first experts)))
+
+(def ^:private moe-vocab-models ["qwen35moe-vocab-f32" "qwen35moe-vocab-q8_0"])
+
+(deftest llama-cpp-s-experts-forced-agree-tightly
+  ;; the planted bugs measured 7.1 to 8.8 nats (one layer off) and 8.3 to
+  ;; 10.0 (one position off) on Metal, 2026-11-08
+  (if (nil? vocab-models)
+    (println "gen.llm.models.qwen35-llama-test: llama.cpp's experts are forced on the tiny MoE given"
+             "-J-Dgen.qwen35.vocab-models=<dir> (test/fixtures/gguf/generate.py --with-vocabulary)")
+    (ts/when-native :llama vocab-models?
+      (doseq [f moe-vocab-models
+              :let [path (str vocab-models "/" f ".gguf")
+                    m (qwen35/load path)]]
+        (with-open [^java.io.Closeable e ((llama 'engine) {:model path :max-branches 4 :n-ctx 1024
+                                                           :record #{"ffn_moe_topk"}})]
+          (doseq [text vocab-prompts
+                  :let [tokens ((llama 'tokenize) e text)
+                        n (count tokens)
+                        r (against/reference e tokens 4)
+                        worst (fn [ex] (reduce max (map :max-diff (against/compare-readings m (assoc r :forced ex) 0))))]]
+            (testing (str f ", " n " tokens")
+              (is (= (+ n 4) (count (:experts r))) "the experts of the prompt's positions and the 4 steps'")
+              (is (every? #(= 4 (count %)) (:experts r)) "of each of the 4 layers")
+              (is (= (+ 4 1) (count (keep peek (:experts r))))
+                  "the last layer's only where logits are read: the prompt's last position, each step's")
+              (doseq [{:keys [what max-diff argmax? top5?]} (against/compare-readings m (forced r) forced-vocab-band)]
+                (is (<= max-diff forced-vocab-band) (str what ": |Δ log p| " max-diff))
+                (is argmax? (str what ": the argmax"))
+                (is top5? (str what ": the top 5")))
+              (is (< mutation-nats (worst (layer-off (:experts r)))) "the experts read one layer off")
+              (is (< mutation-nats (worst (position-off (:experts r)))) "the experts read one position off"))))))))
+
+(defn- router-top-k?
+  "Are indices (llama.cpp's ffn_moe_topk row) the k most probable of
+   probs (its ffn_moe_probs row): k distinct indices whose probabilities
+   do not increase, none below another expert's?"
+  [indices probs]
+  (let [ps (mapv #(nth probs %) indices)
+        others (keep-indexed (fn [i p] (when-not (some #{i} indices) p)) probs)]
+    (and (apply distinct? indices)
+         (apply >= ps)
+         (every? #(<= % (peek ps)) others))))
+
+(deftest recorded-experts-are-the-router-s-top-k
+  ;; the callback's own check: each layer's recorded top k, at each
+  ;; position, is the top k of the router's probabilities recorded beside
+  ;; it (ffn_moe_probs, F32, every expert's); with the next layer's
+  ;; probabilities (a planted bug: the tensors' layers mixed up) it fails
+  (if (nil? vocab-models)
+    (println "gen.llm.models.qwen35-llama-test: llama.cpp's recorded experts are checked given"
+             "-J-Dgen.qwen35.vocab-models=<dir>")
+    (ts/when-native :llama vocab-models?
+      (doseq [f moe-vocab-models
+              :let [path (str vocab-models "/" f ".gguf")]]
+        (with-open [^java.io.Closeable e ((llama 'engine) {:model path :max-branches 4 :n-ctx 1024
+                                                           :record #{"ffn_moe_topk" "ffn_moe_probs"}})]
+          (let [tokens ((llama 'tokenize) e (nth prompts 3))
+                root (br/open e tokens)
+                [b] (br/advance [(br/fork root)] [11])
+                ds ((llama 'recorded) e)
+                pairs (for [{:keys [tensors]} ds
+                            [l rows] (get tensors "ffn_moe_topk")
+                            [p idx] rows]
+                        [l p idx])
+                probs (fn [d l p] (get-in d [:tensors "ffn_moe_probs" l p]))
+                check (fn [shift] (for [d ds
+                                        [l rows] (get-in d [:tensors "ffn_moe_topk"])
+                                        :let [l' (mod (+ l shift) 4)]
+                                        [p idx] rows
+                                        :when (probs d l' p)]
+                                    (router-top-k? idx (probs d l' p))))]
+            (testing f
+              (is (= 2 (count ds)) "the prompt and the step")
+              (is (< 100 (count pairs)))
+              (is (every? (fn [[_ _ idx]] (= 2 (count idx))) pairs) "2 experts a position")
+              (is (every? true? (check 0)) "each recorded top k is the router's")
+              (is (some false? (check 1)) "the next layer's probabilities are not"))
+            (br/dispose! b)
+            (br/dispose! root)))))))
