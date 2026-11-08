@@ -1428,27 +1428,18 @@
   [path]
   (boolean (some #(or (gguf/quantized? %) (= :q6_k %)) (map :type (mapcat :tensors (gguf/headers path))))))
 
-(defn- experts-file?
-  "Is the GGUF model at path a mixture of experts (its architecture's
-   expert_count positive)?"
-  [path]
-  (let [m (:metadata (gguf/header path))]
-    (pos? (long (or (get m (str (get m "general.architecture") ".expert_count")) 0)))))
-
 (defn- default-dtype
   "Checked opts, with :dtype :float16 where the engine loads a GGUF file of
-   quantized weights on MLX's CUDA (backend b), not a mixture of experts,
-   and no :dtype is given (the owner's call, 2026-11-08: MLX's fast
-   quantized products on CUDA take half floats only, and every lead over
-   llama.cpp there was measured in float16); as given elsewhere. A mixture
-   of experts stays float32 (the owner, 2026-11-08): in float16 the
-   Qwen3.6 MoE's next-token log-probabilities are 0.17-0.58 nats from
-   float32's at the median and 6.07 at most, the dense models' about
-   0.02 (gen.llm.models.cuda-reference-test; genclj-fxag looks at its
-   routing)."
+   quantized weights on MLX's CUDA (backend b) and no :dtype is given (the
+   owner's call, 2026-11-08: MLX's fast quantized products on CUDA take
+   half floats only, and every lead over llama.cpp there was measured in
+   float16); as given elsewhere. A mixture of experts too (the owner,
+   2026-11-08, after genclj-fxag): in float16 its distance from the
+   float32 forward is its router's flips at near-ties (forced to the same
+   experts, a median of 0.015 nats, the dense models' level), and its NLL
+   is float32's (-0.004 +- 0.002 nats a token over 4,080)."
   [{:keys [model dtype] :as opts} b]
-  (if (and (nil? dtype) (string? model) (= :cuda (array/device b)) (quantized-file? model)
-           (not (experts-file? model)))
+  (if (and (nil? dtype) (string? model) (= :cuda (array/device b)) (quantized-file? model))
     (assoc opts :dtype :float16)
     opts))
 

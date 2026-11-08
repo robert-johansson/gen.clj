@@ -6358,3 +6358,65 @@ largest gap over the 20 general and 20 digit prompts
 - 8 clients, continuous, after 6 warm runs: the 0.6B 718 (llama.cpp 504), the
   MoE 135 (162). With one warm run the 0.6B gave 251, its forwards still
   compiling; that was before shapes' open-time compile, merged beside it.
+
+### The MoE in float16: its routing flips; the carve-out lifted
+
+(The owner, 2026-11-08 afternoon: the carve-out lifted, the float32 router
+and the forced reference checks kept; genclj-fxag)
+
+**The routing flips were the whole gap.** bench/gen/moe_routing.clj compares
+each layer's top-k sets with MLX's CPU in float32, over 40 prompts, 1,246
+positions and 40 layers.
+- **CUDA float32:** 10 of 49,840 sets differ (0.02%), at 4 positions, all in
+  the two outlier prompts. Each starts at a near-tie (log p8/p9 of 4.8e-7
+  and 3.1e-4), and the other flips follow from it. With the CPU's experts
+  forced, every position is within 5.4e-4.
+- **CUDA float16, router in float16:** 14.5% of sets differ, from 1.2% in
+  layer 0 to about 20% from layer 20; 78% of positions have a flip. The gap
+  tracks the flips: by the number of flips at a position (0, 1, 2, 3 or
+  more), the medians are 0.03, 0.11, 0.21 and 0.33 nats.
+- **Forcing the CPU's experts** into the float16 forward brings it within
+  0.24, median 0.015: the dense models' level.
+
+**The float32 router (kept).** In half precision, qwen35's router computes in
+float32: ffn_gate_inp kept F32 as the file has it, the normed x cast up
+(router-dtype, router-logits).
+- It halves the flips the router's own rounding causes (1.9% → 1.0%). The
+  total only falls from 14.5% to 11.6%, because the rest come from the
+  float16 hidden state and cascade. The reference statistic's median falls
+  from 0.17–0.58 to 0.12–0.36; the largest stays about 6.
+- It costs nothing measurable in speed. It changes MoE draws in float16 and
+  bfloat16 (a CHANGELOG Draws line).
+- qwen35-test's a-half-float-router-computes-in-float32 covers it. Planted
+  bugs: router-dtype returning the model's dtype fails 3 checks; the product
+  in float16 fails 2.
+
+**Quality is float32's.** Over 4,080 tokens (bench/gen/moe_nll.clj), the
+NLL in float16 minus float32's is −0.0039 ± 0.0020 nats a token
+(−0.0025 ± 0.0014 with the old router).
+
+**The carve-out is lifted (the owner).** MoE models get the float16 default
+on CUDA like dense ones; `:dtype :float32` stays available. Measured on
+fenrir, tokens/s:
+
+| | float16 | float32 | llama.cpp |
+|---|---:|---:|---:|
+| 8 continuous clients | 171 | 118 | 161 |
+| Batch 1, continuous | 52 | 38 | 139 |
+| Batch 1, paged | 59 | 49 | |
+
+**The reference checks force the experts (kept, beside the unforced).** A
+mixture of experts' reference readings record its experts, and
+compare-readings forces them when the readings carry `:forced`.
+- cuda-reference-test forces the CPU's experts on an MoE in both dtypes. The
+  bands fall from 0.80 to 1.1e-3 (float32) and from 12.2 to 0.35 (float16).
+- Every planted error fails both. The weakest, RoPE's pairs, is 0.897 in
+  float32 (at least 7.5e-3 on every prompt) and 0.899 in float16. So the
+  half-precision default is now checked tightly too.
+- qwen35-test's a-read-with-the-reference-s-experts-is-its-own: exact on the
+  JVM backend; a planted bug (the next position's experts forced) misses by
+  4.63.
+
+**The MoE's open cost** (the ~20 s model load included): paged 28 s, its 27
+shapes compiled in 7.3 s (float16) or 8.4 s (float32); continuous 34–40 s,
+its 34 shapes in 10–18.5 s. No traces after open, so the set stays as it is.

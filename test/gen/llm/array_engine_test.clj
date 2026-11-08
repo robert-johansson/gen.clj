@@ -339,9 +339,9 @@
       (is (= :float16 (default :cuda {:model q4-k-m})) "K-quants")
       (is (= :float16 (default :cuda {:model split})) "a split's files")
       (is (= :float16 (default :cuda {:model "test/fixtures/gguf/qwen35-tiny-q8_0.gguf"})) "Qwen3.5, dense")
-      ;; the owner's call (2026-11-08): a mixture of experts stays float32
-      ;; (planted: experts-file? always false makes this nil :float16)
-      (is (nil? (default :cuda {:model "test/fixtures/gguf/qwen35moe-tiny-q8_0.gguf"})) "a mixture of experts")
+      ;; a mixture of experts too (the owner's call, 2026-11-08, after
+      ;; genclj-fxag)
+      (is (= :float16 (default :cuda {:model "test/fixtures/gguf/qwen35moe-tiny-q8_0.gguf"})) "a mixture of experts")
       (is (nil? (default :cuda {:model (:f32 files)})) "F32")
       (is (nil? (default :cuda {:model "test/fixtures/gguf/qwen3-small-f16.gguf"})) "F16")
       (is (= :float32 (default :cuda {:model (:q8_0 files) :dtype :float32})) "a :dtype given")

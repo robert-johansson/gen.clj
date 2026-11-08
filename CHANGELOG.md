@@ -92,9 +92,10 @@ other values for the same key, from the same distribution.
   2026-11-08; **Draws**, on CUDA). `gen.llm.array-engine/engine` given a
   GGUF file whose weights are quantized (Q8_0, Q4_0/1, Q5_0/1, K-quants)
   and no `:dtype` loads it in float16 on MLX's CUDA backend, where it
-  loaded it in the backend's default float (float32). A mixture of
-  experts (its architecture's `expert_count` positive) stays float32
-  (the owner's call, 2026-11-08, from the MoE's distance below). MLX's fast
+  loaded it in the backend's default float (float32), a mixture of
+  experts included (the owner's call, 2026-11-08, after genclj-fxag: the
+  MoE's distance below is its router's flips at near-ties, and its NLL
+  in float16 is float32's). MLX's fast
   quantized products on CUDA (qmm_sm80) take half floats only, and every
   lead over llama.cpp on NVIDIA was measured in float16. Unchanged: an
   explicit `:dtype`, an unquantized file, a model passed loaded (GRPO's
