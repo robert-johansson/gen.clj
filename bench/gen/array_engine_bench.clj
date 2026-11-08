@@ -112,6 +112,7 @@
    :particles (long-prop "particles" 16)
    :smc-tokens (long-prop "smc-tokens" 32)
    :runs (long-prop "runs" 3)
+   :warm-runs (long-prop "warm-runs" 1)
    :block (long-prop "block" 64)
    :dtype (keyword (prop "dtype" "float32"))
    :sections (set (map keyword (str/split (prop "sections" "decode,smc") #",")))
@@ -210,10 +211,13 @@
 
 (defn- clients-rows
   "The clients (or lone) rows of an engine: the median wall time of
-   (:runs settings) runs after an untimed one, and the latencies of every
-   timed run's reads."
+   (:runs settings) runs after gen.bench.warm-runs (1) untimed ones, and
+   the latencies of every timed run's reads. A continuous engine traces a
+   mixed forward (decode rows and a chunk) per new shape, which the
+   clients' timing picks: on Qwen3.6-35B-A3B (fenrir, 2026-11-08,
+   genclj-p0ad) 200-375 ms each, 25 in 4 runs, so its first runs stall."
   [label e tok prompt n]
-  (client-run e tok prompt n)
+  (dotimes [_ (:warm-runs settings)] (client-run e tok prompt n))
   (let [runs (repeatedly (:runs settings) #(client-run e tok prompt n))
         ms (nth (sort (map first runs)) (quot (count runs) 2))
         lat (mapcat second runs)]
