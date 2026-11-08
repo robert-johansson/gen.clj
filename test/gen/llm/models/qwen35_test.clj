@@ -406,6 +406,80 @@
     (is (every? #(<= % band) (read-with (:experts r))) "the reference's experts")
     (is (< 0.5 (reduce max (read-with one-off))) "experts one off (a planted bug)")))
 
+(deftest fewer-kernels-are-the-old-forms
+  ;; genclj-yesw: the decode step's forms that make fewer kernels on MLX
+  ;; equal the forms they replaced, value for value (pure data movement
+  ;; and the same elementwise ops), on every backend:
+  ;; - the key heads tiled by one broadcast's copy, not a concatenation of
+  ;;   the repeats; and under a half float, cast before tiling is cast
+  ;;   after it;
+  ;; - the query's and key's heads l2-normed in one norm, not two;
+  ;; - the attention's output times sigmoid of its gate read in place in
+  ;;   the projection, not made whole first: for a paged step's [R heads
+  ;;   head-dim] output and a chunk's [B T heads head-dim] (sdpa's,
+  ;;   transposed).
+  ;; Planted bugs in the new forms fail it (on the JVM backend): the heads
+  ;; repeated grouped (each key head's repeats together, the GQA order)
+  ;; 6 checks; the query and key swapped 2; the gate unsquashed (no
+  ;; sigmoid) 2. Each case also tells a planted bug in the old form apart
+  ;; from the new.
+  (let [tiled @#'qwen35/key-heads-tiled
+        gated @#'qwen35/gated
+        query-and-gate @#'qwen35/query-and-gate
+        concatenated (fn [y hv] (array/concatenate (vec (repeat (quot (long hv) (long (nth (array/shape y) 2))) y)) 2))
+        grouped (fn [y hv] (let [[b t hk d] (array/shape y)]
+                             (array/reshape (array/broadcast-to (array/expand-dims y 3) [b t hk (quot (long hv) (long hk)) d])
+                                            [b t hv d])))]
+    (testing "the key heads tiled"
+      (doseq [[i hv] [[1 4] [2 6]]]
+        (let [y (rng/normal (rng/key i) [2 3 2 8])]
+          (is (= (host (concatenated y hv)) (host (tiled y hv))) (str hv " value heads"))
+          (is (not= (host (grouped y hv)) (host (tiled y hv))) "the grouped order is told apart")))
+      (when-not (ts/jvm?)
+        (let [y (array/astype (rng/normal (rng/key 3) [2 1 2 8]) :float16)]
+          (is (= (host (array/astype (concatenated y 4) :float32)) (host (tiled (array/astype y :float32) 4)))
+              "a half float cast before tiling"))))
+    (testing "the query and key normed at once"
+      (let [query-and-key @#'qwen35/query-and-key
+            l2-norm @#'qwen35/l2-norm
+            {:keys [eps delta-key-heads delta-value-heads delta-key-dim] :as cfg} (:config (:moe-f32 @models))
+            [hk hv dk] [delta-key-heads delta-value-heads delta-key-dim]
+            width (* hk dk)
+            mixed (rng/normal (rng/key 8) [2 3 (+ (* 2 width) 64)])
+            heads (fn [from to] (array/reshape (array/slice mixed 2 from to) [2 3 hk dk]))
+            old-q (array/* (concatenated (l2-norm (heads 0 width) eps) hv) (/ 1.0 (Math/sqrt dk)))
+            old-k (concatenated (l2-norm (heads width (* 2 width)) eps) hv)
+            [q k] (query-and-key cfg mixed (array/dtype mixed))]
+        (is (= (host old-q) (host q)) "q")
+        (is (= (host old-k) (host k)) "k")
+        (is (not= (host old-k) (host (concatenated (array/reshape (l2-norm (array/reshape (heads width (* 2 width)) [2 3 1 (* hk dk)]) eps)
+                                                                   [2 3 hk dk])
+                                                   hv)))
+            "the key's heads normed as one are told apart")
+        (when-not (ts/jvm?)
+          ;; a half-float model's: normed and scaled in float16, then cast
+          ;; to the rule's float32 (the old form cast after tiling)
+          (let [m16 (array/astype mixed :float16)
+                heads16 (fn [from to] (array/reshape (array/slice m16 2 from to) [2 3 hk dk]))
+                [q16 k16] (query-and-key cfg m16 :float32)]
+            (is (= (host (array/astype (array/* (concatenated (l2-norm (heads16 0 width) eps) hv) (/ 1.0 (Math/sqrt dk))) :float32))
+                   (host q16))
+                "q, float16 cast to float32")
+            (is (= (host (array/astype (concatenated (l2-norm (heads16 width (* 2 width)) eps) hv) :float32)) (host k16))
+                "k, float16 cast to float32")))))
+    (testing "the attention's output gated"
+      (let [cfg {:heads 2 :head-dim 4}
+            [b t] [2 3]
+            qg (rng/normal (rng/key 4) [b t 2 2 4])
+            [_ gate] (query-and-gate qg)
+            whole (fn [o] (array/* (array/reshape o [b t 8]) (array/sigmoid (array/reshape gate [b t 8]))))
+            paged (rng/normal (rng/key 5) [(* b t) 2 4])
+            chunk (array/transpose (rng/normal (rng/key 6) [b 2 t 4]) [0 2 1 3])]
+        (is (= [b t 2 1 4] (array/shape gate)))
+        (doseq [[what o] [[:paged paged] [:chunk chunk]]]
+          (is (= (host (whole o)) (host (gated cfg o gate))) (name what))
+          (is (not= (host (whole o)) (host (gated cfg o (first (query-and-gate qg))))) "the query's half is told apart"))))))
+
 ;; ---------------------------------------------------------------------------
 ;; 5. MLX against the JVM backend
 ;; ---------------------------------------------------------------------------

@@ -699,10 +699,34 @@
 (defn- key-heads-tiled
   "y [B T key-heads D] repeated to value-heads heads, tiled: value head h
    reads key head h mod key-heads (the order llama.cpp's converter gives
-   the value heads, ggml_repeat's)."
+   the value heads, ggml_repeat's). The repeats broadcast along a new
+   axis before the heads, made whole by one copy (a concatenation of the
+   repeats took one a repeat: genclj-yesw)."
   [y value-heads]
-  (let [hk (long (nth (array/shape y) 2))]
-    (if (c/== hk (long value-heads)) y (array/concatenate (vec (repeat (quot (long value-heads) hk) y)) 2))))
+  (let [[b t hk d] (array/shape y)
+        r (quot (long value-heads) (long hk))]
+    (if (c/== 1 r) y (array/reshape (array/broadcast-to (array/expand-dims y 2) [b t r hk d]) [b t value-heads d]))))
+
+(defn- query-and-key
+  "[q k] of a GatedDeltaNet layer's convolved inputs mixed [B T
+   channels] (its first key-heads·key-dim channels the query's, the next
+   as many the key's), each [B T value-heads key-dim] in the rule's dtype
+   sd: every head l2-normed, q scaled by 1/√key-dim, cast to sd and tiled
+   to the value heads. The query's and the key's heads are taken as one
+   array [B T 2 key-heads key-dim]: normed in one rms-norm (each head's
+   row alone, as two), scaled by [1/√key-dim 1] (1 exactly: the key as
+   it was) and cast in one elementwise chain, then tiled by one copy each.
+   On MLX's CUDA, 4 kernels fewer a layer than normed and cast apart and
+   tiled by concatenation (genclj-yesw)."
+  [{:keys [eps delta-key-heads delta-value-heads delta-key-dim]} mixed sd]
+  (let [[b t] (array/shape mixed)
+        hk (long delta-key-heads) dk (long delta-key-dim)
+        qk (l2-norm (array/reshape (array/slice mixed 2 0 (c/* 2 hk dk)) [b t 2 hk dk]) eps)
+        scale (array/array [[[(c// 1.0 (Math/sqrt dk))]] [[1.0]]] {:dtype (array/dtype qk)})
+        qk (* qk scale)
+        qk (if (= sd (array/dtype qk)) qk (array/astype qk sd))
+        part (fn [i] (key-heads-tiled (array/reshape (array/slice qk 2 i (inc (long i))) [b t hk dk]) delta-value-heads))]
+    [(part 0) (part 1)]))
 
 (defn- delta-rule
   "A GatedDeltaNet layer's sequence part: the projected inputs qkv [B T
@@ -713,18 +737,17 @@
    after is the newest K-1 inputs, or with end (an int array [B], each
    row's tokens of the T that are its sequence's, the rest padding)
    those up to each row's end."
-  [{:keys [eps dtype delta-conv delta-key-heads delta-value-heads delta-key-dim delta-value-dim]} w qkv beta g entry end]
+  [{:keys [dtype delta-conv delta-key-heads delta-value-heads delta-key-dim delta-value-dim] :as cfg} w qkv beta g entry end]
   (let [[b t channels] (array/shape qkv)
         hk (long delta-key-heads) hv (long delta-value-heads) dk (long delta-key-dim) dv (long delta-value-dim)
         width (c/* hk dk)
         kk (dec (long delta-conv))
         padded (array/concatenate [(or (:conv entry) (array/zeros [b kk channels] {:dtype (array/dtype qkv)})) qkv] 1)
         mixed (common/silu (causal-conv padded (:conv w) t))
-        heads (fn [from to n d] (array/reshape (array/slice mixed 2 from to) [b t n d]))
-        q (* (key-heads-tiled (l2-norm (heads 0 width hk dk) eps) hv) (c// 1.0 (Math/sqrt dk)))
-        k (key-heads-tiled (l2-norm (heads width (c/* 2 width) hk dk) eps) hv)
-        v (heads (c/* 2 width) channels hv dv)
-        state (or (:state entry) (array/zeros [b hv dv dk] {:dtype (state-dtype dtype)}))
+        sd (state-dtype dtype)
+        [q k] (query-and-key cfg mixed sd)
+        v (array/reshape (array/slice mixed 2 (c/* 2 width) channels) [b t hv dv])
+        state (or (:state entry) (array/zeros [b hv dv dk] {:dtype sd}))
         [y state] (array/gated-delta q k v g beta state)]
     [(if (= dtype (array/dtype y)) y (array/astype y dtype))
      {:conv (if end
@@ -772,7 +795,8 @@
   "[q k v gate] of the normed x [B T hidden]: q [B heads T head-dim] and
    k, v [B KV-heads T head-dim], q and k normed per head and rotated over
    their first rope-dims at positions offset… (a host integer, or an int
-   array of one per row); the gate [B T heads·head-dim]."
+   array of one per row); the gate [B T heads 1 head-dim], read where it
+   lies in the projection (gated's)."
   [{:keys [heads kv-heads head-dim rope-dims rope-base eps]} w x offset]
   (let [[b t] (array/shape x)
         [q gate] (query-and-gate (array/reshape (common/linear x (:q w)) [b t heads 2 head-dim]))
@@ -781,18 +805,24 @@
     [(rotate (array/rms-norm (heads-of q heads) (:q-norm w) eps))
      (rotate (array/rms-norm (heads-of (common/linear x (:k w)) kv-heads) (:k-norm w) eps))
      (heads-of (common/linear x (:v w)) kv-heads)
-     (array/reshape gate [b t (c/* (long heads) (long head-dim))])]))
+     gate]))
+
+(defn- gated
+  "The attention's output o (heads·head-dim values a position, in any
+   shape of B·T of them) times sigmoid(gate) (gated-qkv's [B T heads 1
+   head-dim]): [B T heads·head-dim]. The gate is read in place, a strided
+   view of the projection: made whole first it cost a copy a layer
+   (genclj-yesw)."
+  [{:keys [heads head-dim]} o gate]
+  (let [[b t] (array/shape gate)]
+    (array/reshape (* (array/reshape o [b t heads 1 head-dim]) (array/sigmoid gate))
+                   [b t (c/* (long heads) (long head-dim))])))
 
 (defn- attend
   "The attention of q over the keys k and values v under mask, gated by
    sigmoid(gate), through the output projection: [B T hidden]."
-  [{:keys [heads head-dim]} w q k v gate mask]
-  (let [[b _ t] (array/shape q)]
-    (-> (array/sdpa q k v {:mask mask})
-        (array/transpose [0 2 1 3])
-        (array/reshape [b t (c/* (long heads) (long head-dim))])
-        (* (array/sigmoid gate))
-        (common/linear (:o w)))))
+  [cfg w q k v gate mask]
+  (common/linear (gated cfg (array/transpose (array/sdpa q k v {:mask mask}) [0 2 1 3]) gate) (:o w)))
 
 (defn- attention
   "One gated attention layer of the normed x [B T hidden] at positions
@@ -842,7 +872,8 @@
         before (array/< ids (array/expand-dims ids -1))
         ranks (array/sum (array/astype (array/logical-or (array/> pj pe) (array/logical-and (array/== pj pe) before)) :int32)
                          {:axis -1})
-        hit (array/== (array/expand-dims ranks -2) (array/expand-dims (array/arange 0 k 1 {:dtype :int32}) -1))]
+        ;; ranks 0 … k-1: ids' first k (k <= e), no arange of their own
+        hit (array/== (array/expand-dims ranks -2) (array/expand-dims (array/slice ids 0 0 k) -1))]
     (array/minimum (array/astype (array/sum (array/where hit ids 0) {:axis -1}) :int32) (dec e))))
 
 (def ^:private ranked-limit
@@ -909,9 +940,11 @@
         [idx p] (routing probs k)
         p (if (= dtype (array/dtype p)) p (array/astype p dtype))
         x1 (array/reshape xs [n 1 1 hidden])
-        token (array/reshape (array/arange 0 n 1 {:dtype :int32}) [n 1])
+        ;; the pairs' indices, the first n of them the tokens': one arange
+        pairs (array/arange 0 (c/* n k) 1 {:dtype :int32})
+        token (array/reshape (array/slice pairs 0 0 n) [n 1])
         act (* (common/silu (gathered x1 gate idx token)) (gathered x1 up idx token))
-        y (array/squeeze (gathered act down idx (array/reshape (array/arange 0 (c/* n k) 1 {:dtype :int32}) [n k])) [2])
+        y (array/squeeze (gathered act down idx (array/reshape pairs [n k])) [2])
         routed (array/sum (* y (array/expand-dims p -1)) {:axis 1})
         out (if shared
               (+ routed (* (common/swiglu shared xs)
@@ -1357,10 +1390,7 @@
         [kp vp] (array/paged-write (:k entry) (:v entry)
                                    (array/reshape k [r kv-heads head-dim]) (array/reshape v [r kv-heads head-dim]) slots)
         o (array/paged-attention (array/reshape q [r heads head-dim]) kp vp tables (+ positions 1))]
-    [(-> (array/reshape o [r 1 (c/* (long heads) (long head-dim))])
-         (* (array/sigmoid gate))
-         (common/linear (:o w)))
-     {:k kp :v vp}]))
+    [(common/linear (gated cfg o gate) (:o w)) {:k kp :v vp}]))
 
 (defn- paged-forward
   "[logits [R 1 vocab], the layers after the tokens] of one token a row
@@ -1461,10 +1491,7 @@
         [kp vp] (array/paged-write (:k entry) (:v entry)
                                    (array/reshape k [r kv-heads head-dim]) (array/reshape v [r kv-heads head-dim]) slots)
         o (common/batch-attention (array/reshape q [r heads head-dim]) kp vp at)]
-    [(-> (array/reshape o [r 1 (c/* (long heads) (long head-dim))])
-         (* (array/sigmoid gate))
-         (common/linear (:o w)))
-     {:k kp :v vp}]))
+    [(common/linear (gated cfg o gate) (:o w)) {:k kp :v vp}]))
 
 (defn- batch-delta-net
   "One GatedDeltaNet layer of the normed x [R 1 hidden] of a batch: its
