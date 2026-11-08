@@ -159,7 +159,7 @@
               rounds (long (property "rounds" 40))
               samples (long (property "samples" 8))
               n (long (:layers (:config m)))
-              ad (lora/init m {:rank 8 :alpha 16 :targets (vec (keys lora/targets)) :layers (range (- n 8) n)} (rng/key 20261107))
+              ad (lora/init m {:rank 8 :alpha 16 :targets (vec (keys (lora/targets "qwen3"))) :layers (range (- n 8) n)} (rng/key 20261107))
               opt (learn/clip-norm (learn/adamw {:lr (property "lr" 5e-5) :weight-decay 0.0}) {:max-norm 1.0})
               dir (str (Files/createTempDirectory "grpo-llama-test" (make-array FileAttribute 0)))
               eval-key (rng/key 99)
