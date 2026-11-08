@@ -13,13 +13,13 @@ project's `deps.edn`:
 
 ```edn
 {:deps {gen.clj/gen.clj {:git/url "https://github.com/robert-johansson/gen.clj"
-                         :git/tag "v1.2.1" :git/sha "…"}}}
+                         :git/tag "v1.3.0" :git/sha "…"}}}
 ```
 
 `:git/sha` is the tag's commit, or its first seven characters. The laws
 (*Verification: the Laws*), to check generative functions of your own,
 are the module ext/laws at the same tag: `gen.clj/laws {:git/url …
-:git/tag "v1.2.1" :git/sha "…" :deps/root "ext/laws"}`, which brings
+:git/tag "v1.3.0" :git/sha "…" :deps/root "ext/laws"}`, which brings
 test.check. The module ext/codegen (`gen.codegen`: a REPL session for
 LLM-written code, and gen.clj's codegen harness) comes the same way,
 with `:deps/root "ext/codegen"`, and brings clj-kondo and parinferish.
@@ -106,4 +106,8 @@ clojure -T:build java
 ```
 
 A model is a GGUF file, given to `gen.llm.llama/engine`; the JVM finds the
-libraries with `-Dgen.llama.lib=<dir>`.
+libraries with `-Dgen.llama.lib=<dir>`. Since 1.3.0 a Qwen3 or
+Qwen3.5/3.6 file also runs on gen.clj's own engine over gen.array,
+`gen.llm.array-engine` (experimental), on the MLX backend above, with
+llama.cpp's vocabulary of the same file as its tokenizer
+(`gen.llm.llama/vocabulary`).

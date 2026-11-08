@@ -778,12 +778,17 @@ gen.llm.llama on the same GGUF files.
   `MLX_USE_CUDA_GRAPHS=0` and `MLX_ENABLE_TF32=0` unless the environment
   sets them. Where a source gives both, fenrir's figures are CUDA graphs
   off / on.
+- **The MacBook:** a MacBook Pro M2 Max, 64 GB, Metal; MLX 0.32.4 and
+  llama.cpp's Metal build. The Qwen3.6 MoE's Metal runs are its, under a
+  memory guard.
 - **The Jetson AGX Thor** took no 1.3.0 measurement.
 
 **Settings stated once.**
 - **Models.** Qwen3-0.6B and Qwen3-8B are Q8_0 GGUFs wherever a source
   names the quantization. Qwen3.5-0.8B is Q8_0 on the Mac; on fenrir its
-  quantization is not stated.
+  quantization is Q8_0 where a source states it. The MoE is
+  Qwen3.6-35B-A3B Q4_K_M (256 experts, 8 picked a token), the same file on
+  every machine.
 - **dtype** is the dtype MLX computes in. The Q8_0 scales and biases are
   cast to it at load, and the KV cache holds it. llama.cpp keeps its own: a
   float16 KV cache and float16 Q8_0 scales.
@@ -812,7 +817,10 @@ gen.llm.llama on the same GGUF files.
 **Reproduce.** One GPU JVM at a time. `-J-Dgen.bench.dtype=float16`
 computes in float16, `-J-Dgen.bench.sections=…` picks a bench's parts,
 `-M:bench:c2` runs C2, and `-J-Dgen.bench.llama-bench=<binary>` makes
-`gen.qwen3-bench` run llama-bench too (built by hand for now, genclj-ntre).
+`gen.qwen3-bench` run llama-bench too (`native/build-llama.sh --bench`
+builds it into `native/build/llama/<platform>/bin/llama-bench`).
+`-J-Dgen.bench.warm-runs=<n>` sets `gen.array-engine-bench`'s untimed
+runs.
 
 ```
 clojure -J-Dgen.backend=mlx -J-Dgen.llama.lib=<lib> -M:bench -m gen.qwen3-bench <GGUF>         # prefill, greedy decode, batches, kernels, donation
@@ -824,6 +832,13 @@ clojure -J-Dgen.backend=mlx -J-Dgen.mlx.grad=native -M:bench -m gen.sft-bench <G
 clojure -J-Dgen.backend=mlx -J-Dgen.mlx.grad=native -M:bench -m gen.checkpoint-bench [<GGUF>]
 clojure -J-Dgen.backend=mlx [-J-Dgen.mlx.grad=native] -M:bench -m gen.gated-delta-bench [<Qwen3.5 GGUF>]
 clojure -M:bench -m gen.gguf-bench <GGUF> [MB of each type]
+clojure -J-Dgen.backend=mlx -J-Dgen.llama.lib=<lib> -M:bench -m gen.smc-profile <Qwen3 GGUF>   # an SMC step's parts
+clojure -J-Dgen.backend=mlx -M:bench -m gen.batch-profile <Qwen3 or Qwen3.5 GGUF>              # a paged batch step's parts
+clojure -J-Dgen.backend=mlx -M:bench -m gen.moe-profile <qwen35moe GGUF>                        # the MoE's step
+clojure -J-Dgen.backend=mlx -M:bench -m gen.step-census <qwen35 or qwen35moe GGUF>              # a step's primitives and kernels
+clojure -J-Dgen.backend=mlx -M:bench -m gen.prefill-bench <Qwen3 or Qwen3.5 GGUF>               # several prompts' chunks a forward
+clojure -J-Dgen.backend=mlx -J-Dgen.llama.lib=<lib> -M:bench -m gen.moe-routing <qwen35moe GGUF> # top-k flips against MLX's CPU
+clojure -J-Dgen.backend=mlx -J-Dgen.llama.lib=<lib> -M:bench -m gen.moe-nll <qwen35moe GGUF>     # float16's NLL against float32's
 ```
 
 ### Decode at batch 1, 16 and 64
@@ -1064,8 +1079,100 @@ Source: genclj-9y6y (2026-11-08).
 | Mac, Qwen3-0.6B | compiled | 805 MLX primitives (574 not views) |
 | fenrir, Qwen3-0.6B | compiled | 776 kernels (kprof) |
 | fenrir, Qwen3-8B | compiled | 993 kernels (kprof) |
+| fenrir, the MoE, float16 | compiled paged, batch 1, before top-k by ranks | 5,365 kernels (16 rows: 5,464) |
+| fenrir, the MoE, float16 | compiled paged, batch 1, after top-k by ranks | 2,545 kernels (16 rows: 2,645) |
+| fenrir, the MoE, float16 | compiled, batch 1, before / after fewer kernels | 2,574 / 2,184 kernels |
+| fenrir, Qwen3.5-0.8B, float16 | compiled, batch 1, before / after fewer kernels | 746 / 632 kernels |
 
-Source: genclj-tjvd (2026-11-07; MLX's primitives from mlx_export_to_dot, views launch no kernel); genclj-ssiv (2026-11-07); bench/gen/qwen3_bench.clj.
+Source: genclj-tjvd (2026-11-07; MLX's primitives from mlx_export_to_dot, views launch no kernel); genclj-ssiv (2026-11-07); bench/gen/qwen3_bench.clj. The MoE and Qwen3.5 rows: genclj-p0ad and genclj-yesw (2026-11-08; fenrir's CUPTI kernel counters); docs/decisions.md, "The MoE on CUDA: top-k by ranks" and "Qwen3.5's decode step in fewer kernels"; bench/gen/moe_profile.clj, bench/gen/step_census.clj.
+
+#### Qwen3.5 and the MoE at batch 1 and 16 rows
+
+**fenrir, the MoE in float16, the router's top-k by ranks** (genclj-p0ad).
+The router picked its 8 experts by 8 argmaxes, each masking the last pick:
+about 3,500 of the step's 5,400 kernels, with MLX's CUDA host encoding a
+kernel in about 5 µs. Ranking the experts gives the same indices and values
+in about 10 kernels a layer. A compiled paged step, ms at 1 / 8 / 16 rows:
+
+| | before | after |
+|---|---|---|
+| step | 25.2 / 39.4 / 52.7 ms | 17.3 / 31.4 / 44.2 ms |
+| encode (mlx_async_eval) | 21.0 / 26.5 / 30.5 ms | 14.2 / 20.6 / 25.1 ms |
+| GPU busy | 14.1 / 18.8 / 22.9 ms | 9.4 / 15.2 / 19.8 ms |
+
+Tokens/s, the same GGUF:
+
+| | before | after | llama.cpp via gen.clj |
+|---|---:|---:|---:|
+| batch 1 (`gen.qwen3-bench`, compiled static) | 47.9 | 79.6 | 210 (llama-bench tg64: 278) |
+| 16 rows (compiled static) | 488 | 612 | 982 |
+| 16 rows, the continuous engine | 314.5 | 377.6 | 1015 |
+
+Source: genclj-p0ad (2026-11-08); docs/decisions.md, "The MoE on CUDA: top-k by ranks"; bench/gen/moe_profile.clj, bench/gen/qwen3_bench.clj, bench/gen/array_engine_bench.clj.
+
+- **float32 is slower on CUDA:** MLX's qmm_sm80 takes half floats only, so
+  float32 falls back to qmm_naive, 21.7 / 42.1 / 60.2 ms a step.
+- **gather_qmm switches kernels at 8 pairs:** at batch 1 a gate's product
+  runs on 32 CTAs, 41 µs a call, 4.9 ms a step, the largest GPU item.
+
+**fenrir, float16, the engine at batch 1, before and after Qwen3.5's step
+in fewer kernels** (genclj-yesw: gated delta's CUDA kernel for reads
+under 64 tokens, and q and k normed together, the key heads tiled by one
+copy, the attention gate read in place, the MoE's aranges shared).
+Tokens/s, main and the branch alternated, runs spread about ±6%:
+
+| Model, mode | main | branch | llama.cpp via gen.clj |
+|---|---:|---:|---:|
+| the MoE, continuous | 49–53 | 56–59 | 139 |
+| the MoE, paged | 52–59 | 54–62 | — |
+| the MoE, static | 40 | 48–51 | — |
+| Qwen3.5-0.8B, paged | 136–156 | 155–161 | 255 |
+| Qwen3.5-0.8B, continuous | 117–124 | 134–151 | — |
+| Qwen3.5-0.8B, static | 82–84 | 133–136 | — |
+
+Source: genclj-yesw (2026-11-08); docs/decisions.md, "Qwen3.5's decode step in fewer kernels; gated-delta on CUDA"; bench/gen/array_engine_bench.clj.
+
+- **The MoE's static time to first token** fell from 478 to 243 ms: short
+  prefill chunks take the kernel too.
+- **On Metal** the change measured within noise of main.
+- **llama.cpp stays about 2.4× faster at batch 1.** A simple kernel costs
+  about 2.4 µs to encode on MLX's CUDA.
+- **float16 against float32**, the MoE on fenrir before the change
+  (genclj-fxag, 2026-11-08): batch 1 continuous 52 against 38, paged 59
+  against 49 (llama.cpp 139).
+
+**The MacBook's Metal, the MoE, float32 → float16** (2–3 JVMs):
+
+| | gen.clj | llama.cpp's Metal build |
+|---|---|---|
+| decode, batch 1 | 35.9–36.5 → 39.4–39.5 tokens/s | 48.3–49.1 tokens/s |
+| decode, 16 rows | 172–215 → 176–225 tokens/s | 174 tokens/s |
+
+Source: genclj-h80d's MacBook run (2026-11-08); docs/decisions.md, "The Qwen3.6 MoE on the MacBook's Metal"; bench/gen/array_engine_bench.clj. After the loader's changes (genclj-0nxn) the engine decodes at batch 1 at 36.5 tokens/s in float32 and 40.1 in float16 there, under the strict memory guard.
+
+**The Mac (M4), Qwen3.5-0.8B Q8_0, one compiled paged batch step**
+(genclj-qu77), ms a step:
+
+| | 1 row | 8 rows | 16 rows |
+|---|---:|---:|---:|
+| float32, states in place | 12.8 | 38.0 | 34.4 |
+| float32, states read in place by forks | 13.0 | 39.6 | 40.8 |
+| float16, states read in place by forks | 12.6 | 23.1 | 38.7 |
+| Qwen3-0.6B, float32 | 10.4 | 30.4 | 26.9 |
+
+Source: genclj-qu77 (2026-11-08); docs/decisions.md, "Qwen3.5's step on Metal: 5-15 float32 rows as 16, dead states released"; bench/gen/batch_profile.clj.
+
+- **8 float32 rows were slower than 16:** below 13 to 15 rows on the M4,
+  MLX 0.32.4 multiplies by qmv_wide, which re-reads the weights every 5
+  rows. Padding 5 to 15 float32 rows to 16 (M3 and M4 only) took 8 rows
+  from 38.0 to 28.7 ms, Qwen3-0.6B's from 30.4 to 22.5.
+- **Held states paid for the GC:** each step made 18.9 MB of new states a
+  row. Releasing the groups no slot holds (`gen.array/release!`) took
+  float16 from 23.1 to 20.2 ms at 8 rows and from 38.7 to 32.8 at 16.
+- **The gated-delta kernel runs at memory speed:** 0.44 ms a row (86 GB/s).
+- **The rest is the host round trip:** at 8 rows in float16 a step takes
+  20.2 ms against a pipelined floor of 13.0 (read 1.2, normalize 1.4, draw
+  0.5, and about 3.3 ms of GPU idle while encoding).
 
 ### Prefill
 
@@ -1117,7 +1224,8 @@ Source: genclj-6qb6 (2026-11-08); docs/decisions.md, "Paged follow-ups" (2026-11
 - **Copies per run** fell from 1012 to 44 with the change.
 - **Qwen3.5-0.8B** (genclj-6qb6, 2026-11-08): paged 595 against static 645
   tokens/s in float32, 698 against 728 in float16; llama.cpp 276. The
-  continuous mode refuses Qwen3.5.
+  continuous mode refused Qwen3.5 then; it runs it from the same day's
+  "Continuous batching for Qwen3.5/3.6" (the tables below).
 - **Two SMC runs at once** (genclj-b3ow, 2026-11-07, float32, before the
   copy change): paged 596.1, continuous 799.3, llama.cpp 888.7 tokens/s.
 - **Earlier single runs**, superseded (float32 unless stated):
@@ -1131,6 +1239,82 @@ Source: genclj-6qb6 (2026-11-08); docs/decisions.md, "Paged follow-ups" (2026-11
     in float16, 713 and 722.
 - **Run to run,** the static engine's float32 figure was 318, 325, 342.6
   and 345, and llama.cpp's ranged 771-958.6.
+
+**The Mac and the MacBook, 2026-11-08's changes, 16 particles.** Each
+change measured against main in one session, alternated; tokens/s, before
+→ after:
+
+| Change | Model, mode | float16 | float32 | llama.cpp via gen.clj |
+|---|---|---:|---:|---:|
+| 5-15 float32 rows as 16, dead states released (genclj-qu77) | Qwen3.5-0.8B, continuous | 871–907 → 917–937 | 724 → 756 | 280–281 |
+| the same | Qwen3-0.6B, static | — | 352 → 529 | — |
+| several prompts' chunks a forward (genclj-6qb6) | Qwen3-0.6B, paged | 811 → 864 | 691 → 757 | — |
+| the same | Qwen3.5-0.8B, paged | 887 → 970 | 706 → 783 | — |
+| shapes compiled at open (genclj-i3fp) | Qwen3-0.6B, paged | 859 → 845 | 769 → 753 | 965 |
+| the same | Qwen3.5-0.8B, paged | 967 → 925 | 786 → 757 | 287 |
+| MLX's buffer cache given back after open (genclj-v1kg) | Qwen3.5-0.8B, paged | 933–941 → 954–971 | 705–758 → 772–778 | — |
+
+Source: docs/decisions.md, "Qwen3.5's step on Metal", "Paged multi-token reads", "The paged default and shapes compiled at open, as built", "The open-time compile gives back MLX's buffer cache" and "The Qwen3.6 MoE on the MacBook's Metal" (2026-11-08); bench/gen/array_engine_bench.clj.
+
+- **The cost of compiling at open,** measured apart (genclj-v1kg, 4–5 JVMs
+  a setting, medians), Qwen3.5-0.8B paged: float16 964 without the
+  precompile, 939 with it, 964 with MLX's buffer cache cleared after it;
+  float32 770, 753 and 775. The warm-up left 1.9 GB in MLX's buffer cache
+  against its 2.1 GB limit (ram/16), so the steps' freed buffers missed it.
+  Qwen3-0.6B's steps hold only 0.5–0.6 GB of cache and did not move.
+- **The MoE on the MacBook** (genclj-h80d, 2–3 JVMs): paged SMC 544–548
+  tokens/s in float32, 621–622 in float16, llama.cpp's Metal build 653–656.
+
+**fenrir (CUDA), Qwen3-0.6B and Qwen3-8B, 16 particles.** Paged
+attention's CUDA kernel (vLLM's v1) against the composite it replaced,
+each engine in its own JVM, median of 5, C2; tokens/s, paged and
+continuous cells kernel / composite:
+
+| Model, dtype | static | paged | continuous | llama.cpp via gen.clj |
+|---|---:|---:|---:|---:|
+| 0.6B Q8_0, float16 | 797 | 1158 / 999 | 1202 / 989 | 2228 |
+| 0.6B Q8_0, float32 | 740 | 1022 / 721 | 857 / 858 | 2214 |
+| 0.6B F16, float16 | 778 | 920 / 841 | 986 / 971 | 2195 |
+| 8B Q8_0, float16 | 620 | 842 / 766 | 841 / 791 | 1484 |
+
+Source: genclj-1daf, genclj-6qb6 (2026-11-08); docs/decisions.md, "Paged attention on CUDA: vLLM's v1 through mlx_fast_cuda_kernel"; bench/gen/array_engine_bench.clj.
+
+- **The kernel's first launch** in a process compiles it (NVRTC), about 0.8
+  s a variant, then 0.9 ms.
+- **The 1158** was a high sample: a later run of main gave 970 (genclj-4acj).
+
+**fenrir, the SMC step's host path** (genclj-4acj: 16-bit reads from MLX's
+buffer, the read's pages prefetched on CUDA, rows lent, a step's forks in
+one call). One SMC step of Qwen3-0.6B Q8_0 in float16 took 17.1 ms paged
+against llama.cpp's 7.3: the logits' read 3.1 ms (1.2 of it widening),
+copying each row 1.8, the forks' hand-offs 0.6, normalization 2.2, and MLX
+encoding 7.0 ms against 0.3 waiting on the GPU. Tokens/s, the median across
+JVMs, main and the branch alternated (a JVM's result varies by up to 30%),
+C2:
+
+| Run | main | branch | llama.cpp, main | llama.cpp, branch |
+|---|---:|---:|---:|---:|
+| 0.6B float16, paged | 1008 | 1272 | 2177 | 2579 |
+| 0.6B float16, continuous | 1056 | 1445 | — | — |
+| 0.6B float32, paged / continuous | 834 / 957 | 983 / 972 | 2124 | 2576 |
+| 8B float16, paged | 835 | 882 | 1455 | 1600 |
+
+Source: genclj-4acj (2026-11-08); docs/decisions.md, "Token SMC on CUDA: reads from MLX's buffer, rows lent, forks in one call"; bench/gen/smc_profile.clj, bench/gen/array_engine_bench.clj.
+
+- **llama.cpp gains too:** its LM path takes the lent rows and the
+  one-call forks.
+- **Under Graal:** paged 1200, llama.cpp 2132, against C2's 1272 and 2579.
+- **The 8B is bound by the GPU,** 13.3 ms an evaluation against about 6.5
+  for llama.cpp, whose 8-bit products are faster.
+
+**fenrir, float16 the default for quantized files** (genclj-1vk7, after the
+above): Qwen3-0.6B Q8_0 paged 1462, continuous 1517, static 1136 tokens/s,
+llama.cpp 2552; the MoE paged 847, continuous 818, llama.cpp 1886. Source:
+docs/decisions.md, "float16 on CUDA as built" (2026-11-08);
+bench/gen/array_engine_bench.clj. Computed from these figures, token SMC on
+CUDA stays 1.7 to 2.3× behind llama.cpp. On the Mac, Qwen3-0.6B's paged
+SMC in float16 (845–864) is 10–12% behind llama.cpp's 965, and
+Qwen3.5-0.8B's (925–970) over 3× ahead of its 287.
 
 ### Continuous batching with many clients
 
@@ -1182,10 +1366,59 @@ bench/gen/array_engine_bench.clj. The paged and static cells are the
 earliest of those runs. Later changes moved the continuous mode most.
 
 - **On CUDA the leads hold in float16 only.** The engine's default there
-  becomes float16 for quantized models (the owner's calls, 2026-11-08).
-- **The MoE's throughput trails** because mixed forwards retrace per new
-  shape (200–430 ms each). Shapes bucketed and compiled at open is the
-  owner's call, in progress.
+  is float16 for quantized models (the owner's calls, 2026-11-08).
+- **The MoE's throughput trailed** because mixed forwards retraced per new
+  shape (200–430 ms each). With shapes bucketed and compiled at open, and
+  the changes below, it leads (the MoE rows of the next tables).
+
+**The parts of that day, 8 clients, 64-token completions.** Tokens/s, each
+change against main in one session (alternated); the read latency's p90 or
+median where the source gives it:
+
+| Change | Machine, model, dtype | before | after | llama.cpp via gen.clj |
+|---|---|---:|---:|---:|
+| paged attention's CUDA kernel (genclj-1daf, genclj-6qb6); composite → kernel, continuous | fenrir, Qwen3-0.6B Q8_0, f16 | 431 | 555 | 503 |
+| the same | fenrir, Qwen3-0.6B Q8_0, f32 | 375 | 409 | 502 |
+| the same | fenrir, Qwen3-0.6B F16, f16 | 451 | 527 | 454 |
+| the same | fenrir, Qwen3-8B Q8_0, f16 | 220 | 231 | 144 |
+| the same, paged (one caller's read at a time) | fenrir, Qwen3-0.6B Q8_0, f16 | 181 | 219 | 503 |
+| 5-15 float32 rows as 16, dead states released (genclj-qu77) | Mac, Qwen3.5-0.8B, f16 | 216–243 (p90 53–60 ms) | 255–268 (p90 29 ms) | 69–70 (p90 111–123 ms) |
+| the same | Mac, Qwen3.5-0.8B, f32 | 154 | 205 | 66–69 |
+| the same | Mac, Qwen3-0.6B, f32 | 214 | 264 | — |
+| top-k by ranks (genclj-p0ad), 6 warm runs | fenrir, the MoE, f16 | 124.5 (median 45–47 ms) | 149.6 (median 36–38 ms) | 160.6 (median 45.6 ms) |
+| Qwen3.5's step in fewer kernels (genclj-yesw) | fenrir, the MoE, f16 | 165–166 | 183 | 162 |
+
+Source: docs/decisions.md, "Paged attention on CUDA", "Qwen3.5's step on Metal", "The MoE on CUDA: top-k by ranks" and "Qwen3.5's decode step in fewer kernels" (2026-11-08); bench/gen/array_engine_bench.clj.
+
+- **The MoE in float16 against float32** on fenrir (genclj-fxag, the router
+  in float32): 171 against 118 tokens/s, llama.cpp 161.
+- **The MoE on the MacBook** (genclj-h80d, float32 → float16): 99–111 →
+  93–118 tokens/s, the read's p90 55–61 → 50–64 ms, against llama.cpp's
+  47.8 tokens/s and 161 ms.
+- **The float16 default on CUDA** (genclj-1vk7), after 6 warm runs:
+  Qwen3-0.6B 718 tokens/s (llama.cpp 504); 251 after one warm run, before
+  the shapes were compiled at open.
+
+**Several prompts' chunks in one forward** (genclj-6qb6), the Mac, 8
+clients, 5 warm runs and 6 timed, main → branch (TTFT: the time to the
+first token; admission: the share of the run spent reading prompts):
+
+| Model, dtype | tokens/s | p90 read | TTFT p50 (max) | admission | llama.cpp: tokens/s, p90, TTFT p50 |
+|---|---|---|---|---|---|
+| Qwen3-0.6B, f16 | 402 → 422 | 16.8 → 14.9 ms | 215 → 210 ms (429 → 361) | 27.6 → 23.9% | 99, 80 ms, 312 ms |
+| Qwen3-0.6B, f32 | 273 → 287 | 27.9 → 23.7 ms | 270 → 231 ms (479 → 428) | 22.0 → 18.5% | 99, 77 ms, 319 ms |
+| Qwen3.5-0.8B, f16 | 278 → 285 | 27.8 → 22.0 ms | 296 → 277 ms (612 → 596) | 27.0 → 24.0% | 70, 114 ms, 413 ms |
+| Qwen3.5-0.8B, f32 | 208 → 217 | 38.8 → 30.6 ms | 324 → 346 ms (701 → 676) | 23.5 → 21.1% | 70, 112 ms, 431 ms |
+
+Source: genclj-6qb6 (2026-11-08); docs/decisions.md, "Paged multi-token reads: several prompts' chunks in one forward"; bench/gen/array_engine_bench.clj, bench/gen/prefill_bench.clj.
+
+- **One forward of 8 chunks of 32 tokens** takes 84.6 ms against 150.7 ms
+  as 8 forwards (Qwen3, float16); Qwen3.5 111 against 183 ms.
+- **Attention is a small part of a prefill forward:** writes, gathers and
+  sdpa take 8–10% of it for Qwen3-0.6B and 1–3% for Qwen3.5-0.8B, so the
+  runs read through the composite, not a kernel.
+- **In the paged mode** with 8 clients the median time to first token is
+  22–39% lower, throughput within ±5%.
 
 **The paged mode's parts, the Mac (MLX 0.32.4):**
 
@@ -1232,6 +1465,40 @@ The copy in the step was dropped, since token SMC measured the same either
 way. An earlier run (genclj-6qb6, before put-blocks; float32, all 16 rows
 copying) gave 21.9 ms with no copy, 25.7 ms in two calls and 27.0 ms in the
 step.
+
+### Opening an engine: shapes compiled at open
+
+The paged and continuous modes bucket their shapes (rows, chunk lengths and
+copy counts to powers of 2, block tables at least 256 positions wide) and
+trace the common ones when the engine opens (`:precompile?`, default true:
+21 to 34 shapes). **The Mac**, main → branch, alternated (main moved up to
+6% between passes):
+
+| | main | branch |
+|---|---|---|
+| traces after open, 8 clients / SMC | 16–27 / 5 | 0 / 0 |
+| the largest read, Qwen3-0.6B f16 | 475 ms | 326 ms |
+| the largest read, Qwen3.5-0.8B f16 / f32 | 603 / 734 ms | 467 / 496 ms |
+| 8 clients, Qwen3-0.6B f16 / f32 (tokens/s) | 420 / 283 | 431 / 279 |
+| 8 clients, Qwen3.5-0.8B f16 / f32 (tokens/s) | 303 / 227 | 295 / 224 |
+| open, paged / continuous | 0.3–0.5 s | 1.8–2.6 s / 2.4–4.4 s |
+
+Source: genclj-i3fp, genclj-17it (2026-11-08); docs/decisions.md, "The paged default and shapes compiled at open, as built"; bench/gen/array_engine_bench.clj. llama.cpp gave 107 and 73 tokens/s with 8 clients in the same runs; token SMC is in the Token SMC tables.
+
+- **Splitting a continuous forward** into its decode rows and its chunks
+  (two compiled calls, so the shapes stay few) costs 3–7 ms a mixed
+  forward: about −2% tokens/s and +4–6% time to first token on Qwen3.5
+  with 8 clients.
+- **The 256-position floor:** four 64-token chunks on Qwen3 take 112 → 120
+  ms in float16 and 132 → 151 ms in float32.
+- **The MoE** (fenrir, the ~20 s model load included): paged 28 s to open,
+  its 27 shapes compiled in 7.3 s (float16) or 8.4 s (float32); continuous
+  34–40 s, its 34 shapes in 10–18.5 s; no traces after (genclj-fxag;
+  docs/decisions.md, "The MoE in float16"). On the MacBook it opens in
+  14–30 s, 0 traces after (genclj-h80d).
+- **MLX's buffer cache** after the open-time compile, and what giving it
+  back buys: the Token SMC section (genclj-v1kg). Its open times and time
+  to first token did not move; on CUDA it is unmeasured.
 
 ### Training steps
 
@@ -1374,7 +1641,54 @@ Source: genclj-kqxr (2026-11-08); docs/decisions.md, "k-quants" (2026-11-08); be
 - **A whole Qwen3-0.6B Q4_K_M** loads on MLX at 1.2-1.4 GB/s of its file.
 - **Memory.** Q6_K loads as float32, 4.9 times the file's bytes. Q4_K takes
   6 bits a weight against the file's 4.5. The 20 GB Qwen3.6-35B-A3B Q4_K_M
-  needs about 28 GB.
+  needs about 28 GB in float32, 23.1 GB in float16 cast at load (next).
+
+### Loading a model: time and memory
+
+**The MoE on the MacBook, from a cold file cache** (genclj-0nxn: load-gguf
+casts each tensor to the model's dtype as it loads, reads past the file
+cache, and decodes a chunk at a time into reused buffers). Before → after:
+
+| | float16 before | float16 after | float32 before | float32 after |
+|---|---|---|---|---|
+| MLX's peak | 33.7 GB | 23.1 GB | 28.4 GB | 28.4 GB |
+| the process's peak RSS | 33.1 GB | 25.3 GB | 35.2 GB | 31.7 GB |
+| heap used | 2.5 GB | 0.34 GB | 3.0 GB | 0.34 GB |
+| file cache, before → after the load | 2.8 → 21.2 GB | 4.0 → 4.0 GB | 4.0 → 23.9 GB | 4.0 → 4.0 GB |
+| worst memory pressure | warn | normal | normal | normal |
+| load time | 20.7 s | 12.3 s | 16.6 s | 11.1 s |
+
+Source: genclj-0nxn (2026-11-08); docs/decisions.md, "load-gguf's memory: past the file cache, cast at load, bounded buffers". The file cache was emptied by mmap and msync(MS_INVALIDATE) before each load.
+
+- **The engine** then opens with the default heap under the strict guard
+  (killed at the first "warn"), with 11 GB available at its peak in float32
+  and 19 GB in float16; its MLX peak is 29.7 and 24.3 GB.
+- **On fenrir** the float16 load's MLX peak fell from 33.7 to 23.1 GB, its
+  heap from 2.2 to 0.7 GB, and the page cache it left from +20.5 to +0.1 GB.
+
+**Load time, cold, by reader** (genclj-vn28; load-gguf with no `:dtype`,
+one JVM a load, the file evicted first, median of 5). MLX's own loader
+(mlx_load_gguf) reads files of F32, F16, I32, Q8_0, Q4_0 and Q4_1; the host
+reader reads every type (the K-quants, BF16, Q5_0/Q5_1 only through it):
+
+| Model, machine | mlx_load_gguf | host reader | host ÷ mlx | file cache after (mlx / host) |
+|---|---:|---:|---:|---|
+| Qwen3-0.6B Q8_0, the Mac | 1.18 s | 0.81 s | 0.69 | 0.64 / 0.006 GB |
+| Qwen3.5-0.8B Q8_0, the Mac | 1.40 s | 0.92 s | 0.65 | 0.83 / 0.011 GB |
+| Qwen3-0.6B Q8_0, fenrir | 0.40 s | 0.73 s | 1.82 | 0.64 / 0.006 GB |
+| Qwen3.5-0.8B Q8_0, fenrir | 0.53 s | 0.87 s | 1.66 | 0.83 / 0.011 GB |
+| Qwen3-8B Q8_0, fenrir | 3.36 s | 7.49 s | 2.23 | 8.71 / 0.006 GB |
+
+Source: genclj-vn28 (2026-11-08); docs/decisions.md, "mlx_load_gguf's file cache evicted; the host reader slower on CUDA".
+
+- **The host reader on fenrir's 8B:** reads 1.48 s (5.9 GB/s), decoding
+  0.83 s, mlx_array_new_data 2.0 s, and about 3.2 s untimed (most likely
+  the zeroed arena and its copies). Cached reads (`-Dgen.gguf.cache=true`)
+  took 8.19 s.
+- **mlx_load_gguf stays for its types** (the owner's 20% rule, missed on
+  CUDA), and the pages its load brings into the file cache are evicted
+  after it: 2–5% of its time (the Mac: 0.6B 1.20 s, 0.8B 1.47 s; fenrir:
+  0.6B 0.41, 0.8B 0.51, 8B 3.45 s), the header's 6–12 MB left cached.
 
 ### Converting and quantizing models
 
@@ -1416,23 +1730,67 @@ Source: genclj-t007 (2026-11-08, Mac mini M4, the GPU slot); the KL in
 nats. MLX's layouts hold float32 scales and biases in memory (gen.array's
 choice); mlx-lm's files hold float16.
 
+### Half precision and the MoE's routing
+
+**How often the MoE's top-k sets differ from MLX's CPU forward in
+float32** (`gen.moe-routing`: 40 prompts, 1,246 positions, 40 layers, so
+49,840 sets):
+
+| Forward | Sets that differ | Gap with the CPU's experts forced |
+|---|---|---|
+| fenrir's CUDA, float32 | 10 (0.02%), at 4 positions of 2 prompts, each from a near-tie | within 5.4e-4 nats |
+| fenrir's CUDA, float16, router in float16 | 14.5% (layer 0 1.2%, about 20% from layer 20); 78% of positions have one | within 0.24, median 0.015 |
+| fenrir's CUDA, float16, router in float32 (kept) | 11.6% (the router's own share 1.9% → 1.0%) | — |
+| the MacBook's Metal, float16 | 12.9% | within 0.040 (general prompts), 0.278 (digits) |
+
+Source: genclj-fxag and genclj-h80d (2026-11-08); docs/decisions.md, "The MoE in float16: its routing flips; the carve-out lifted" and "The Qwen3.6 MoE on the MacBook's Metal"; bench/gen/moe_routing.clj.
+
+- **The gap follows the flips:** by the number of flips at a position (0,
+  1, 2, 3 or more), the median gap is 0.03, 0.11, 0.21 and 0.33 nats.
+  The float32 router takes the reference statistic's median from 0.17–0.58
+  to 0.12–0.36 nats; the largest stays about 6.
+- **Quality is float32's** (`gen.moe-nll`, 4,080 tokens): float16's NLL
+  minus float32's is −0.0039 ± 0.0020 nats a token on CUDA (−0.0025 ±
+  0.0014 with the router in float16), −0.0025 ± 0.0015 on the MacBook.
+- **Dense models in float16** move about 0.02 nats (median) from MLX's CPU
+  in float32 on CUDA (genclj-1vk7; bench/gen/cuda_reference_noise.clj).
+- **Against llama.cpp on its own experts** (genclj-ansx; llama.cpp's
+  choices recorded through its eval callback, ours forced to them), max
+  |Δ log p| general / digit prompts: on Metal 0.97 / 5.97 unforced, 6.4e-3 /
+  8.0e-2 forced (band 0.16); on CUDA 2.19 / 6.24 and 0.45 / 1.91 (band
+  3.9), where llama.cpp's CUDA build rounds activations to 8 bits.
+
 ### Not yet measured
 
-- **The Thor:** nothing in 1.3.0, its power mode included (genclj-whi8).
-- **Larger and other models:** a model only the Thor holds, MLX 4-bit
-  weights, and decode on k-quant files other than the Qwen3.6 MoE
-  (genclj-whi8).
+The open questions are genclj-pnw2's, under the 1.3.x follow-ups
+(genclj-sgue).
+
+- **The Thor:** nothing in 1.3.0, its power mode included; its bands
+  (sm_110) fall under fenrir's unmeasured.
+- **Larger and other models:** a dense model larger than Qwen3-8B, MLX
+  4-bit weights at speed against GGUF Q4_K_M, and decode on k-quant files
+  other than the Qwen3.6 MoE.
 - **MLX's own ceiling** outside the JVM (mlx-lm), and mlx-node on the same
-  weights (genclj-whi8).
+  weights.
 - **Batch 4 on fenrir.** genclj-ssiv ticks it, but no figure is recorded.
-  Batch 64 through the protocol, on either machine.
-- **Token SMC with 64 particles**, anywhere (genclj-c7uf). With 16 on
-  fenrir, see "Token SMC on CUDA" in docs/decisions.md.
+  Batch 64 through the protocol, on either machine. llama.cpp with CUDA
+  graphs off on fenrir.
+- **Batch-1 generation on fenrir after 1.3.0's speed work,** greedy
+  (`gen.qwen3-bench`), and prefill there: the figures above predate
+  2026-11-08's changes (genclj-c7uf's leftovers).
+- **Token SMC with 64 particles**, anywhere (genclj-c7uf).
 - **The KV fork cost and the full-logits overhead per token;** generate,
   assess and update over token sites against the raw engine call, on a real
-  model (genclj-whi8).
-- **Qwen3.5 on CUDA**, its speed and band through the gated-delta composite
-  (genclj-2krw); prefill of 2k-8k tokens on Metal (genclj-afy0).
+  model.
+- **Long contexts:** prefill of 2k-8k tokens, and paged attention's v2
+  kernel past v1's contexts, at speed (genclj-afy0 for Qwen3.5's long
+  prefill).
+- **On CUDA:** giving back MLX's buffer cache after the open-time compile
+  (genclj-v1kg), and the float16 default's band against llama.cpp at the
+  engine's level (array-engine-llama-test runs float32 there).
+- **The M3/M4 row padding elsewhere:** the M2, the M5 and an Ultra, whose
+  quantized products' limits differ (genclj-qu77).
 - **checkpoint_bench on Metal** (genclj-pnu6, genclj-jksq).
-- **The shared memory budget at real scale** (genclj-h80d).
-- **GenLM's evaluation domains** (ext/llm-eval, genclj-whi8).
+- **The shared memory budget at real scale,** llama.cpp and MLX together
+  (genclj-h80d).
+- **GenLM's evaluation domains** (ext/llm-eval).
