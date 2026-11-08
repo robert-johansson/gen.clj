@@ -5924,3 +5924,54 @@ alternately in one session, three rounds for f16):
   8-client run, at 44 to 61 ms a chunk);
 - half-float recurrent states, which halve their traffic but change numerics;
 - host normalization and host threads (genclj-t46p).
+
+### Main on fenrir's CUDA; Qwen3.5's engine bands per platform
+
+(PROVISIONAL, owner to confirm; genclj-cbvi, 2026-11-08)
+
+**Main (55edf11, after the night's merges) passes on MLX's CUDA** (fenrir,
+C2, cuda-121.sh's options) once the Qwen3.5 engine tests' bands are
+widened.
+
+| Suites | Tests | Assertions | Failures |
+|---|---:|---:|---:|
+| mlx, conformance, array.paged, llm.paged, gguf, convert | 104 | 1,155 | 0 |
+| the array-engine suites, Qwen3 and Qwen3.5 | 57 | 508 | 0 |
+| smc, branching, lm, models.qwen3, models.qwen35 | 92 | 832 | 0 |
+| llama.cpp comparisons, Qwen3-0.6B and Qwen3.5-0.8B | 12 | 296 | 0 |
+| the light tier of gen.array.\*, gen.backend.\*, gen.llm.\* | 885 | 9,226 | 0 |
+
+- The JVM battery under C2 there passes: 2,412 tests.
+- On fenrir, -X:test:fast:par is not GPU-free. env.sh exports GEN_MLX_LIB, so
+  the battery runs MLX's native tests (about 1 GB of GPU memory) and counts
+  as a GPU JVM.
+
+**The band.** bench/gen/qwen35_continuous_noise.clj measures it: the test's
+clients over 10 runs, 20 more clients with contexts up to 144 tokens (the
+test reaches 44), and every comparison of both Qwen3.5 engine test
+namespaces.
+- **CUDA:** the largest gap is 6.8e-5, on a row of 121 tokens; median 3.8e-6,
+  99th percentile 4.6e-5. The gaps are heavy-tailed over contexts, not a
+  drift. A wrong state gives gaps of nats.
+- **MLX's CPU on x86:** the old 2e-5 band failed there too, at main, by up to
+  2.53e-5. The largest gap is 3.7e-5.
+- **New bands, twice the largest gap rounded up:** CUDA 1.4e-4; MLX's CPU off
+  the Mac 8e-5. The JVM keeps 2e-6 and the Mac 2e-5. gen.test-support gains
+  ts/cuda?.
+- **A planted bug:** the decode rows' states rounded to float16 each step
+  (gaps 7e-4 to 5e-3) fails the deftests 35 times on CUDA and 40 on the CPU
+  under the new bands. A decode row given another row's states fails 27
+  times. The structural planted bugs give gaps of at least 4 nats.
+- Not taken: a band from the tests' own rows alone (about 5e-5 on CUDA).
+  A 51-token row already reaches 5.3e-5 there, so it would only happen to
+  pass.
+
+**Still open:**
+- **The Mac's band for Qwen3.5 was never measured;** 2e-5 is Qwen3's. To do
+  when the Mac's GPU is free:
+  `clojure -J-Dgen.backend=mlx -M:test:bench -m gen.qwen35-continuous-noise`
+  on Metal and on MLX's CPU.
+- The Thor's CUDA (sm_110) and aarch64 Linux CPUs fall under these bands
+  unmeasured.
+- array-engine-qwen35-test keeps 2e-5. It passed on CUDA and x86, but the
+  bench doesn't measure it; it could share the per-platform band.
