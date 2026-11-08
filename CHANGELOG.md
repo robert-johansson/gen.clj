@@ -195,6 +195,13 @@ other values for the same key, from the same distribution.
   token drawn from the row, can change only where that moves a float's
   rounding: none of 9.7 million did. Not finite logits are loud as
   before (`:decode-failed`).
+- **Performance (experimental): MLX's `array/->floats` reads a float16
+  or bfloat16 array as its bits, widened on the host** (genclj-9y6y), not
+  cast to float32 on the device first: the same floats, bit for bit. On
+  CUDA the cast's buffer, freed at once, came back from MLX's buffer
+  cache for the next read's cast in unified memory, so that the device
+  wrote, and the host read, pages the other side held: Qwen3-0.6B's 16
+  rows of float16 logits took 26 ms to read on fenrir, against 4.6 now.
 - **Performance (experimental): `gen.llm.token`'s draw walks a row
   about 2x faster** (genclj-9y6y): its inverse CDF sums each token's
   probability by `gen.llm.host/exp`. The total moves in its last bits, so
