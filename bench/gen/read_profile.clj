@@ -94,11 +94,13 @@
                  n (long (reduce * (array/shape f)))
                  ^MemorySegment p (span [:kept :pointer] (gen.mlx.Mlx/mlx_array_data_float32 h))]
              (span [:kept :copy] (.toArray (.reinterpret p (* 4 n)) ValueLayout/JAVA_FLOAT))))
-   ;; the float16 logits themselves read, widened on the host
+   ;; the float16 logits themselves read (their bits, by mlx-c's uint16
+   ;; accessor: its float16 one is absent where the compiler lacks
+   ;; _Float16), widened on the host
    :f16 (fn [l]
           (let [h (long ((requiring-resolve 'gen.backend.mlx.array/handle) l))
                 n (long (reduce * (array/shape l)))
-                ^MemorySegment p (span [:f16 :pointer] (gen.mlx.Mlx/mlx_array_data_float16 h))
+                ^MemorySegment p (span [:f16 :pointer] (gen.mlx.Mlx/mlx_array_data_uint16 h))
                 ^shorts hs (span [:f16 :copy] (.toArray (.reinterpret p (* 2 n)) ValueLayout/JAVA_SHORT))]
             (span [:f16 :widen] (let [out (float-array n)] (dotimes [j n] (aset out j (Float/float16ToFloat (aget hs j)))) out))))})
 
