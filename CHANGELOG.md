@@ -61,7 +61,7 @@ other values for the same key, from the same distribution.
   two compiled calls evaluated together, so that a compiled call's
   shapes are few. The new option `:precompile?`
   (default true) traces the common shapes when the engine opens (on
-  Metal about 1-2 s for Qwen3-0.6B and Qwen3.5-0.8B); `ae/stats` counts
+  Metal 1.2-4 s for Qwen3-0.6B and Qwen3.5-0.8B); `ae/stats` counts
   `:traces` (calls of a shape not compiled before) and `ae/shapes` lists
   every shape called, with its calls. **Draws**: the paged and
   continuous modes' rows move within float round-off (kernels differ by

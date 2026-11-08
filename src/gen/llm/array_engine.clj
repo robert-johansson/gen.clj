@@ -208,7 +208,9 @@
    table's columns past a sequence's blocks are never read (each row
    reads its own positions). A forward's decode rows and its chunks are
    two compiled calls, evaluated together, so that their shapes do not
-   multiply (on Metal 3-4 ms more than one call, for a mixed forward).
+   multiply (on Metal, 2026-11-08: 3-7 ms more a mixed forward than one
+   call, the weights read twice; 8 clients of Qwen3.5-0.8B lost 1-2% of
+   their tokens/s and 4% of their time to first token).
    An engine compiles the common shapes when it opens (:precompile?,
    precompiled): those short contexts take, a decode of up to 16 rows,
    a lone read's chunk of each length, several prompts' chunks of up to
@@ -566,34 +568,25 @@
   (max floor (next-pow2 n)))
 
 (def ^:private min-span
-  "The positions a decode row's block table spans at the least (its width
-   in blocks a power of 2): contexts up to it share one width. The paged
-   kernels read each row's own positions only, whatever the width
-   (measured on Metal, 2026-11-08: a step of 8 rows of Qwen3-0.6B 11.3 ms
-   at 16 blocks, 11.7 at 128; v1 holds 4 bytes a position of the width in
-   threadgroup memory, 1 KiB here). A chunk's table is floored so only
-   when its read goes on from earlier positions (chunk-width): its
-   composite gathers and attends over the width's blocks (four chunks of
-   64 tokens, Qwen3-0.6B: 112 ms at 4 blocks, 120 at 16 in float16, 132
-   and 151 in float32)."
+  "The positions a block table spans at the least (its width in blocks a
+   power of 2): contexts up to it share one width. The paged kernels read
+   each decode row's own positions only, whatever the width (measured on
+   Metal, 2026-11-08: a step of 8 rows of Qwen3-0.6B 11.3 ms at 16
+   blocks, 11.7 at 128; v1 holds 4 bytes a position of the width in
+   threadgroup memory, 1 KiB here). A chunk's composite gathers and
+   attends over the width's blocks: four chunks of 64 tokens of
+   Qwen3-0.6B take 112 ms at 4 blocks and 120 at 16 in float16, 132 and
+   151 in float32 (Qwen3.5-0.8B, a quarter of whose layers attend, 163
+   and 165, 197 and 196). Unfloored, a chunk's width would follow its
+   context (a prompt's first chunk, a split prompt's next, an extend),
+   multiplying its shapes."
   256)
 
 (defn- table-width
   "The width of the block tables of seqs (blocks of bs): their most
-   blocks, bucketed, at least floor blocks."
-  ^long [seqs ^long floor]
-  (bucket (reduce max 1 (map (comp count :blocks) seqs)) floor))
-
-(defn- chunk-width
-  "The width of the block tables of chunks of t rows over seqs (blocks of
-   bs): the chunk's own blocks, t's, while they hold the sequences (a
-   prompt's first chunk, after at most a token), else their most blocks
-   bucketed, at least min-span positions' (a read going on from earlier
-   positions: an extend, a long prompt's next chunk)."
-  ^long [seqs ^long t ^long bs]
-  (let [own (max 1 (quot t bs))
-        most (long (reduce max 1 (map (comp count :blocks) seqs)))]
-    (if (c/<= most own) own (bucket most (paged/blocks-for min-span bs)))))
+   blocks, bucketed, at least min-span positions' worth."
+  ^long [seqs ^long bs]
+  (bucket (reduce max 1 (map (comp count :blocks) seqs)) (paged/blocks-for min-span bs)))
 
 (defn- chunk-floor
   "The fewest rows a chunk has: a block (bs), within a forward's budget of
@@ -908,7 +901,7 @@
         seqs (mapv #(or (entry state %) paged/empty-sequence) slots)
         [a seqs' write-slots copies] (prepared ctx seqs (repeat n 1))
         _ (copy-blocks! ctx a copies)
-        width (table-width seqs' (paged/blocks-for min-span bs))
+        width (table-width seqs' bs)
         ;; the step's pools are stored at once (step-call!), the rest of
         ;; the books once its rows are normalized: a failure then leaves
         ;; every slot as it was, since what the step wrote lies past each
@@ -1135,7 +1128,7 @@
         ;; the decode rows' call: a token a row, padding rows after them
         ;; (row i writing the scratch slot i), the logits of every row
         dbatch (when (pos? d)
-                 (let [width (table-width dseqs (paged/blocks-for min-span bs))]
+                 (let [width (table-width dseqs bs)]
                    {:tokens (into (mapv #(vector (first (:tokens (reads %)))) decode) (repeat (c/- d-rows d) [0]))
                     :positions (into (mapv #(:pos (reads %)) decode) (repeat (c/- d-rows d) 0))
                     :slots (into (mapv first (subvec write-slots 0 d)) (map pad-slot) (range d d-rows))
@@ -1153,7 +1146,7 @@
         ks (mapv (fn [i c] (if-let [tg (:targets (reads i))] (min (long c) (count tg)) 0)) chunks cs)
         scored? (some pos? ks)
         cbatch (when (pos? nk)
-                 (let [cwidth (chunk-width cseqs t bs)
+                 (let [cwidth (table-width cseqs bs)
                        out (-> (mapv #(at % (dec (long (cs %)))) ended)
                                (into (mapcat (fn [j k] (map #(at j (long %)) (range k))) (range) ks)))
                        ;; the rows whose logits are computed, as many as
@@ -1333,34 +1326,30 @@
 (defn- precompiled
   "The shapes an engine compiles when it opens (:precompile?), as
    forward-shape's, [:step rows width states] and [:copy pairs]: the
-   shapes contexts up to min-span positions take, most common first: a
-   decode of each row count up to 16 (or the slots'); a lone read's chunk
-   of each length up to the budget, its first (a prompt's) and one going
-   on from earlier positions (chunk-width), with scores (an LM's extend)
-   and without (an open); in the continuous mode, a few prompts' first
-   chunks of 32 and 64 tokens, with scores; and copy-on-write's first
-   pair counts. A forward's decode rows and chunks are separate calls
-   (batch-forward!), so these are its shapes."
+   shapes contexts up to min-span positions take (tables of its width),
+   most common first: a decode of each row count up to 16 (or the
+   slots'); a lone read's chunk of each length up to the budget, with
+   scores (an LM's extend) and without (an open); in the continuous
+   mode, several prompts' chunks of up to 64 tokens, with scores; and
+   copy-on-write's first pair counts. A forward's decode rows and chunks
+   are separate calls (batch-forward!), so these are its shapes."
   [{:keys [continuous? min-rows n-batch max-chunks]} rows? ^long bs ^long n-slots]
   (let [w (paged/blocks-for min-span bs)
         n-batch (long n-batch)
         rs (pow2s (bucket 1 min-rows) (min 16 (bucket n-slots min-rows)))
         ts (pow2s (chunk-floor bs n-batch) (next-pow2 n-batch))
-        own #(max 1 (quot (long %) bs))
-        dkinds (if rows? [:fresh :held] [nil])
-        ckind (when rows? :held)]
+        dkinds (if rows? [:fresh :held] [nil])]
     (vec (concat (if continuous?
                    (for [r rs, k dkinds] (forward-shape r w 0 0 0 false k nil))
                    (concat (for [r rs, k dkinds] [:step r w k])
                            ;; a run of one token (an LM's first)
                            (for [k dkinds] (forward-shape 1 w 0 0 0 false k nil))))
-                 (for [t ts, targets? [false true]] (forward-shape 0 0 1 t (own t) targets? nil ckind))
-                 (for [t ts, :when (c/< (long (own t)) w), targets? [false true]] (forward-shape 0 0 1 t w targets? nil ckind))
+                 (for [t ts, targets? [false true]] (forward-shape 0 0 1 t w targets? nil (when rows? :held)))
                  (when continuous?
-                   (for [t [32 64]
-                         k [2 4]
-                         :when (and (c/<= (long t) n-batch) (c/<= (c/* (long k) (long t)) n-batch) (c/<= (long k) (long max-chunks)))]
-                     (forward-shape 0 0 k t (own t) true nil (when rows? :fresh))))
+                   (for [t ts
+                         :while (c/<= (long t) 64)
+                         k (pow2s 2 (min (long max-chunks) (quot n-batch (long t))))]
+                     (forward-shape 0 0 k t w true nil (when rows? :fresh))))
                  (for [n (pow2s 1 16)] [:copy n])))))
 
 (defn- precompile!
@@ -1555,9 +1544,10 @@
                     are bucketed, at least this
      :precompile?   true (the default): the common shapes of its
                     compiled calls compiled when it opens (Shapes, in
-                    the namespace's docstring; on Metal about 1-2 s for
-                    the 0.6B and 0.8B), so that serving does not stall
-                    on their traces; false for none
+                    the namespace's docstring; on Metal 1.2-2.2 s for
+                    the 0.6B and 0.8B in the paged mode, 2-4 s in the
+                    continuous mode, float32 the longer), so that serving
+                    does not stall on their traces; false for none
      :continuous?   true: concurrent callers' reads batched (continuous
                     batching, over the paged mode; see the namespace's
                     docstring), which serving several clients at once
