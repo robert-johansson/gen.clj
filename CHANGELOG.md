@@ -59,14 +59,18 @@ other values for the same key, from the same distribution.
   protocol `gen.array.protocols/IReleasing`) their buffers return to its
   cache, and a later read of one is loud (`:donated`, as a donated
   array's); on the JVM backend nothing. For runtimes that know when a
-  value dies; never in semantics code. gen.llm.array-engine's paged and
-  continuous modes release a group of Qwen3.5/3.6's GatedDeltaNet states
-  once no slot's row is in it: a step reading its rows in place (forks
-  still hold them) makes new states, and with the old groups left to the
-  GC, MLX ran a collection every 7 to 13 steps and allocated new buffers
-  between. On the M4, Qwen3.5-0.8B float16 at 8 rows: 23.1 ms a step,
-  20.2 released (in place: 20.1); at 16 rows 38.7, 32.8. The engine's
-  values are unchanged.
+  value dies; never in semantics code. gen.llm.array-engine releases a
+  group once no slot is in it: the static mode's caches, and the paged
+  and continuous modes' Qwen3.5/3.6 GatedDeltaNet states. A step reading
+  its rows in place (forks still hold them) or stacking them makes new
+  arrays, and with the old groups left to the GC, MLX ran a collection
+  every 7 to 13 steps and allocated new buffers between. On the M4,
+  Qwen3.5-0.8B float16 at 8 rows: 23.1 ms a step, 20.2 released (in
+  place: 20.1); at 16 rows 38.7, 32.8. Through the engine (main and this
+  alternated, float16): 8 continuous clients 216-243 → 255-268 tokens/s,
+  their reads' 90th percentile 53-60 → 29 ms; token SMC at 16 particles
+  continuous 871-907 → 917-937, static 791 → 808 (llama.cpp 280). The
+  engine's values are unchanged.
 
 - **Changed (experimental): paged attention runs a kernel on MLX's CUDA**
   (genclj-6qb6, genclj-1daf; **Draws**, the paged and continuous modes

@@ -23,8 +23,9 @@
    GGUF's architecture (qwen3, qwen35, qwen35moe), or a loaded model's
    (its config's :arch, qwen3 without one).
    - A copy shares the group (a fork is free), and a clear drops the
-     slot's hold on it; a group no slot holds is garbage, freed by the GC
-     (the backend's arrays, by their phantom references).
+     slot's hold on it; a group no slot holds is released at once
+     (array/release!: on MLX its buffers go back for the next step's
+     arrays, rather than when the GC finds them).
    - A run (open, extend, score's scratch read) reads its tokens into a
      cache of the slot's row alone, in forwards of :n-batch tokens, its
      row copied out of its group first unless the slot holds the group
@@ -269,6 +270,25 @@
     (vswap! state update :next inc)
     {:id id :cache cache}))
 
+(defn- release-dropped!
+  "Release what each of groups holds (its payload, :cache or :states)
+   once no slot's entry in the books (:table or :rows) is in it any more
+   (array/release!), after the books dropped them: on MLX its buffers go
+   back to its cache for the next step at once, not when the GC finds
+   them. A step that reads its rows in place (forks still hold the group)
+   or stacks them makes new arrays, and with the groups no branch holds
+   left to the GC, Qwen3.5-0.8B's GatedDeltaNet states (18 MiB a row) ran
+   a collection every 13 steps at 8 rows and every 7 at 16, and new
+   buffers between (Metal, 2026-11-08, genclj-qu77: 23.1 against 20.2 ms
+   a step at 8 rows, 39.1 against 32.8 at 16, float16). A group a step
+   consumed (a lane) is released already."
+  [state books payload groups]
+  (when (seq groups)
+    (let [held (into #{} (keep #(some-> % :group :id)) (books @state))]
+      (doseq [g (vals (into {} (keep (fn [g] (when g [(:id g) g]))) groups))
+              :when (not (held (:id g)))]
+        (array/release! (payload g))))))
+
 (defn- position-of
   "The positions slot's row holds."
   ^long [state slot]
@@ -359,8 +379,10 @@
             ;; the row normalized before the books are written: a failure
             ;; leaves the slot as it was
             (let [lp (first (host-rows pool row "read"))
-                  g (new-group! state cache)]
+                  g (new-group! state cache)
+                  old [(:group (entry state slot))]]
               (vswap! state assoc-in [:table slot] {:group g :row 0})
+              (release-dropped! state :table :cache old)
               (tally! state :runs 1)
               {:logprobs lp :scores (when targets scores)})
             (recur end cache scores)))))))
@@ -413,9 +435,11 @@
       (let [[logits cache'] (step-fn cache row-tokens)
             _ (array/eval! [logits cache'])
             rows (host-rows pool logits "advance")
-            g (new-group! state cache')]
+            g (new-group! state cache')
+            old (mapv #(:group (entry state %)) slots)]
         (doseq [[r i] (map-indexed vector order)]
           (vswap! state assoc-in [:table (slots i)] {:group g :row r}))
+        (release-dropped! state :table :cache old)
         (tally! state :steps 1)
         (if lane
           (tally! state :lane-steps 1)
@@ -443,10 +467,14 @@
                    (vec slots) (vec positions) (vec tokens))))
 
   (slots-copy [_ src dst]
-    (vswap! state assoc-in [:table dst] (entry state src)))
+    (let [old [(:group (entry state dst))]]
+      (vswap! state assoc-in [:table dst] (entry state src))
+      (release-dropped! state :table :cache old)))
 
   (slots-clear [_ slot]
-    (vswap! state assoc-in [:table slot] nil))
+    (let [old [(:group (entry state slot))]]
+      (vswap! state assoc-in [:table slot] nil)
+      (release-dropped! state :table :cache old)))
 
   (slots-close [_]
     (vswap! state assoc :table (vec (repeat (count (:table @state)) nil)))
@@ -512,24 +540,6 @@
    states)."
   [state slots]
   (mapv #(:group (nth (:rows @state) %)) slots))
-
-(defn- release-dropped!
-  "Release the states of each of groups that no slot's row is in any more
-   (array/release!), once the books no longer name it: on MLX their
-   buffers go back to its cache for the next step's states at once, not
-   when the GC finds them. A step whose rows are read in place (held:
-   forks still read their group) makes new states, and with the old
-   groups left to the GC, Qwen3.5-0.8B's states (18 MiB a row) ran a
-   collection every 13 steps at 8 rows and every 7 at 16, and new
-   buffers between (Metal, 2026-11-08, genclj-qu77: 23.1 against 20.2 ms
-   a step at 8 rows, 39.1 against 32.8 at 16, float16). A group a step
-   consumed (a lane) is released already."
-  [state groups]
-  (when (seq groups)
-    (let [held (into #{} (keep #(some-> % :group :id)) (:rows @state))]
-      (doseq [g (vals (into {} (keep (fn [g] (when g [(:id g) g]))) groups))
-              :when (not (held (:id g)))]
-        (array/release! (:states g))))))
 
 (defn- row-states
   "The states of slot's row alone (by layer, one row): its group's when
@@ -747,7 +757,7 @@
                 (let [g (new-states-group! state (call state :paged-states model cache) 1)
                       old (groups-of state [slot])]
                   (vswap! state assoc-in [:rows slot] {:group g :row 0})
-                  (release-dropped! state old)))
+                  (release-dropped! state :rows :states old)))
               (vswap! state #(-> % (assoc :pools pools :alloc a) (assoc-in [:table slot] s')))
               (tally! state :runs 1)
               {:logprobs lp :scores (when targets scores)})))))))
@@ -823,7 +833,7 @@
                                        (assoc :alloc a)
                                        (update :table #(reduce (fn [t [slot s']] (assoc t slot s')) % (map vector slots seqs'))))
                              g (update :rows #(reduce (fn [t [i slot]] (assoc t slot {:group g :row i})) % (map-indexed vector slots))))))
-    (release-dropped! state old)
+    (release-dropped! state :rows :states old)
     (tally! state :steps 1)
     (tally! state :rows n)
     (tally! state :padded-rows (c/- r n))
@@ -837,7 +847,7 @@
         old (when (contains? @state :rows) (groups-of state [dst]))]
     (vswap! state #(cond-> (-> % (assoc :alloc a) (assoc-in [:table dst] s))
                      (contains? % :rows) (assoc-in [:rows dst] (get-in % [:rows src]))))
-    (release-dropped! state old)))
+    (release-dropped! state :rows :states old)))
 
 (defn- paged-clear!
   "slots-clear in the paged modes: slot's blocks released (and its row
@@ -847,7 +857,7 @@
     (let [old (when (contains? @state :rows) (groups-of state [slot]))]
       (vswap! state #(cond-> (-> % (assoc :alloc (paged/dispose (:alloc %) s)) (assoc-in [:table slot] nil))
                        (contains? % :rows) (assoc-in [:rows slot] nil)))
-      (release-dropped! state old))))
+      (release-dropped! state :rows :states old))))
 
 (defn- paged-close!
   "slots-close in the paged modes."
@@ -1021,7 +1031,7 @@
                                        (update :table #(reduce (fn [t [i s']] (assoc t (:slot (reads i)) s')) % (map vector chosen seqs'))))
                              gd (update :rows #(reduce (fn [t [j i]] (assoc t (:slot (reads i)) {:group gd :row j})) % (map-indexed vector decode)))
                              gc (assoc-in [:rows (:slot (reads chunk))] {:group gc :row 0}))))
-    (release-dropped! state old)
+    (release-dropped! state :rows :states old)
     (when dstates
       (tally! state (cond (:lane dstates) :lane-forwards (:fresh dstates) :stacked-forwards :else :held-forwards) 1))
     (tally! state :forwards 1)

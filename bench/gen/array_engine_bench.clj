@@ -69,7 +69,14 @@
    fast as in the paged mode (81.4 against 76.9 tokens/s, float32, 9
    runs). Token SMC at 16 particles 605 (float32) and 670 (float16)
    against the paged 586 and 641; two runs at once 799 against 596
-   (llama.cpp 889). docs/research/llm-mlx-engine.md §8 has the rest."
+   (llama.cpp 889). docs/research/llm-mlx-engine.md §8 has the rest.
+   Qwen3.5-0.8B-Q8_0 (2026-11-08, genclj-qu77: float32 products of 5-15
+   rows as 16, dropped states released; main's behaviour and the change
+   alternated in one session, two rounds in float16): 8 clients in
+   float16 216-232 → 255-268 tokens/s continuous (p90 read 53-60 → 29
+   ms), in float32 154 → 205 (p50 40 → 29 ms); llama.cpp 69-70 (66-69).
+   Token SMC continuous 872-907 → 921-937 (float16), 724 → 756 (float32);
+   llama.cpp 280. bench/gen/batch_profile.clj breaks a step down."
   (:require [clojure.string :as str]
             [gen.array :as array]
             [gen.gfi :as gfi]
