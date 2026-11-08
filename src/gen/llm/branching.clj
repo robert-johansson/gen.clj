@@ -6,6 +6,7 @@
 
      (open engine tokens)            → branch, after reading tokens
      (fork branch n)                 → n new branches with branch's state
+     (fork-each branches ns)         → each branch's n forks, in one call where the engine can
      (advance branches tokens)       → branches, each one token further, in one decode
      (extend branch tokens)          → {:branch :scores}: many tokens, teacher-forced
      (score branch tokens)           → the log-probabilities of a continuation
