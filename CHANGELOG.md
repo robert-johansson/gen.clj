@@ -38,6 +38,22 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Changed (experimental): load-gguf on MLX leaves the file cache as it
+  found it for every file** (gen.backend.mlx.io; genclj-vn28). A file of
+  only F32, F16, I32, Q8_0, Q4_0 and Q4_1 still loads by MLX's loader
+  (mlx_load_gguf), which reads through the file cache; the pages its load
+  brought in are now evicted after it (msync `MS_INVALIDATE` on macOS,
+  `posix_fadvise` `DONTNEED` on Linux), those cached before kept, so it
+  no longer leaves the model cached (+0.64 GB for Qwen3-0.6B-Q8_0, +0.83
+  GB for Qwen3.5-0.8B-Q8_0, +8.7 GB for Qwen3-8B-Q8_0). The arrays are
+  unchanged. Load time, cold: 2 to 5% more (the M4: Qwen3-0.6B 1.18 to
+  1.20 s, Qwen3.5-0.8B 1.40 to 1.47 s; fenrir's CUDA: Qwen3-8B 3.36 to
+  3.45 s). `-Dgen.gguf.cache=true` keeps the pages, as it keeps the host
+  reader's; a failed eviction call is loud (`:io`). Not taken: every file
+  through the host reader on MLX (the owner's rule, 2026-11-08), which
+  loads faster on the M4 (0.81 against 1.18 s, Qwen3-0.6B) but about
+  twice as slowly on fenrir's CUDA (7.5 against 3.4 s, Qwen3-8B).
+
 - **Changed (experimental): a mixture of experts computes in float16 on
   Metal by default** (the owner's call, 2026-11-08, after genclj-0nxn).
   `gen.llm.array-engine/engine` given a GGUF file of quantized weights
