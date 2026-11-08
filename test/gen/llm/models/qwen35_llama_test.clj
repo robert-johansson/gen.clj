@@ -50,6 +50,31 @@
    weights: their attention and states are less tame than a trained
    model's); the value heads grouped where the converter tiles them fail
    it by 7.1 to 11.1 nats.
+   On Metal a model of K-quants has the band 11.7 nats
+   (against-llama/band): twice the largest |Δ log p| (5.85, rounded up)
+   that the bench measured on the MacBook M2 Max (2026-11-08,
+   Qwen3.6-35B-A3B-Q4_K_M against llama.cpp v0.9.0's Metal build, the
+   forward in float32; gen.llama-noise's 20 general prompts and its 20 of
+   digits, each read whole, as a chunk and through 8 steps; llama.cpp's
+   readings taken in a JVM of their own, as the 28 GB model and
+   llama.cpp's 21 GB do not fit the MacBook together): 0.78 on the
+   general prompts (median 1.8e-3; 12 of the 20 prompts within 3e-3, as
+   a dense model's), 5.85 on the digits (median 0.17-0.24); the argmax
+   equal in 199 and 200 of 200. The largest gaps are routing near-ties:
+   every gap above 0.27 is of a reading whose forwards hold a near-tie of
+   the router's top k (its least log p_8/p_9 over the layers and
+   positions read 9e-7 to 5.4e-5, but one of 1.5e-4 on the digits); on
+   the general prompts the readings of least margin 1e-4 or more (99 of
+   200) are within 3.0e-3 (bench/gen/qwen3_llama_noise.clj's margins).
+   llama.cpp's own spread on Metal on this file reaches 2.65 (general)
+   and 7.11 (digits, a fork against a fresh read). The planted errors
+   there, the least and the median over the 20 general prompts: the conv
+   state's oldest inputs 2.34 and 5.81; the conv kernel reversed 9.06 and
+   13.8; attn_q's query and gate swapped 10.3 and 15.8; KV heads tiled
+   2.65 and 4.52; the q/k norms skipped 10.9 and 13.1; RoPE's traditional
+   pairs 0.16 and 0.48; the value heads grouped 7.41 and 14.2; the
+   experts' gate and up swapped 9.63 and 14.2; the router's top k not
+   renormalized 2.89 and 6.13; the shared expert ungated 7.23 and 13.8.
    Off the Mac the band is 7.1 nats, and 12.3 on a model of K-quants
    (against-llama/band): twice the largest |Δ log p| (rounded up) that
    the bench measured on fenrir as qwen3-llama-test's (2026-11-08, MLX's
@@ -91,8 +116,7 @@
 
 (def ^:private band
   ;; Per platform and quantization, from the measurements above
-  ;; (against-llama/band; on Metal, K-quants unmeasured); 0 without a test
-  ;; model (the tests skip)
+  ;; (against-llama/band); 0 without a test model (the tests skip)
   (if (and model-path (.isFile (java.io.File. ^String model-path))) (against/band model-path) 0.0))
 
 (def ^:private mutation-nats

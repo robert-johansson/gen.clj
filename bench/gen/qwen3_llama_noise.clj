@@ -133,7 +133,7 @@
 
 (def ^:private router-top-k @#'qwen35/top-k)
 
-(def ^:private margin-thresholds [0.0 1e-4 1e-3 1e-2 3e-2 1e-1])
+(def ^:private margin-thresholds [0.0 1e-5 3e-5 1e-4 2e-4 3e-4 5e-4 1e-3])
 
 (defn- least-margin
   "The least log p_k/p_k+1 over the rows (of e) of probs, a float[] of
