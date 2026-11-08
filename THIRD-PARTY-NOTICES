@@ -169,14 +169,21 @@ src/gen/array/gguf/quants.clj (Clojure: GGML's quantizers)
             reference quantizers in ggml (quantize_row_q8_0_ref,
             _q4_0_ref, _q4_1_ref, _q5_0_ref, _q5_1_ref, _q4_K_ref,
             _q5_K_ref, _q6_K_ref, make_qkx2_quants, make_qx_quants,
-            nearest_int; ggml-impl.h's ggml_compute_fp32_to_bf16). ggml
-            is developed inside llama.cpp's repository; native/build-
-            llama.sh's checkout is shallow, so the file's history was not
-            read here (the owner's check before a release).
+            nearest_int; ggml-impl.h's ggml_compute_fp32_to_bf16).
+            ggml is developed in llama.cpp's repository (ggml-org/ggml
+            syncs from it). Origin, checked 2026-11-08: Q4_0 and Q4_1
+            from ggml's PR #27 (Feb. 2023), first released in
+            llama.cpp's initial commit 26c0846; Q8_0, Q5_0 and Q5_1 in
+            llama.cpp #951 and #1187; the K-quants in llama.cpp #1684
+            (Iwan Kawrakow, 2023-06-05; make_qkx2_quants in #2707);
+            ggml-quants.c split out in #3833 (2023-10-29); the BF16
+            conversion in #6412 (2024-05-08). MIT throughout; no NOTICE
+            file, and the files carry no license header.
   Upstream: ggml/src/ggml-quants.c and ggml/src/ggml-impl.h at commit
             cd959bae99ff4bed22bef2604f45241c09bbb8c8 (tag v0.9.0, the
             pin of native/build-llama.sh),
             https://github.com/ggml-org/llama.cpp/blob/cd959bae99ff4bed22bef2604f45241c09bbb8c8/ggml/src/ggml-quants.c
+            https://github.com/ggml-org/llama.cpp/blob/cd959bae99ff4bed22bef2604f45241c09bbb8c8/ggml/src/ggml-impl.h
   License:  MIT. Its notice:
 
             MIT License

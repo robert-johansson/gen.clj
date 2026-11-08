@@ -5,7 +5,7 @@
 ;; Changes: quantize_row_{q8_0,q4_0,q4_1,q5_0,q5_1,q4_K,q5_K,q6_K}_ref,
 ;;          make_qkx2_quants and make_qx_quants (rmse_type 1, no weights)
 ;;          ported to Clojure, writing a block's bytes into a ByteBuffer;
-;;          ggml.c's ggml_compute_fp32_to_bf16 for BF16.
+;;          ggml-impl.h's ggml_compute_fp32_to_bf16 for BF16.
 (ns gen.array.gguf.quants
   "GGML's tensor types encoded from float32 values on the host, by
    llama.cpp's reference quantizers (ggml-quants.c's quantize_row_*_ref,
