@@ -53,7 +53,9 @@ other values for the same key, from the same distribution.
   engine's thread, all or none), and the LM's cache forks a step's
   parents with it. The same values and draws for the same key. On
   fenrir's CUDA (Qwen3-0.6B, 16 particles) the copies cost 1.5-1.8 ms a
-  step and the forks' hand-offs 0.2-0.6.
+  step on gen.array's engine and 0.8-1.0 on llama.cpp's, the forks'
+  hand-offs 0.6 and 0.2; token SMC there runs 1272 tokens/s paged (main
+  1008), 1445 continuous (1056), 2579 on llama.cpp (2177).
 - **Changed (internal): MLX reads float16 and bfloat16 by a Java loop
   from the buffer, and on CUDA prefetches a large read's pages**
   (genclj-4acj). `->floats` of a 16-bit float array widens its bit
