@@ -125,18 +125,7 @@
 
 (def ^:private shared (atom nil))
 
-(defn- setup
-  "[engine model]: llama.cpp's engine and the forward's model, of the test
-   model, made once."
-  []
-  (or @shared
-      (reset! shared [((llama 'engine) {:model model-path :max-branches 4 :n-ctx 1024}) (qwen35/load model-path)])))
-
-(use-fixtures :once (fn [f]
-                      (try (f)
-                           (finally (when-let [[^java.io.Closeable e] @shared]
-                                      (.close e)
-                                      (reset! shared nil))))))
+(use-fixtures :once (fn [f] (try (f) (finally (reset! shared nil)))))
 
 (defmacro ^:private when-qwen35
   "body when llama.cpp, MLX and a Qwen3.5 test model are here (counted as
@@ -159,6 +148,19 @@
         "is the product of each choice's, and")
    (apply str (repeat 6 (str "A recurrent layer keeps a state of fixed size, which each token decays, "
                              "corrects and reads; attention keeps every token. ")))])
+
+(defn- setup
+  "[readings model]: llama.cpp's readings of each of prompts
+   (against-llama/reference's, 4 greedy steps) and the forward's model, of
+   the test model, made once. llama.cpp's engine is closed before the
+   model loads, so that the two are never in memory at once (on
+   Qwen3.6-35B-A3B 21 and 28 GB, more than a 64 GB Mac holds beside its
+   own)."
+  []
+  (or @shared
+      (let [rs (with-open [^java.io.Closeable e ((llama 'engine) {:model model-path :max-branches 4 :n-ctx 1024})]
+                 (mapv #(against/reference e ((llama 'tokenize) e %) 4) prompts))]
+        (reset! shared [rs (qwen35/load model-path)]))))
 
 ;; ---------------------------------------------------------------------------
 ;; Tiny random models with the 0.8B's vocabulary: unequal heads, experts
@@ -203,18 +205,17 @@
 
 (deftest log-probabilities-are-llama-cpp-s
   (when-qwen35
-    (let [[e m] (setup)]
-      (doseq [text prompts
-              :let [tokens ((llama 'tokenize) e text)]]
-        (testing (str (count tokens) " tokens: " (pr-str (subs text 0 (min 30 (count text)))))
-          (doseq [{:keys [what max-diff argmax? top5?]} (against/compare-prompt e m tokens 4 band)]
+    (let [[rs m] (setup)]
+      (doseq [[text r] (map vector prompts rs)]
+        (testing (str (count (:tokens r)) " tokens: " (pr-str (subs text 0 (min 30 (count text)))))
+          (doseq [{:keys [what max-diff argmax? top5?]} (against/compare-readings m r band)]
             (is (<= max-diff band) (str what ": |Δ log p| " max-diff))
             (is argmax? (str what ": the argmax"))
             (is top5? (str what ": the top 5"))))))))
 
 (deftest planted-convention-errors-fail-by-nats
   (when-qwen35
-    (let [[e m] (setup)
-          tokens ((llama 'tokenize) e (nth prompts 3))]
+    (let [[rs m] (setup)
+          readings (nth rs 3)]
       (doseq [mutation (sort (keys (against/mutations-of m)))]
-        (is (< mutation-nats (against/mutated e m tokens mutation)) (name mutation))))))
+        (is (< mutation-nats (against/mutated m readings mutation)) (name mutation))))))

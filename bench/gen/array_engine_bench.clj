@@ -5,10 +5,13 @@
 
      clojure -J-Dgen.backend=mlx -J-Dgen.llama.lib=<lib> -M:bench -m gen.array-engine-bench <Qwen3 GGUF>
 
-   One GPU JVM at a time. Rows (each the median of gen.bench.runs runs, 3,
-   after one untimed warm run, which traces the compiled steps):
+   One GPU JVM at a time. Each engine is opened once and every section
+   run on it before the next opens (a model loaded once). Rows (each the
+   median of gen.bench.runs runs, 3, after one untimed warm run, which
+   traces the compiled steps):
    - decode: a prompt of gen.bench.prompt tokens (64) read, forked
-     gen.bench.batch times (16) and the forks advanced together
+     gen.bench.batch times (16; or a list, 1,16, a row each) and the
+     forks advanced together
      gen.bench.steps times (32), by fixed tokens: tokens/s is batch ×
      steps over the time, every row's next-token log-probabilities
      normalized on the host (the Branching protocol's form). On the array
@@ -150,7 +153,8 @@
 
 (def ^:private settings
   {:prompt (long-prop "prompt" 64)
-   :batch (long-prop "batch" 16)
+   ;; gen.bench.batch: the decode row's batch, or several (1,16), a row each
+   :batches (mapv parse-long (str/split (prop "batch" 16) #","))
    :steps (long-prop "steps" 32)
    :particles (long-prop "particles" 16)
    :smc-tokens (long-prop "smc-tokens" 32)
@@ -203,8 +207,8 @@
 (defn- decode
   "The decode row's work on engine e: prompt read, batch forks advanced
    steps times, everything disposed."
-  [e prompt]
-  (let [{:keys [batch steps]} settings
+  [e prompt batch]
+  (let [{:keys [steps]} settings
         root (br/open e prompt)
         tokens (vec (take batch (cycle [13 220 279 323 315 264 304 374])))]
     (loop [bs (br/fork root batch) i 0]
@@ -346,7 +350,7 @@
 (defn- run
   "-main's rows, for the model at path."
   [path]
-  (let [{:keys [batch steps particles smc-tokens prompt]} settings
+  (let [{:keys [steps particles smc-tokens prompt]} settings
         ;; the engine's :precompile?, when given (genclj-i3fp)
         pre #(cond-> % (some? (:precompile? settings)) (assoc :precompile? (:precompile? settings)))
         engines (filterv (fn [[k]] ((:engines settings) k))
@@ -383,29 +387,36 @@
                        (when (and (:shapes? settings) (:paged (br/info e)))
                          (doseq [[sig n] (sort-by (comp - val) ((requiring-resolve 'gen.llm.array-engine/shapes) e))]
                            (println (format "|   %6d %s | | |" n (pr-str sig)))))))))]
+    ;; each engine opened once, every section run on it before the next
+    ;; opens (a model as large as Qwen3.6-35B-A3B's 28 GB loaded once)
     (with-open [^java.io.Closeable v ((llama 'vocabulary) path)]
       (let [tok ((llama 'tokenizer) v)
             text (str/join " " (repeat 40 "The sea is calm tonight, and the tide is full."))
-            prompt-tokens (vec (take prompt ((llama 'tokenize) v text)))]
-        (when ((:sections settings) :decode)
-          (println "\n### Decode at batch" batch "," steps "steps after" prompt "tokens\n")
-          (println "|                                              |        ms |  tokens/s |")
-          (println "|---|---:|---:|")
-          (doseq [[k label make] engines]
-            (opened k make #(row label (median-ms (fn [] (decode % prompt-tokens))) (* batch steps)))))
-        (when ((:sections settings) :smc)
-          (println "\n### Token SMC," (:smc-clients settings) "run(s) at once," particles "particles," smc-tokens "tokens each (bootstrap)\n")
-          (println "|                                              |        ms |  tokens/s |")
-          (println "|---|---:|---:|")
-          (doseq [[k label make] engines]
-            (opened k make #(row label (median-ms (fn [] (smc-run % tok prompt-tokens))) (* (:smc-clients settings) particles smc-tokens)))))
-        (doseq [[section n] [[:clients (:clients settings)] [:lone 1]]
-                :when ((:sections settings) section)]
-          (println "\n###" n (if (= 1 n) "client" "clients at once") "," (:client-tokens settings) "tokens each, an LM each\n")
-          (println "|                                              |   wall ms |  tokens/s | p50 ms  | p90 ms  | max ms  | TTFT p50 | TTFT max | admission | traces |")
-          (println "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|")
-          (doseq [[k label make] engines]
-            (opened k make #(clients-rows label % tok prompt-tokens n))))))))
+            prompt-tokens (vec (take prompt ((llama 'tokenize) v text)))
+            header (fn [] (println "|                                              |        ms |  tokens/s |")
+                     (println "|---|---:|---:|"))]
+        (doseq [[k label make] engines]
+          (println "\n##" label)
+          (opened k make
+                  (fn [e]
+                    (when ((:sections settings) :decode)
+                      (doseq [batch (:batches settings)]
+                        (println "\n### Decode at batch" batch "," steps "steps after" prompt "tokens\n")
+                        (header)
+                        (row label (median-ms (fn [] (decode e prompt-tokens batch))) (* (long batch) (long steps)))
+                        (flush)))
+                    (when ((:sections settings) :smc)
+                      (println "\n### Token SMC," (:smc-clients settings) "run(s) at once," particles "particles," smc-tokens "tokens each (bootstrap)\n")
+                      (header)
+                      (row label (median-ms (fn [] (smc-run e tok prompt-tokens))) (* (long (:smc-clients settings)) (long particles) (long smc-tokens)))
+                      (flush))
+                    (doseq [[section n] [[:clients (:clients settings)] [:lone 1]]
+                            :when ((:sections settings) section)]
+                      (println "\n###" n (if (= 1 n) "client" "clients at once") "," (:client-tokens settings) "tokens each, an LM each\n")
+                      (println "|                                              |   wall ms |  tokens/s | p50 ms  | p90 ms  | max ms  | TTFT p50 | TTFT max | admission | traces |")
+                      (println "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|")
+                      (clients-rows label e tok prompt-tokens n)
+                      (flush)))))))))
 
 (defn -main [path & _]
   (when-not (= :mlx (array/backend-name array/*backend*))
