@@ -1,5 +1,7 @@
 (ns gen.llm.array-engine-qwen35-test
-  "gen.array's engine (gen.llm.array-engine) running Qwen3.5's family
+  "gen.array's engine (gen.llm.array-engine) in its static mode
+   (:paged? false; the paged mode, the default, is
+   gen.llm.array-engine-qwen35-paged-test's) running Qwen3.5's family
    (gen.llm.models.qwen35): the tiny random Qwen3.5 and Qwen3.5-MoE of
    test/fixtures/gguf (gen.llm.models.qwen35-test) as F32, loaded by the
    engine from the GGUF (its architecture read from the header), with the
@@ -39,7 +41,7 @@
    forwards."
   [k]
   (or (@engines k)
-      (get (swap! engines assoc k (ae/engine {:model (files k) :max-branches 80 :block 16 :n-batch 8})) k)))
+      (get (swap! engines assoc k (ae/engine {:model (files k) :max-branches 80 :block 16 :n-batch 8 :paged? false})) k)))
 
 (use-fixtures :once (fn [f]
                       (try (f)

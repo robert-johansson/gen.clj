@@ -11,8 +11,9 @@
    - the token generative function's and token SMC's checks
      (gen.llm.token-contract), as gen.llm.llama-token-test and
      gen.llm.llama-smc-test run them on llama.cpp;
-   - the shared memory budget with the engine open (gen.array.memory's
-     reservations and MLX's budget): its arrays are MLX's active memory,
+   - the shared memory budget with the engine open in its static mode
+     (gen.array.memory's reservations and MLX's budget): its arrays are
+     MLX's active memory,
      a read past the budget (less what a native engine reserved) is
      loud and changes nothing, a lane group stepped past it is consumed
      and its branch freed, loudly, and the engine goes on.
@@ -87,12 +88,12 @@
 
 (defn- setup
   "{:vocab :engine :llama}, made once: the vocabulary alone, gen.array's
-   engine (255 branches, for SMC's 32 particles; blocks of 32 positions,
-   to keep its groups small) and llama.cpp's."
+   engine (its default, paged mode; 255 branches, for SMC's 32
+   particles) and llama.cpp's."
   []
   (or @shared
       (reset! shared {:vocab ((llama 'vocabulary) model-path)
-                      :engine (ae/engine {:model model-path :max-branches 255 :block 32})
+                      :engine (ae/engine {:model model-path :max-branches 255})
                       :llama ((llama 'engine) {:model model-path :max-branches 12 :n-ctx 2048})})))
 
 (use-fixtures :once (fn [f]
@@ -167,7 +168,7 @@
   ;; reads mix decode rows and chunks of other callers'); the largest
   ;; |Δ log p| printed
   (ts/when-native :llama available?
-    (with-open [e (ae/engine {:model model-path :max-branches 64 :paged? true :continuous? true :n-batch 8})]
+    (with-open [e (ae/engine {:model model-path :max-branches 64 :continuous? true :n-batch 8})]
       (let [worst (atom 0.0)
             seen (fn [_ d] (swap! worst max (double d)))
             at-once [:normalized :fork-matches-fresh :batch-matches-single :score-matches-steps :threads]]
@@ -192,7 +193,7 @@
           tok ((llama 'tokenizer) vocab)
           s {:engine engine
              :lm #(lm/lm engine tok {:max-branches 12})
-             :fresh (fn [] (let [e (ae/engine {:model model-path :max-branches 16 :block 32})]
+             :fresh (fn [] (let [e (ae/engine {:model model-path :max-branches 16 :precompile? false})]
                              [e (lm/lm e tok {:max-branches 12})]))}]
       (doseq [[k check] lc/checks]
         (testing k
@@ -235,10 +236,11 @@
                   (collect!)))))
 
 (deftest the-engine-s-arrays-are-inside-the-shared-budget
-  ;; Qwen3-0.6B's KV cache holds 224 KiB a position in float32: a read of
-  ;; 200 tokens (capacity 224) makes 49 MB of it
+  ;; the static mode's (a lane group, below): Qwen3-0.6B's KV cache holds
+  ;; 224 KiB a position in float32: a read of 200 tokens (capacity 224)
+  ;; makes 49 MB of it
   (ts/when-native :llama available?
-    (with-open [e (ae/engine {:model model-path :max-branches 8 :block 32})]
+    (with-open [e (ae/engine {:model model-path :max-branches 8 :block 32 :paged? false})]
       (let [ctx (vec (take 200 (cycle (tokens " the tide is full, the moon lies fair" {:add-special? false}))))
             b (br/open e (tokens "The sea is calm tonight." {}))
             [s] (br/advance [(br/fork b)] [13])

@@ -44,6 +44,7 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gen.array :as array]
             [gen.llm.array-engine :as ae]
+            [gen.llm.array-engine-shapes :as shapes]
             [gen.llm.branching :as br]
             [gen.llm.branching-contract :as bc]
             [gen.llm.lm :as lm]
@@ -67,7 +68,7 @@
 (def ^:private continuous-opts
   "Small forwards, blocks and pools: reads take several chunks, steps
    cross blocks, forks share partial blocks, the pool grows."
-  {:paged? true :continuous? true :block-size 8 :pool-blocks 16 :n-batch 8})
+  {:continuous? true :block-size 8 :pool-blocks 16 :n-batch 8})
 
 (defn- engine
   "A new continuous engine of the tiny model (close it)."
@@ -609,11 +610,62 @@
                          (catch Throwable t [(str "threw " (ex-message t))])))))))))
 
 ;; ---------------------------------------------------------------------------
+;; Shapes (genclj-i3fp)
+;; ---------------------------------------------------------------------------
+
+(def ^:private shapes-opts
+  "Forwards of 40 tokens: several prompts' chunks share one."
+  {:n-batch 40})
+
+(deftest bucketed-forwards-are-exact-sizes-forwards
+  ;; forwards of decode rows beside several prompts' chunks (the
+  ;; shapes' workload, by slots-forward): every row and score the
+  ;; forward's, and those of the same forwards with nothing bucketed (on
+  ;; the JVM backend the same up to float rounding); the planted bugs of
+  ;; the padding fail it
+  (let [exact-r (with-redefs-fn shapes/exact #(with-open [e (engine (assoc shapes-opts :precompile? false))] (shapes/workload e)))
+        scratch-slots (with-open [e (engine shapes-opts)]
+                        (let [[d r] (delta #(ae/stats e) #(shapes/workload e))]
+                          (is (= [] (shapes/failures r exact-r forward-row band)))
+                          (is (pos? (:mixed-forwards d 0)) (str "decode rows beside chunks: " d))
+                          (is (pos? (:padded-rows d 0)) "padded")
+                          (* 8 (- (long (:size (ae/blocks e))) 16))))]
+    (testing "planted bugs fail it"
+      (doseq [[what plant] (shapes/planted)]
+        (testing what
+          (is (seq (with-redefs-fn (plant scratch-slots)
+                     #(try (with-open [e (engine (assoc shapes-opts :precompile? false))]
+                             (shapes/failures (shapes/workload e) exact-r forward-row band))
+                           (catch Throwable t [(str "threw " (ex-message t))]))))))))))
+
+(deftest the-shapes-compiled-at-open-cover-the-clients
+  ;; six concurrent clients (prompts of 3 to 28 tokens, decode rows,
+  ;; an extend's scores, a fork's copy-on-write) make only calls of the
+  ;; shapes the engine compiled when it opened (its pool large enough
+  ;; not to grow): no trace (:traces), and on MLX no call of qwen3's
+  ;; batch forward, which a compiled call makes when it traces. Without
+  ;; :precompile? they trace
+  (let [traced (atom 0)
+        counting {#'qwen3/batch-forward (let [f @#'qwen3/batch-forward] (fn [& args] (swap! traced inc) (apply f args)))}]
+    (with-open [e (engine {:pool-blocks 256})]
+      (let [[d] (delta #(ae/stats e) #(with-redefs-fn counting (fn [] (clients e 6))))]
+        (is (zero? (:traces (ae/stats e))) (pr-str (remove (comp zero? val) (ae/shapes e))))
+        (is (pos? (:mixed-forwards d 0)) "decode rows beside chunks")
+        (is (pos? (:copied-blocks d 0)) "copy-on-write")
+        (when-not (ts/jvm?)
+          (is (zero? @traced) "no trace on MLX"))))
+    (with-open [e (engine {:pool-blocks 256 :precompile? false})]
+      (clients e 6)
+      (is (pos? (:traces (ae/stats e))) "without :precompile?"))))
+
+;; ---------------------------------------------------------------------------
 ;; Misuse
 ;; ---------------------------------------------------------------------------
 
 (deftest misuse-is-loud
   (let [reason #(:reason (ts/thrown-data (%)))]
-    (is (= :invalid-option (reason #(ae/engine {:model file :continuous? true}))) "continuous without paged")
-    (is (= :invalid-option (reason #(ae/engine {:model file :paged? true :continuous? true :wait -1}))))
-    (is (= :invalid-option (reason #(ae/engine {:model file :paged? true :continuous? 1}))))))
+    (is (= :invalid-option (reason #(ae/engine {:model file :continuous? true :paged? false}))) "continuous without paged")
+    (is (= :invalid-option (reason #(ae/engine {:model file :continuous? true :wait -1}))))
+    (is (= :invalid-option (reason #(ae/engine {:model file :continuous? 1}))))
+    (with-open [e (ae/engine {:model file :continuous? true :precompile? false})]
+      (is (:continuous? (:paged (br/info e))) ":continuous? alone: the paged mode is the default"))))
