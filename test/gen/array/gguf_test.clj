@@ -395,3 +395,95 @@
         (is (= (vec (gguf/host-values f info)) (mapv double (array/->floats (dequantized-or-dense ((:tensors copied) name)))))
             (str name ", copied"))
         (is (java.util.Arrays/equals ^bytes (file-bytes f info) ^bytes (file-bytes g (first (filter #(= name (:name %)) (:tensors (gguf/header g)))))))))))
+
+(defn- bits
+  "An array's dtype, shape and values, each value's bits (a float's as a
+   double's raw bits: a half float's double is exact, so its bits are
+   kept; -0 and +0 differ)."
+  [x]
+  [(array/dtype x) (array/shape x)
+   (mapv #(Double/doubleToRawLongBits (double %)) (flatten [(host x)]))])
+
+(defn- cast-each
+  "Today's load-then-cast (gen.llm.models.common/cast-weight's): each
+   float array, and a quantized tensor's scales and biases, astype'd to
+   (dtype-of name) where it gives one."
+  [tensors dtype-of]
+  (into {}
+        (map (fn [[name t]]
+               (let [d (dtype-of name)
+                     cast (fn [x] (if (and d (not= d (array/dtype x)) (#{:float16 :bfloat16 :float32 :float64} (array/dtype x)))
+                                    (array/astype x d)
+                                    x))]
+                 [name (if (map? t) (-> t (update :scales cast) (update :biases cast)) (cast t))])))
+        tensors))
+
+(defn- signature [t]
+  (if (map? t)
+    (assoc (select-keys t [:bits :group-size]) :parts (mapv bits [(:wq t) (:scales t) (:biases t)]))
+    (bits t)))
+
+(deftest a-cast-at-load-is-the-load-then-cast
+  ;; load-gguf's :dtype (each tensor made in its dtype as it loads: on MLX
+  ;; the host reader converts as it reads, else a tensor is cast at a
+  ;; time) against today's load, then astype, tensor by tensor: the same
+  ;; dtypes, shapes and bits. Read whole, and in chunks of 32 values (a
+  ;; K-quant's super-block of 256 a chunk), as a large tensor is: each
+  ;; chunk's parts at their own offsets. Files of every type: MLX's
+  ;; loader's (types, f16) and the host reader's (K-quants, BF16, a Q4_K_M
+  ;; model). Planted bugs, each failing here (2026-11-08): float16
+  ;; rounded as bfloat16 (the host reader's conversion); a chunk's words
+  ;; put at its first block's index, not its first word's; a chunk's
+  ;; scales put a group late
+  (doseq [file ["types.gguf" "kquants.gguf" "bf16.gguf" "qwen3-small-q4_k_m.gguf" "qwen3-small-mixed.gguf"
+                "qwen3-small-f16.gguf"]
+          :let [today (:tensors (array/load-gguf (fixture file)))]
+          dtype (if (ts/jvm?) [:float32 :float64] [:float16 :bfloat16 :float32])
+          values [nil 32]]
+    (testing (str file " in " (name dtype) (when values (str ", chunks of " values " values")))
+      (let [load #(:tensors (array/load-gguf (fixture file) {:dtype dtype}))
+            at-load (if values (with-redefs-fn {#'gguf/chunk-values values} load) (load))
+            expected (cast-each today (constantly dtype))]
+        (is (= (set (keys expected)) (set (keys at-load))))
+        (doseq [[name t] expected]
+          (is (= (signature t) (signature (at-load name))) name)))))
+  (testing "a function of the name: only the tensors it names a dtype for are cast"
+    (let [f (fixture "qwen3-small-q4_k_m.gguf")
+          dtype-of (if (ts/jvm?)
+                     {"blk.0.attn_q.weight" :float64 "output_norm.weight" :float64}
+                     {"blk.0.attn_q.weight" :float16 "output_norm.weight" :bfloat16})
+          at-load (:tensors (array/load-gguf f {:dtype dtype-of}))
+          expected (cast-each (:tensors (array/load-gguf f)) dtype-of)]
+      (doseq [[name t] expected]
+        (is (= (signature t) (signature (at-load name))) name))))
+  (testing "loud: a :dtype that is no float dtype"
+    (is (= :invalid-args (:reason (thrown #(array/load-gguf (fixture "kquants.gguf") {:dtype :int32})))))
+    (is (= :invalid-args (:reason (thrown #(array/load-gguf (fixture "kquants.gguf") {:dtype "float16"})))))))
+
+(deftest reads-past-the-file-cache-are-loud-when-they-fail
+  ;; the host reader reads past the file cache (ExtendedOpenOption/DIRECT)
+  ;; unless -Dgen.gguf.cache=true; a file that does not open so, or a
+  ;; read that fails, is loud (:io, naming the file), never a tensor read
+  ;; some other way (rule 6). Planted bug: a failed read's tensor left
+  ;; unread (its zeros) fails here (2026-11-08)
+  (let [f (fixture "kquants.gguf")
+        info (first (:tensors (gguf/header f)))
+        failing (fn [_]
+                  (proxy [java.nio.channels.FileChannel] []
+                    (read
+                      ([_] (throw (java.io.IOException. "Input/output error")))
+                      ([_ _] (throw (java.io.IOException. "Input/output error"))))
+                    (implCloseChannel [])))]
+    (is (#'gguf/uncached?) "past the cache by default")
+    (with-redefs-fn {#'gguf/open-channel (fn [_] (throw (java.io.IOException. "Invalid argument")))}
+      #(is (= {:reason :io :path f} (select-keys (thrown (fn [] (gguf/host-tensor f info))) [:reason :path]))
+           "the file does not open past the cache"))
+    (with-redefs-fn {#'gguf/open-channel failing}
+      #(do (is (= {:reason :io :path f} (select-keys (thrown (fn [] (array/load-gguf f))) [:reason :path]))
+               "a read fails")
+           (is (= :io (:reason (thrown (fn [] (array/load-gguf f {:dtype :float16})))))
+               "a read fails, cast at load")))
+    (testing "a reader's tensors are the path's"
+      (with-open [r (gguf/reader f)]
+        (doseq [info (:tensors (gguf/header f))]
+          (is (= (vec (gguf/host-values f info)) (vec (gguf/host-values r info))) (:name info)))))))

@@ -335,7 +335,8 @@
 
 (defn load
   "A Qwen3 model from path, on *backend*: (model (gen.array/load-gguf
-   path) opts) for a GGUF file; for a Hugging Face checkpoint (its
+   path {:dtype dtype}) opts) for a GGUF file, each tensor made in the
+   model's dtype as it loads (bit for bit model's cast of the file's); for a Hugging Face checkpoint (its
    directory, or its .safetensors file or index), its tensors as the GGUF
    llama.cpp's converter writes from it would give them.
    - config.json gives the metadata (hidden_size, num_hidden_layers,
@@ -351,7 +352,15 @@
    scaling is loud (:unsupported), and so is a tensor the forward does not
    read (attention biases among them), as model refuses a GGUF's."
   ([path] (load path nil))
-  ([path opts] (model (if (checkpoint/checkpoint? path) (checkpoint-gguf path) (array/load-gguf path)) opts)))
+  ([path opts]
+   (let [dtype (or (:dtype opts) (:float (array/defaults array/*backend*)))]
+     (model (if (checkpoint/checkpoint? path)
+              (checkpoint-gguf path)
+              ;; each tensor loads in the dtype model casts it to, never the
+              ;; whole model in the file's dtype first (model refuses a
+              ;; dtype that is no float's)
+              (array/load-gguf path (when (#{:float16 :bfloat16 :float32 :float64} dtype) {:dtype dtype})))
+            opts))))
 
 ;; ---------------------------------------------------------------------------
 ;; The forward

@@ -36,7 +36,7 @@
             [gen.backend.mlx.array :refer [code cpu-stream fence stream wrap]]
             [gen.backend.mlx.operands :refer [made operand scalar-handle with-temps]])
   (:import [gen.mlx Mlx MlxRaw]
-           [java.lang.foreign Arena ValueLayout]))
+           [java.lang.foreign Arena MemorySegment ValueLayout]))
 
 (set! *warn-on-reflection* true)
 
@@ -71,32 +71,45 @@
                          " GGUF loader misreads, crashing the process; the JVM backend reads the file")
                     {:reason :unsupported :path path :keys (vec ks)}))))
 
-(defn- host-array
-  "An array of shape and dtype of the host's data: a float[] (float32), a
-   short[] (float16's or bfloat16's bits) or an int[] (int32, or uint32's
-   bits)."
-  [b data shape dtype]
+(def ^:private layouts
+  "Each dtype the host reader gives (gen.array.gguf/parts): its element's
+   layout, as the reader's arrays hold it."
+  {:float32 ValueLayout/JAVA_FLOAT :float16 ValueLayout/JAVA_SHORT :bfloat16 ValueLayout/JAVA_SHORT
+   :int32 ValueLayout/JAVA_INT :uint32 ValueLayout/JAVA_INT})
+
+(defn- host-arrays
+  "Tensor info of the file r reads (gen.array.gguf/reader's), read by the
+   host reader a chunk at a time into native memory, a part's values
+   whole, then made MLX's arrays (mlx_array_new_data copies them) and the
+   memory freed: an array, or a quantized tensor's [words scales biases]."
+  [b r info]
   (with-open [arena (Arena/ofConfined)]
-    (let [seg (condp instance? data
-                float/1 (.allocateFrom arena ValueLayout/JAVA_FLOAT ^floats data)
-                short/1 (.allocateFrom arena ValueLayout/JAVA_SHORT ^shorts data)
-                int/1 (.allocateFrom arena ValueLayout/JAVA_INT ^ints data))
-          shp (.allocateFrom arena ValueLayout/JAVA_INT (int-array (map int shape)))]
-      (wrap b (made "mlx_array_new_data" #(MlxRaw/mlx_array_new_data seg shp (int (count shape)) (int (code dtype))))))))
+    (let [ps (gguf/parts info)
+          segs (mapv (fn [{:keys [dtype shape]}]
+                       (let [^ValueLayout l (layouts dtype)]
+                         (.allocate arena (* (.byteSize l) (long (reduce * 1 shape))) 16)))
+                     ps)]
+      (gguf/read-tensor! r info (fn [part ^long index data count]
+                                  (let [{:keys [dtype]} (ps part)
+                                        ^ValueLayout l (layouts dtype)]
+                                    (MemorySegment/copy data 0 ^MemorySegment (segs part) l (* index (.byteSize l))
+                                                        (int count)))))
+      (let [arrays (mapv (fn [^MemorySegment seg {:keys [dtype shape]}]
+                           (let [shp (.allocateFrom arena ValueLayout/JAVA_INT (int-array (map int shape)))]
+                             (wrap b (made "mlx_array_new_data"
+                                           #(MlxRaw/mlx_array_new_data seg shp (int (count shape)) (int (code dtype)))))))
+                         segs ps)]
+        (if (gguf/quantized? (:type info)) arrays (first arrays))))))
 
 (defn load-host
   "The tensors of the GGUF file of header, by name, read by gen.array.gguf's
-   host reader (gguf/host-tensor) and made MLX's arrays: what load-gguf
-   gives for a file MLX's loader reads, and for the types it does not."
+   host reader (past the file cache, a chunk at a time: read-tensor!) and
+   made MLX's arrays a tensor at a time, each of its floats in its :as
+   dtype when given: what load-gguf gives for a file MLX's loader reads,
+   and for the types it does not."
   [b {:keys [path tensors]}]
-  (into {}
-        (map (fn [info]
-               (let [{:keys [dtype shape data quantized shapes]} (gguf/host-tensor path info)]
-                 [(:name info)
-                  (if quantized
-                    (mapv #(host-array b %1 %2 %3) quantized shapes [:uint32 :float32 :float32])
-                    (host-array b data shape dtype))])))
-        tensors))
+  (with-open [^java.io.Closeable r (gguf/reader path)]
+    (into {} (map (fn [info] [(:name info) (host-arrays b r info)])) tensors)))
 
 (defn load-gguf
   "p/-load-gguf on the MLX backend b: the file's tensors by mlx_load_gguf,

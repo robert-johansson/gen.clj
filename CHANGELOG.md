@@ -38,6 +38,38 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Added (experimental): `gen.array/load-gguf`'s `:dtype`, a model cast
+  as it loads; `qwen3/load` and `qwen35/load` load so** (genclj-0nxn).
+  `(array/load-gguf path {:dtype d})`, d a float dtype or a function of a
+  tensor's name giving one (or nil), makes each float tensor (and a
+  quantized tensor's scales and biases) in its dtype as it loads: on MLX
+  the host reader converts as it reads (rounded to nearest even, as
+  astype rounds), else a tensor is cast and evaluated at a time, its
+  source released. The arrays are `(astype x d)` of the plain load's,
+  bit for bit (checked tensor by tensor on the fixtures, both backends,
+  and on Qwen3.6-35B-A3B on MLX in float32, float16 and bfloat16).
+  `qwen35/load` and `qwen3/load` pass the model's dtype (the router
+  float32 under a half float), so a float16 model no longer loads whole
+  in float32 first: Qwen3.6-35B-A3B in float16 peaks at 23.1 GB in MLX on
+  Metal, where it peaked at 33.7. A `:dtype` that is no float dtype is
+  loud (`:invalid-args`).
+
+- **Changed (experimental): GGUF tensors read by the host reader past the
+  file cache, a chunk at a time** (gen.array.gguf; genclj-0nxn). The
+  reader the JVM backend loads with, and MLX's for the K-quants, BF16 and
+  Q5_0/Q5_1, opens the file with `ExtendedOpenOption/DIRECT` (F_NOCACHE on
+  macOS, O_DIRECT on Linux), so loading a model leaves none of its file
+  cached (on the MacBook, today's load left the MoE's 20 GB cached, and
+  macOS compressed the model rather than drop them). It reads and decodes
+  2^24 values at a time into reused buffers, and MLX's arrays are made a
+  tensor at a time from native memory, so the load's heap stays under
+  0.4 GB whatever the model (it was 2.4 to 3.0 GB on the MoE). A failed
+  read is loud (`:io`, naming the file); `-Dgen.gguf.cache=true` reads
+  through the cache (a file system that refuses direct reads).
+  `gguf/host-tensor` and `read-tensor` take a reader (`gguf/reader`) or
+  a path. MLX's own loader (files of F32, F16, I32, Q8_0, Q4_0 and Q4_1
+  only) is unchanged.
+
 - **Fixed (experimental): llama.cpp's recurrent and hybrid models split
   their steps on Metal again by default** (gen.llm.llama; found by
   genclj-ansx). The default (gen.llama.split-recurrent unset: split only

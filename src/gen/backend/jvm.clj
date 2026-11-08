@@ -915,16 +915,18 @@
 
 (defn- load-gguf
   "p/-load-gguf: float16 and bfloat16 tensors as float32 (the backend has
-   neither; the values are the same)."
+   neither; the values are the same), the file's (a tensor's :as left to
+   gen.array.gguf/load-gguf's cast)."
   [{:keys [path tensors]}]
-  (into {}
-        (map (fn [info]
-               (let [{:keys [dtype shape data quantized shapes]} (gguf/read-tensor path info)]
-                 [(:name info)
-                  (if quantized
-                    (mapv make quantized shapes [:uint32 :float32 :float32])
-                    (make data shape (if (#{:float16 :bfloat16} dtype) :float32 dtype)))])))
-        tensors))
+  (with-open [^java.io.Closeable r (gguf/reader path)]
+    (into {}
+          (map (fn [info]
+                 (let [{:keys [dtype shape data quantized shapes]} (gguf/read-tensor r (dissoc info :as))]
+                   [(:name info)
+                    (if quantized
+                      (mapv make quantized shapes [:uint32 :float32 :float32])
+                      (make data shape (if (#{:float16 :bfloat16} dtype) :float32 dtype)))])))
+          tensors)))
 
 (defn- load-safetensors
   "p/-load-safetensors: float16 and bfloat16 tensors as float32 (the

@@ -277,6 +277,16 @@
   [dtype]
   (if (#{:float16 :bfloat16} dtype) :float32 dtype))
 
+(defn- load-dtypes
+  "The dtype model (under opts) casts each tensor of a GGUF file to, by
+   name, for gen.array/load-gguf's :dtype: opts's :dtype (default the
+   backend's float), a router's (ffn_gate_inp's) router-dtype of it."
+  [{:keys [dtype] :as opts}]
+  (common/check-options who :model opts #{:dtype})
+  (let [dtype (common/check-dtype who (or dtype (:float (array/defaults array/*backend*))))]
+    (fn [name]
+      (if (re-matches #"blk\.\d+\.ffn_gate_inp\.weight" name) (router-dtype dtype) dtype))))
+
 (defn- mtp-tensor?
   "Is name a tensor of the MTP blocks (blk.i for i at or past layers)?"
   [name layers]
@@ -633,7 +643,10 @@
 
 (defn load
   "A Qwen3.5 or Qwen3.6 model (dense or MoE) from path, on *backend*:
-   (model (gen.array/load-gguf path) opts) for a GGUF file; for a Hugging
+   (model (gen.array/load-gguf path {:dtype …}) opts) for a GGUF file,
+   each tensor made in the dtype model casts it to as it loads (bit for
+   bit model's cast of the file's; load-dtypes), never the whole model in
+   the file's dtype first; for a Hugging
    Face checkpoint (its directory, or its .safetensors file or index), its
    tensors as the GGUF llama.cpp's converter writes from it would give
    them, so that a checkpoint and its GGUF give one model:
@@ -659,7 +672,13 @@
    other configurations hf-metadata and config refuse, the experts' fused
    gate_up_proj, and a tensor the forward does not read."
   ([path] (load path nil))
-  ([path opts] (model (if (checkpoint/checkpoint? path) (checkpoint-gguf path) (array/load-gguf path)) opts)))
+  ([path opts]
+   (model (if (checkpoint/checkpoint? path)
+            (checkpoint-gguf path)
+            ;; each tensor loads in the dtype model casts it to (load-dtypes),
+            ;; never the whole model in the file's dtype first
+            (array/load-gguf path {:dtype (load-dtypes opts)}))
+          opts)))
 
 ;; ---------------------------------------------------------------------------
 ;; The layers

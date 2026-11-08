@@ -1642,11 +1642,20 @@
    (:invalid-gguf). MLX reads the tensors by its loader (mlx_load_gguf),
    or a file holding a type its loader does not read by gen.array.gguf's
    host reader, as the JVM backend reads every file: the same values, bit
-   for bit. A primitive
+   for bit, read past the file cache (-Dgen.gguf.cache=true reads
+   through it) a chunk at a time; a read that fails is loud (:io).
+   Options:
+   - :dtype, a float dtype, or a function of a tensor's name giving one
+     (or nil): each float tensor's (and a quantized tensor's scales' and
+     biases') dtype, the arrays (astype x dtype) of the loaded x, bit for
+     bit, made so a tensor at a time (the host reader converting as it
+     reads; else cast and evaluated, the source released), never the
+     whole model in the file's dtype first.
+   A primitive
    (gen.array.protocols/ILoading); a backend without it is loud.
    Experimental: outside the 1.x promise (DESIGN §9)."
-  [path]
-  ((requiring-resolve 'gen.array.gguf/load-gguf) *backend* path))
+  ([path] (load-gguf path nil))
+  ([path opts] ((requiring-resolve 'gen.array.gguf/load-gguf) *backend* path opts)))
 
 (defn ^{:api :experimental} load-safetensors
   "The tensors of a safetensors file or checkpoint (Hugging Face's

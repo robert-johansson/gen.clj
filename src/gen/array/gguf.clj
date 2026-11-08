@@ -29,6 +29,11 @@
        two sub-blocks of different scales share no affine group;
      - BF16 as bfloat16 (float32 on a backend without it), its bits.
      Every other type is a loud error.
+   - The host reader reads past the file cache (reader: F_NOCACHE on
+     macOS, O_DIRECT on Linux), a tensor a chunk at a time into reused
+     buffers (read-tensor!), converting floats to a dtype asked for as it
+     reads (load-gguf's :dtype, as astype rounds); a failed read is loud
+     (:io).
    - Writing (write-gguf): a file of F32, F16, BF16, Q8_0, Q4_0, Q4_1,
      Q5_0, Q5_1, Q4_K, Q5_K and Q6_K tensors, from their values (encoded
      by llama.cpp's reference quantizers, gen.array.gguf.quants) or their
@@ -44,7 +49,9 @@
             [gen.array.gguf.quants :as quants]
             [gen.array.host :as host]
             [gen.array.protocols :as p])
-  (:import [java.nio ByteBuffer ByteOrder]
+  (:import [com.sun.nio.file ExtendedOpenOption]
+           [java.lang.foreign Arena]
+           [java.nio ByteBuffer ByteOrder]
            [java.util Collection]
            [java.util.concurrent ExecutionException ForkJoinPool Future]
            [java.nio.channels FileChannel FileChannel$MapMode]
@@ -397,7 +404,7 @@
 (def ^:private chunk-bytes
   "The least bytes of a tensor a task of the host's decoding reads (a var
    the tests redefine, to decode their small tensors in ranges)."
-  (* 4 1024 1024))
+  (* 1024 1024))
 
 (defn- decode!
   "(f from to) for every block of the n blocks (of size bytes each) of a
@@ -571,49 +578,262 @@
                 (aset out (+ y l 64) (unchecked-float (* (aget ds (+ s 4)) (double (- (bit-or (bit-shift-right a 4) (bit-shift-left (bit-and (bit-shift-right hb 4) 3) 4)) 32)))))
                 (aset out (+ y l 96) (unchecked-float (* (aget ds (+ s 6)) (double (- (bit-or (bit-shift-right c 4) (bit-shift-left (bit-and (bit-shift-right hb 6) 3) 4)) 32)))))))))))))
 
+;; ---------------------------------------------------------------------------
+;; Reading: a tensor a chunk at a time, past the file cache. A model's file
+;; is read once, so its pages are not kept cached (on the MacBook, macOS
+;; compressed Qwen3.6-35B-A3B as it loaded rather than drop the 20 GB of its
+;; file left cached: genclj-0nxn); and the host's memory a tensor takes is
+;; a chunk's, reused, whatever the tensor's size
+;; ---------------------------------------------------------------------------
+
+(def ^:private chunk-values
+  "The most values of a tensor the host reader reads and decodes at once
+   (a var the tests redefine, to read their small tensors in chunks)."
+  (bit-shift-left 1 24))
+
+(defn- uncached?
+  "Does the host reader read past the file cache: unless
+   -Dgen.gguf.cache=true?"
+  []
+  (not (Boolean/getBoolean "gen.gguf.cache")))
+
+(defn- io-error
+  [path what ^Throwable e]
+  (ex-info (str "load-gguf: " path ": " what " failed: " (.getMessage e)
+                (when (uncached?) " (read past the file cache; -Dgen.gguf.cache=true reads through it)"))
+           {:reason :io :path (str path) :uncached (uncached?)}
+           e))
+
+(defn- open-channel
+  "The file at path opened to read, past the file cache when uncached?
+   (ExtendedOpenOption/DIRECT: F_NOCACHE on macOS, O_DIRECT on Linux)."
+  ^FileChannel [path]
+  (FileChannel/open (path-of path)
+                    ^"[Ljava.nio.file.OpenOption;"
+                    (into-array OpenOption (cond-> [StandardOpenOption/READ]
+                                             (uncached?) (conj ExtendedOpenOption/DIRECT)))))
+
+(defrecord ^:private Reader [path ^FileChannel channel ^long block buffers]
+  java.io.Closeable
+  (close [_]
+    (.close channel)
+    (when-let [^Arena arena (:arena @buffers)] (.close arena))))
+
+(defn reader
+  "A reader of the GGUF file at path, for read-tensor!: its channel, opened
+   past the file cache unless -Dgen.gguf.cache=true, and its buffers,
+   reused from chunk to chunk and tensor to tensor. A java.io.Closeable
+   (with-open). Loud (:io) when the file does not open so."
+  [path]
+  (try
+    (let [ch (open-channel path)]
+      (->Reader (str path) ch (.getBlockSize (Files/getFileStore (path-of path))) (atom {})))
+    (catch java.io.IOException e
+      (throw (io-error path "opening the file" e)))))
+
+(defn- scratch
+  "r's array k of at least n elements (made by (make n'), n' at least n),
+   reused by the next chunk."
+  [{:keys [buffers]} k make ^long n]
+  (let [a (get @buffers k)]
+    (if (and a (<= n (long (java.lang.reflect.Array/getLength a))))
+      a
+      (let [a (make (max n 1))]
+        (swap! buffers assoc k a)
+        a))))
+
+(defn- read-buffer
+  "r's direct buffer of at least n bytes, aligned to its file system's
+   block (as reads past the file cache need), from a shared arena (the
+   decoding tasks read it), grown as needed."
+  ^ByteBuffer [{:keys [buffers ^long block]} ^long n]
+  (let [{:keys [^ByteBuffer buffer ^Arena arena]} @buffers]
+    (if (and buffer (<= n (.capacity buffer)))
+      buffer
+      (let [a (Arena/ofShared)
+            b (.asByteBuffer (.allocate a (max n block) block))]
+        (when arena (.close arena))
+        (swap! buffers assoc :buffer b :arena a)
+        b))))
+
+(defn- read-range!
+  "The bytes [at, at + n) of r's file, little-endian: read into r's buffer
+   in whole blocks of its file system, as reads past the file cache are.
+   Loud (:io) when a read fails, and (:invalid-gguf) when the file ends
+   first."
+  ^ByteBuffer [{:keys [path ^FileChannel channel ^long block] :as r} ^long at ^long n]
+  (let [start (* block (quot at block))
+        end (+ at n)
+        len (* block (quot (+ (- end start) (dec block)) block))
+        ^ByteBuffer b (read-buffer r len)]
+    (.clear b)
+    (.limit b (int len))
+    (try
+      (loop [pos start]
+        (when (< pos end)
+          (let [k (.read channel b pos)]
+            (when (neg? k)
+              (throw (invalid path "a tensor's data runs past the end of the file" {:offset at :bytes n})))
+            (recur (+ pos k)))))
+      (catch java.io.IOException e
+        (throw (io-error path (str "reading bytes " at " to " end) e))))
+    (.order (.slice b (int (- at start)) (int n)) ByteOrder/LITTLE_ENDIAN)))
+
+(defn- float-type?
+  "Does a tensor of type t hold floats (a plain float type, Q6_K's)?"
+  [t]
+  (contains? #{:f32 :f16 :bf16 :q6_k} t))
+
+(def ^:private converted-dtypes
+  "The dtypes the host reader converts floats to (:as)."
+  #{:float32 :float16 :bfloat16})
+
+(defn parts
+  "The arrays the host reader gives tensor info (header's) as, each
+   {:dtype :shape}: one for a plain type or Q6_K, or a quantized type's
+   three, MLX's affine quantization in groups of 32 (the words, :uint32;
+   the scales and the biases). The floats are of dtype (:as info), a
+   float dtype of converted-dtypes, when it is given; else the file's
+   (float32 for Q6_K's, and a quantized type's scales and biases)."
+  [{:keys [type shape as]}]
+  (let [{:keys [bits dtype]} (loadable type)]
+    (if (quantized? type)
+      (let [k (long (peek shape))
+            f (or as :float32)
+            groups (conj (pop shape) (quot k (long group-size)))]
+        [{:dtype :uint32 :shape (conj (pop shape) (quot (* k (long bits)) 32))}
+         {:dtype f :shape groups}
+         {:dtype f :shape groups}])
+      [{:dtype (if (and as (float-type? type)) as dtype) :shape shape}])))
+
+(defn- bfloat16-bits
+  "The bfloat16 bits of x, as MLX's astype rounds a float32 to bfloat16:
+   to nearest even, a NaN as 0x7FC0 (mlx/types/bf16.h)."
+  ^long [^double x]
+  (let [u (Integer/toUnsignedLong (Float/floatToRawIntBits (unchecked-float x)))]
+    (if (Double/isNaN x)
+      0x7FC0
+      (bit-and (unsigned-bit-shift-right (+ u 0x7fff (bit-and (unsigned-bit-shift-right u 16) 1)) 16) 0xffff))))
+
+(defn- put-floats!
+  "The count float32 values of xs (a float[]), as dtype (float32, or
+   rounded to float16 or bfloat16 to nearest even, as MLX's astype
+   rounds), put as part's from index on."
+  [r put! part index ^floats xs count dtype]
+  (let [count (long count)]
+    (if (= :float32 dtype)
+      (put! part index xs count)
+      (let [^shorts out (scratch r :halves short-array count)]
+        (if (= :float16 dtype)
+          (dotimes [i count] (aset out i (Float/floatToFloat16 (aget xs i))))
+          (dotimes [i count] (aset out i (unchecked-short (bfloat16-bits (aget xs i))))))
+        (put! part index out count)))))
+
+(defn- widen!
+  "The count halves of hs (a short[] of float16's or bfloat16's bits, as
+   dtype) as float32 values in r's floats (exactly)."
+  ^floats [r ^shorts hs ^long count dtype]
+  (let [^floats out (scratch r :widened float-array count)]
+    (if (= :float16 dtype)
+      (dotimes [i count] (aset out i (Float/float16ToFloat (aget hs i))))
+      (dotimes [i count] (aset out i (Float/intBitsToFloat (bit-shift-left (bit-and (long (aget hs i)) 0xffff) 16)))))
+    out))
+
+(defn read-tensor!
+  "Tensor info (header's) of the file r reads (reader's), read and decoded
+   a chunk at a time (chunk-values): for each chunk and each part of
+   (parts info), (put! part index data count), part the part's index,
+   data a primitive array holding count of its values from index index on
+   (a float[] for float32, a short[] for float16's and bfloat16's bits, an
+   int[] for int32 and uint32's bits). data is r's, overwritten by the
+   next chunk: put! copies it. Every value is the file's exactly (header's
+   doc), its floats converted to (:as info) as MLX's astype converts
+   them. Returns nil."
+  [r {:keys [type shape offset] :as info} put!]
+  (let [n (long (reduce * 1 shape))
+        {:keys [values block bytes bits dtype]} (loadable type)
+        per (long (or values 1))
+        unit (long (or block bytes))
+        units (quot n per)
+        step (max 1 (quot (long chunk-values) per))
+        floats-as (:dtype (peek (parts info)))]
+    (loop [u 0]
+      (when (< u units)
+        (let [m (min step (- units u))
+              ^ByteBuffer b (read-range! r (+ (long offset) (* u unit)) (* m unit))
+              v0 (* u per)
+              nv (* m per)]
+          (cond
+            (quantized? type)
+            (let [bits (long bits)
+                  nw (quot (* nv bits) 32)
+                  ng (quot nv (long group-size))
+                  ^ints words (scratch r :words int-array nw)
+                  ^floats scales (scratch r :scales float-array ng)
+                  ^floats biases (scratch r :biases float-array ng)]
+              (decode! m unit (case type
+                                :q4_k #(q4-k! b words scales biases %1 %2)
+                                :q5_k #(q5-k! b words scales biases %1 %2)
+                                #(blocks-32! b type words scales biases %1 %2)))
+              (put! 0 (quot (* v0 bits) 32) words nw)
+              (put-floats! r put! 1 (quot v0 (long group-size)) scales ng floats-as)
+              (put-floats! r put! 2 (quot v0 (long group-size)) biases ng floats-as))
+
+            (= :q6_k type)
+            (let [^floats out (scratch r :floats float-array nv)]
+              (decode! m unit #(q6-k! b out %1 %2))
+              (put-floats! r put! 0 v0 out nv floats-as))
+
+            (= :f32 type)
+            (let [^floats out (scratch r :floats float-array nv)]
+              (.get (.asFloatBuffer b) out 0 (int nv))
+              (put-floats! r put! 0 v0 out nv floats-as))
+
+            (#{:f16 :bf16} type)
+            (let [^shorts out (scratch r :shorts short-array nv)]
+              (.get (.asShortBuffer b) out 0 (int nv))
+              (if (= floats-as dtype)
+                (put! 0 v0 out nv)
+                (put-floats! r put! 0 v0 (widen! r out nv dtype) nv floats-as)))
+
+            :else
+            (let [^ints out (scratch r :ints int-array nv)]
+              (.get (.asIntBuffer b) out 0 (int nv))
+              (put! 0 v0 out nv)))
+          (recur (+ u m)))))))
+
 (defn host-tensor
-  "The tensor of the file at path described by info (header's), decoded
-   on the host into primitive arrays:
+  "The tensor of the file described by info (header's), decoded on the
+   host into primitive arrays, read by r (a reader, or the file's path):
    - a plain type, and Q6_K: {:dtype :shape :data}, data a float[]
      (:float32: F32's values, and Q6_K's, d·sc·(q - 32) in float32 as
      llama.cpp computes them, exactly), a short[] (:float16 and
      :bfloat16: F16's and BF16's bits) or an int[] (:int32);
    - a quantized type: {:quantized [words scales biases] :shapes [words'
      scales' biases'] :bits}, MLX's affine quantization in groups of 32:
-     words an int[] (uint32 bits), scales and biases float[]s.
-   Loud (:unsupported) for a tensor of more than 2^31 - 1 values, or of
-   bytes."
-  [path {:keys [type shape offset bytes]}]
-  (let [n (reduce * 1 shape)]
-    (when (or (> (long n) Integer/MAX_VALUE) (> (long bytes) Integer/MAX_VALUE))
-      (throw (ex-info (str "load-gguf: a tensor of " n " values (" bytes " bytes) is too large to read on the host")
-                      {:reason :unsupported :path (str path) :shape shape})))
-    (let [^ByteBuffer b (map-file path offset bytes)
-          n (long n)]
-      (if (quantized? type)
-        (let [bits (long (:bits (loadable type)))
-              k (long (peek shape))
-              words (int-array (quot (* n bits) 32))
-              scales (float-array (quot n group-size))
-              biases (float-array (quot n group-size))]
-          (let [{:keys [block values]} (loadable type)
-                blocks (quot n (long values))]
-            (decode! blocks block (case type
-                                    :q4_k #(q4-k! b words scales biases %1 %2)
-                                    :q5_k #(q5-k! b words scales biases %1 %2)
-                                    #(blocks-32! b type words scales biases %1 %2))))
-          {:quantized [words scales biases]
-           :shapes [(conj (pop shape) (quot (* k bits) 32))
-                    (conj (pop shape) (quot k group-size))
-                    (conj (pop shape) (quot k group-size))]
-           :bits bits})
-        {:dtype (:dtype (loadable type))
-         :shape shape
-         :data (case type
-                 :f32 (let [out (float-array n)] (.get (.asFloatBuffer b) out) out)
-                 (:f16 :bf16) (let [out (short-array n)] (.get (.asShortBuffer b) out) out)
-                 :i32 (let [out (int-array n)] (.get (.asIntBuffer b) out) out)
-                 :q6_k (let [out (float-array n)] (decode! (quot n 256) 210 #(q6-k! b out %1 %2)) out))}))))
+     words an int[] (uint32 bits), scales and biases float[]s;
+   its floats of dtype (:as info) when given (parts). Loud (:unsupported)
+   for a tensor of more than 2^31 - 1 values, or of bytes."
+  [r {:keys [type shape bytes] :as info}]
+  (if-not (instance? Reader r)
+    (with-open [^java.io.Closeable r (reader r)] (host-tensor r info))
+    (let [n (reduce * 1 shape)]
+      (when (or (> (long n) Integer/MAX_VALUE) (> (long bytes) Integer/MAX_VALUE))
+        (throw (ex-info (str "load-gguf: a tensor of " n " values (" bytes " bytes) is too large to read on the host")
+                        {:reason :unsupported :path (:path r) :shape shape})))
+      (let [ps (parts info)
+            arrays (mapv (fn [{:keys [dtype shape]}]
+                           (let [k (reduce * 1 shape)]
+                             (case dtype
+                               :float32 (float-array k)
+                               (:float16 :bfloat16) (short-array k)
+                               (:int32 :uint32) (int-array k))))
+                         ps)]
+        (read-tensor! r info (fn [part index data count]
+                               (System/arraycopy data 0 (arrays part) (int index) (int count))))
+        (if (quantized? type)
+          {:quantized arrays :shapes (mapv :shape ps) :bits (long (:bits (loadable type)))}
+          {:dtype (:dtype (first ps)) :shape shape :data (first arrays)})))))
 
 (defn- doubles-of
   "A host array's values as doubles: an int's as an integer, a 16-bit
@@ -637,14 +857,15 @@
     out))
 
 (defn read-tensor
-  "The tensor of the file at path described by info (header's), on the
-   host as doubles, the JVM backend's storage: {:dtype :shape :data} for
+  "The tensor of the file described by info (header's), read by r (a
+   reader, or the file's path), on the host as doubles, the JVM backend's
+   storage: {:dtype :shape :data} for
    a plain type and Q6_K (data a double[] of the values, row-major), or
    {:quantized [words scales biases] :shapes [words' scales' biases']
    :bits} for a quantized one (MLX's affine layout in groups of 32: words
    uint32 values, scales and biases float32 values, as doubles)."
-  [path info]
-  (let [{:keys [quantized data dtype] :as t} (host-tensor path info)]
+  [r info]
+  (let [{:keys [quantized data dtype] :as t} (host-tensor r info)]
     (if quantized
       (let [[words scales biases] quantized]
         (assoc t :quantized [(words-of words) (doubles-of scales :float32) (doubles-of biases :float32)]))
@@ -687,30 +908,71 @@
 ;; Loading
 ;; ---------------------------------------------------------------------------
 
+(defn- target-dtypes
+  "The dtype each tensor's floats load in, by name, from load-gguf's
+   :dtype (a float dtype, or a function of a tensor's name giving one or
+   nil): the tensors of a float type, or quantized (their scales and
+   biases), that :dtype names a dtype for."
+  [path dtype infos]
+  (let [of (cond (nil? dtype) (constantly nil)
+                 (keyword? dtype) (constantly dtype)
+                 (ifn? dtype) dtype
+                 :else (throw (ex-info (str "load-gguf: :dtype is a float dtype or a function of a tensor's name, not "
+                                            (pr-str dtype))
+                                       {:reason :invalid-args :path (str path) :dtype dtype})))]
+    (into {}
+          (keep (fn [{:keys [name type]}]
+                  (when (or (quantized? type) (float-type? type))
+                    (when-let [d (of name)]
+                      (when-not (#{:float16 :bfloat16 :float32 :float64} d)
+                        (throw (ex-info (str "load-gguf: tensor " name "'s :dtype is a float dtype, not " (pr-str d))
+                                        {:reason :invalid-args :path (str path) :tensor name :dtype d})))
+                      [name d]))))
+          infos)))
+
 (defn load-gguf
   "gen.array/load-gguf's body, on backend b: every file's tensors by the
-   backend (p/-load-gguf), evaluated, with the first file's metadata."
-  [b path]
-  (let [hs (headers path)
-        infos (check-tensors hs)
-        loaded (into {} (mapcat (fn [h] (p/load-gguf b h))) hs)
-        tensors (into {}
-                      (map (fn [{:keys [name type]}]
-                             (let [v (or (get loaded name)
-                                         (throw (ex-info (str "load-gguf: the " (clojure.core/name (p/-name b))
-                                                              " backend did not load tensor " name)
-                                                         {:reason :invalid-gguf :path (str path) :tensor name})))]
-                               [name (if (quantized? type)
-                                       (let [[wq scales biases] v]
-                                         {:wq wq :scales scales :biases biases
-                                          :bits (:bits (loadable type)) :group-size group-size})
-                                       v)])))
-                      infos)]
-    (p/-eval! b (mapcat (fn [v] (if (map? v) [(:wq v) (:scales v) (:biases v)] [v])) (vals tensors)))
-    {:metadata (:metadata (first hs))
-     :tensors tensors
-     :types (into {} (map (juxt :name :type)) infos)
-     :files (mapv :path hs)}))
+   backend (p/-load-gguf), each tensor's floats in its dtype of
+   opts's :dtype (the backend's reader converting them, or cast here, a
+   tensor at a time: the source released once its cast is evaluated, on a
+   backend that releases), evaluated, with the first file's metadata."
+  ([b path] (load-gguf b path nil))
+  ([b path {:keys [dtype]}]
+   (let [hs (headers path)
+         infos (check-tensors hs)
+         targets (target-dtypes path dtype infos)
+         ;; the host reader converts to these as it reads (parts' :as)
+         hs (mapv (fn [h]
+                    (update h :tensors (partial mapv (fn [{:keys [name] :as t}]
+                                                       (let [d (targets name)]
+                                                         (if (converted-dtypes d) (assoc t :as d) t))))))
+                  hs)
+         loaded (into {} (mapcat (fn [h] (p/load-gguf b h))) hs)
+         cast (fn [x d]
+                (if (or (nil? d) (= d (p/-dtype b x)))
+                  x
+                  (let [y (p/-astype b x d)]
+                    (p/-eval! b [y])
+                    (when (instance? gen.array.protocols.IReleasing b) (p/-release! b [x]))
+                    y)))
+         tensors (into {}
+                       (map (fn [{:keys [name type]}]
+                              (let [v (or (get loaded name)
+                                          (throw (ex-info (str "load-gguf: the " (clojure.core/name (p/-name b))
+                                                               " backend did not load tensor " name)
+                                                          {:reason :invalid-gguf :path (str path) :tensor name})))
+                                    d (targets name)]
+                                [name (if (quantized? type)
+                                        (let [[wq scales biases] v]
+                                          {:wq wq :scales (cast scales d) :biases (cast biases d)
+                                           :bits (:bits (loadable type)) :group-size group-size})
+                                        (cast v d))])))
+                       infos)]
+     (p/-eval! b (mapcat (fn [v] (if (map? v) [(:wq v) (:scales v) (:biases v)] [v])) (vals tensors)))
+     {:metadata (:metadata (first hs))
+      :tensors tensors
+      :types (into {} (map (juxt :name :type)) infos)
+      :files (mapv :path hs)})))
 
 ;; ---------------------------------------------------------------------------
 ;; Writing (gen.llm.lora's adapters for llama.cpp, gen.llm.convert's models)

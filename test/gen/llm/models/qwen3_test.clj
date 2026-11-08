@@ -252,6 +252,26 @@
 ;; Loud errors
 ;; ---------------------------------------------------------------------------
 
+(deftest a-model-loads-in-its-dtype-a-tensor-at-a-time
+  ;; qwen3/load makes each tensor in the model's dtype as it loads
+  ;; (gen.array/load-gguf's :dtype), never the whole file in its own dtype
+  ;; first: its weights are model's of the file loaded as it is, then
+  ;; cast, bit for bit (dtype, shape and each value's bits), a K-quant
+  ;; file's (the host reader's conversion) among them. Planted bug: the
+  ;; file loaded in bfloat16 for a float16 model fails here (2026-11-08)
+  (let [bits (fn [x] (if (or (nil? x) (number? x))
+                       x
+                       [(array/dtype x) (array/shape x)
+                        (mapv #(Double/doubleToRawLongBits (double %)) (flatten [(array/->clj x)]))]))
+        dtypes (if (ts/jvm?) [:float32 :float64] [:float16 :bfloat16 :float32])]
+    (doseq [file (conj (vals files) "test/fixtures/gguf/qwen3-small-q4_k_m.gguf")
+            dtype dtypes]
+      (testing (str file " in " (name dtype))
+        (let [mine (qwen3/load file {:dtype dtype})
+              theirs (qwen3/model (array/load-gguf file) {:dtype dtype})]
+          (is (= (:config theirs) (:config mine)))
+          (is (= (mapv bits (array/tree-leaves (:weights theirs))) (mapv bits (array/tree-leaves (:weights mine))))))))))
+
 (deftest misuse-is-loud
   (let [m (:q8_0 @models)
         reason (fn [f] (:reason (ts/thrown-data (f))))]

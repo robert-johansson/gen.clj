@@ -356,6 +356,26 @@
         (let [[_ p k] (last cases)]
           (is (= (ts/host (picked p k)) (ts/host (first (top-k p k))))))))))
 
+(deftest a-model-loads-in-its-dtype-a-tensor-at-a-time
+  ;; qwen35/load makes each tensor in the model's dtype as it loads
+  ;; (gen.array/load-gguf's :dtype; the router float32 under a half
+  ;; float), never the whole file in its own dtype first: its weights are
+  ;; model's of the file loaded as it is, then cast, bit for bit (dtype,
+  ;; shape and each value's bits). Planted bug: the routers loaded in the
+  ;; half float fails here (2026-11-08)
+  (let [bits (fn [x] (if (or (nil? x) (number? x))
+                       x
+                       [(array/dtype x) (array/shape x)
+                        (mapv #(Double/doubleToRawLongBits (double %)) (flatten [(array/->clj x)]))]))
+        dtypes (if (ts/jvm?) [:float32 :float64] [:float16 :bfloat16 :float32])]
+    (doseq [k [:f32 :q8_0 :moe-f32 :moe-q8_0]
+            dtype dtypes]
+      (testing (str (name k) " in " (name dtype))
+        (let [mine (qwen35/load (files k) {:dtype dtype})
+              theirs (qwen35/model (array/load-gguf (files k)) {:dtype dtype})]
+          (is (= (:config theirs) (:config mine)))
+          (is (= (mapv bits (array/tree-leaves (:weights theirs))) (mapv bits (array/tree-leaves (:weights mine))))))))))
+
 (deftest a-half-float-router-computes-in-float32
   ;; genclj-fxag: under a half float the router's weights load in float32
   ;; and its product is float32's, so that its top k orders experts as
