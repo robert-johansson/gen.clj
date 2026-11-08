@@ -5663,3 +5663,96 @@ Five planted bugs fail the clients by 1.5 to 6.3 nats on both backends:
   float32 partials, which means editing the ported kernel.
 - docs/array-api.md's paged-attention paragraph now names v2. It describes
   the backend; the API is unchanged.
+
+### Paged attention on CUDA: vLLM's v1 through mlx_fast_cuda_kernel
+
+(PROVISIONAL, owner to confirm; genclj-1daf, genclj-6qb6, 2026-11-08)
+
+**What's built.** gen.backend.mlx.paged-attention-cuda (new) runs vLLM's
+paged attention v1 through mlx_fast_cuda_kernel, with the Metal kernel's
+operands, dtypes and block layouts.
+- nn.clj's `:paged-attention` tries Metal's kernel first (v1, or v2 past its
+  limit), then CUDA's, then the composite. The composite stays the
+  reference.
+- The integers vLLM's launcher passes (KV heads, table width, strides) are
+  read from the inputs' shapes, so one compiled kernel covers every table
+  width.
+- It covers float32, float16, and bfloat16 from compute capability 8.0 (read
+  from MLX's device info); blocks of 8, 16 or 32 positions; heads up to 256.
+- Still route A: no C++ of ours. Nothing blocked the port.
+
+**The decisions:**
+1. **Ported from vLLM itself,** at 258f8de, the last commit with the kernel
+   (vLLM deleted it in d715b3a, 2026-07-02): csrc/libtorch_stable/attention's
+   attention_kernels.cuh, paged_attention_v1.cu and attention_utils.cuh;
+   csrc/attention's attention_generic.cuh and dtype files; csrc/cuda_compat.h.
+   - The files are Apache-2.0, adapted by vLLM from NVIDIA's
+     FasterTransformer, with no NOTICE file in either.
+   - They are joined, each keeping its license header, with rule 10's header
+     and Changes line and a THIRD-PARTY-NOTICES entry. The kernel function
+     is verbatim. Includes NVRTC lacks are replaced by a short prologue, and
+     the fp8 conversions are declared, not ported.
+   - Not taken: kernels-community's CUDA copy, or an older vLLM tag.
+2. **Shared memory in five tiers** (1,024, 2,048, 4,096, 8,192 and 16,000
+   positions), each a kernel of its own name, with the composite past 16,000
+   (64 KiB, which every GPU MLX's CUDA backend supports). MLX sets the
+   extra-shared-memory attribute only once per kernel name. Not taken:
+   - one kernel at the maximum (lower occupancy at short contexts);
+   - a kernel per table width (more compiles);
+   - a per-device cap (about 25,000 positions on sm_120), which MLX's
+     device info can't report.
+3. **A namespace of its own,** for its own provenance entry. Not taken: one
+   namespace for both kernels.
+4. **128 threads a block,** vLLM's CUDA default. Metal uses 256.
+5. **array-engine-llama-test takes the per-platform band** (against-llama's:
+   2.4 off the Mac). It had used Metal's 0.075, and failed on CUDA where the
+   gap is 0.19 to 0.32. Not taken: keeping it Metal-only.
+
+**mlx_fast_cuda_kernel's limits that shaped it:**
+- shared memory is fixed when a kernel is made (hence the tiers);
+- there are no scalar arguments, so the scale goes in as a 0-d array and the
+  integers come from shapes;
+- there is no disk cache, so each process compiles each variant once (about
+  0.8 s for the first launch, then 0.9 ms);
+- MLX hashes the 63 KB source on every launch, a small host cost (Metal does
+  the same).
+Had the port stalled, a hand-written kernel, not our own C++, was the
+fallback: one native artifact and no ABI tied to MLX's internals.
+
+**Tests on fenrir (RTX PRO 6000, C2):**
+- The engine set passes: 102 tests, 1,094 assertions, no native suite
+  skipped. With CUDA graphs on: 19 tests, 0 failures.
+- Against the composite: 2.9e-6 in float32, and one output rounding step in
+  the half floats (2.0e-3 float16, 1.6e-2 bfloat16). The bands are four times
+  those.
+- 12,000 positions run the kernel at its largest shared memory, and 16,500
+  fall back to the composite.
+- Four planted bugs fail by at least 0.47 against bands of 6e-2: the next
+  sequence's block table, keys read one table entry on, the scale dropped,
+  and the lengths one short.
+- After merging with v2 on main: the Mac's Metal run passes (63 tests), and
+  so does the JVM battery (2,409).
+
+**Measured on fenrir, tokens/s** (each engine in its own JVM, median of 5;
+paged and continuous cells show kernel / composite; 8 clients at once):
+
+| Model, dtype | Run | Static | Paged | Continuous | llama.cpp CUDA |
+|---|---|---:|---:|---:|---:|
+| 0.6B Q8_0, f16 | SMC 16 | 797 | 1158 / 999 | 1202 / 989 | 2228 |
+| 0.6B Q8_0, f16 | 8 clients | 147 | 219 / 181 | **555** / 431 | 503 |
+| 0.6B Q8_0, f32 | SMC 16 | 740 | 1022 / 721 | 857 / 858 | 2214 |
+| 0.6B Q8_0, f32 | 8 clients | 104 | 195 / 151 | 409 / 375 | 502 |
+| 0.6B F16, f16 | SMC 16 | 778 | 920 / 841 | 986 / 971 | 2195 |
+| 0.6B F16, f16 | 8 clients | 142 | 187 / 149 | **527** / 451 | 454 |
+| 8B Q8_0, f16 | SMC 16 | 620 | 842 / 766 | 841 / 791 | 1484 |
+| 8B Q8_0, f16 | 8 clients | 73 | 81 / 76 | **231** / 220 | 144 |
+
+- The kernel speeds the paged mode by 9 to 42%.
+- Continuous batching now beats llama.cpp with 8 clients on CUDA, as it does
+  on Metal (302 against 103 there).
+- Token SMC on CUDA is still 1.8 to 2.6× behind llama.cpp. On Metal the gap
+  is 836 against 924.
+
+**For the owner:** in float16 SMC the paged mode now beats the static one on
+both Metal and CUDA. That was the stated condition for making paged the
+default. Flipping it is the owner's call; the default is still static.
