@@ -109,7 +109,7 @@
             [gen.llm.host :as host]
             [gen.llm.llama.recurrent :as recurrent]
             [gen.llm.slots :as slots])
-  (:import [gen.llama LlamaRuntime LlamaRuntime$Batch]
+  (:import [gen.llama LlamaRuntime LlamaRuntime$Batch LlamaRuntime$Recorder LlamaRuntime$Recorder$Entry]
            [gen.llama.ffi Llama llama_context_params llama_model_params]
            [java.lang.foreign Arena MemorySegment ValueLayout]
            [java.lang.ref Cleaner Cleaner$Cleanable]
@@ -691,13 +691,98 @@
             (throw (llama-failure "llama/engine" (str "llama.cpp could not set the adapters (" code ")")
                                   {:reason :context-failed :code code}))))))))
 
+;; ---------------------------------------------------------------------------
+;; Recorded tensors (:record, experimental: for checks)
+;; ---------------------------------------------------------------------------
+
+;; An engine opened with :record holds a volatile
+;;   {:recorder  its LlamaRuntime$Recorder (the context's eval callback)
+;;    :bases     the bases recorded
+;;    :layers    {base [first last]}, the layers the first decode recorded
+;;    :decodes   [{:slot :positions :tensors {base {layer {position row}}}} …]}
+;; A context decodes a batch of one sequence in one ubatch when its n_ubatch
+;; is its n_batch (new-context), so a decode's tensors are one graph's: a
+;; layer's rows are the batch's tokens in order, or (llama.cpp's last layer,
+;; which keeps only the rows of the logits asked for) its outputs'.
+
+(defn- recording-cleared!
+  "Before a decode: forget what the recorder holds."
+  [recording]
+  (when recording
+    (.clear ^LlamaRuntime$Recorder (:recorder @recording))))
+
+(defn- entry-rows
+  "The rows of a recorded entry, host vectors (longs or doubles)."
+  [^LlamaRuntime$Recorder$Entry e]
+  (let [cols (.-cols e)
+        ^ints is (.-ints e)
+        ^floats fs (.-floats e)]
+    (mapv (fn [^long r]
+            (if is
+              (into [] (map #(long (aget is (int (+ (* r cols) (long %)))))) (range cols))
+              (into [] (map #(double (aget fs (int (+ (* r cols) (long %)))))) (range cols))))
+          (range (.-rows e)))))
+
+(defn- recorded!
+  "After a decode of one slot at positions (its batch's, in order), its last
+   n-out with logits: the recorder's tensors, each layer's rows by position,
+   appended to the engine's decodes. Loud (the decode then undone) when a
+   base was not recorded, its layers have a gap or are not the first
+   decode's, a tensor's rows are neither the batch's nor its outputs', or
+   the graph was computed in several ubatches."
+  [recording slot positions n-out what]
+  (when recording
+    (let [{:keys [^LlamaRuntime$Recorder recorder bases layers]} @recording
+          entries (vec (.drain recorder))
+          positions (vec positions)
+          n (count positions)
+          outputs (subvec positions (- n (long n-out)))
+          fail (fn [msg data] (throw (ex-info (str what ": " msg) (merge {:reason :not-recorded :slot slot} data))))
+          by-base (group-by #(.-base ^LlamaRuntime$Recorder$Entry %) entries)
+          tensors (into {}
+                        (map (fn [base]
+                               (let [es (get by-base base)
+                                     ls (mapv #(.-layer ^LlamaRuntime$Recorder$Entry %) es)
+                                     span (when (seq ls) [(reduce min ls) (reduce max ls)])]
+                                 (when (empty? es)
+                                   (fail (str "llama.cpp's graph named no tensor " base "-<layer>"
+                                              (when (= base "ffn_moe_topk") " (a model without experts?)"))
+                                         {:base base}))
+                                 (when-not (apply distinct? ls)
+                                   (fail (str "a layer's " base " was computed twice: the decode ran in several ubatches")
+                                         {:base base :layers ls}))
+                                 (when-not (= (sort ls) (range (first span) (inc (long (second span)))))
+                                   (fail (str "layers " (vec (remove (set ls) (range (first span) (second span))))
+                                              " have no " base)
+                                         {:base base :layers (vec (sort ls))}))
+                                 (when-let [first-span (get layers base)]
+                                   (when (not= first-span span)
+                                     (fail (str base " was recorded in layers " span ", the first decode's " first-span)
+                                           {:base base :layers span :first first-span})))
+                                 [base (into (sorted-map)
+                                             (map (fn [^LlamaRuntime$Recorder$Entry e]
+                                                    (let [rows (entry-rows e)
+                                                          at (cond (== (count rows) n) positions
+                                                                   (== (count rows) (count outputs)) outputs
+                                                                   :else (fail (str base "-" (.-layer e) " has " (count rows)
+                                                                                    " rows, for a batch of " n " tokens, "
+                                                                                    (count outputs) " with logits")
+                                                                               {:base base :layer (.-layer e)}))]
+                                                      [(.-layer e) (zipmap at rows)])))
+                                             es)])))
+                        bases)]
+      (vswap! recording (fn [r] (-> r
+                                    (update :layers #(merge (update-vals tensors (fn [ls] [(key (first ls)) (key (first (rseq ls)))]))
+                                                            %))
+                                    (update :decodes conj {:slot slot :positions positions :tensors tensors})))))))
+
 ;; An engine's Slots: model, the LlamaModel it reads (owns-model? when the
 ;; engine loaded it from a path, to free it on closing), and its adapters
 ;; ({adapter scale}), all three used under token in their books.
 
 (deftype LlamaSlots [^LlamaModel model ^MemorySegment ctx ^MemorySegment mem ^MemorySegment vocab
                      ^LlamaRuntime$Batch batch ^Arena arena ^ExecutorService pool ^long n-vocab ^long n-batch info
-                     ^clojure.lang.Volatile splits token adapters owns-model?]
+                     ^clojure.lang.Volatile splits ^clojure.lang.Volatile recording token adapters owns-model?]
   slots/Slots
   (slots-info [_] info)
 
@@ -710,7 +795,10 @@
           (let [len (min n-batch (- n from))
                 end (+ from len)]
             (.run batch toks (int from) (int len) (int (+ (long pos) from)) (int slot) (some? tgts))
+            (recording-cleared! recording)
             (decode! (.-lock model) ctx batch "read")
+            (recorded! recording slot (range (+ (long pos) from) (+ (long pos) end))
+                       (if tgts len 1) "read")
             (replayed! splits recurrent/decode [slot] [(+ (long pos) end -1)])
             (replay-checked! splits mem [slot] "read")
             ;; row k scores the token after token from+k; the run's last
@@ -735,6 +823,10 @@
                    (recurrent/plan st slots positions fixed-states)
                    [(vec (range (count slots)))])
           rows (object-array (count slots))]
+      (when (and recording (next slots))
+        (throw (ex-info (str "advance: an engine recording tensors (:record) steps one branch at a time, not "
+                             (count slots))
+                        {:reason :unsupported :slots slots})))
       (when splits
         (vswap! splits #(-> % (update :steps inc) (update :decodes + (count groups))
                             (cond-> (next groups) (update :split inc)))))
@@ -743,7 +835,9 @@
           (let [ss (mapv slots g)
                 ps (mapv positions g)]
             (.step batch (int-array (mapv tokens g)) (int-array ps) (int-array ss))
+            (recording-cleared! recording)
             (decode! (.-lock model) ctx batch "advance")
+            (recorded! recording (first ss) ps 1 "advance")
             (replayed! splits recurrent/decode ss ps)
             (replay-checked! splits mem ss "advance")
             (doseq [[i r] (map vector g (host/in-order pool #(row-logprobs % n-vocab "advance")
@@ -794,6 +888,7 @@
   {:model #(or (instance? LlamaModel %) (and (string? %) (.isFile (java.io.File. ^String %))))
    :max-branches pos-int? :n-ctx pos-int? :n-batch pos-int? :gpu-layers int?
    :threads #(or (nil? %) (pos-int? %)) :swa-full boolean?
+   :record #(and (coll? %) (seq %) (every? (fn [b] (and (string? b) (re-matches #"[A-Za-z0-9_.]+" b))) %))
    :adapters #(and (map? %) (every? (fn [[a s]] (and (instance? LlamaAdapter a) (scale? s))) %))})
 
 (defn- check-options
@@ -858,12 +953,21 @@
   (try (performance-cores) (catch Exception _ nil)))
 
 (defn- new-context
-  "A context of m: n-slots sequences in one unified cache of n-ctx cells."
-  ^MemorySegment [^Arena arena ^MemorySegment m {:keys [n-ctx n-batch n-slots swa-full threads]}]
-  (let [params (Llama/llama_context_default_params arena)]
+  "A context of m: n-slots sequences in one unified cache of n-ctx cells;
+   with recorder's eval callback when one is given, and then a ubatch as
+   large as a batch (a decode of one sequence is one graph)."
+  ^MemorySegment [^Arena arena ^MemorySegment m {:keys [n-ctx n-batch n-slots swa-full threads]}
+                  ^LlamaRuntime$Recorder recorder]
+  (let [params (Llama/llama_context_default_params arena)
+        n-batch (max (long n-batch) (long n-slots))]
+    (when recorder
+      (doto params
+        (llama_context_params/cb_eval (.-stub recorder))
+        (llama_context_params/cb_eval_user_data MemorySegment/NULL)
+        (llama_context_params/n_ubatch (int n-batch))))
     (doto params
       (llama_context_params/n_ctx (int n-ctx))
-      (llama_context_params/n_batch (int (max (long n-batch) (long n-slots))))
+      (llama_context_params/n_batch (int n-batch))
       (llama_context_params/n_seq_max (int n-slots))
       (llama_context_params/kv_unified true)
       ;; no snapshots of recurrent states, as gen.llm.llama.recurrent replays
@@ -942,13 +1046,13 @@
    uses them, make its context and set the adapters on it: [ctx, the log
    of its making]. (undo! f) records how to undo each step (run the last
    first, after a failure)."
-  [^LlamaModel m token adapters ^Arena arena opts undo!]
+  [^LlamaModel m token adapters ^Arena arena opts recorder undo!]
   (reading (.-lock m)
            (fn []
              (check-attachable m adapters)
              (register! m token adapters)
              (undo! #(deregister! m token adapters))
-             (let [[ctx log] (logged #(new-context arena (.-ptr m) opts))]
+             (let [[ctx log] (logged #(new-context arena (.-ptr m) opts recorder))]
                (undo! #(reading (.-lock m) (fn [] (Llama/llama_free ctx))))
                (set-adapters! ctx adapters)
                [ctx log]))))
@@ -960,7 +1064,7 @@
   [opts token]
   (LlamaRuntime/load)
   (LlamaRuntime/clearLastError)
-  (let [{:keys [model gpu-layers n-slots adapters] :as opts} (check-options opts)
+  (let [{:keys [model gpu-layers n-slots adapters record] :as opts} (check-options opts)
         split (split-recurrent)
         arena (Arena/ofConfined)
         undo (volatile! (list #(.close arena)))
@@ -971,7 +1075,8 @@
             ^LlamaModel m (if owns-model?
                             (owned #(.close ^java.io.Closeable %) (open-model model gpu-layers))
                             model)
-            [^MemorySegment ctx log] (attach! m token adapters arena opts undo!)
+            recorder (when record (LlamaRuntime$Recorder. ^java.util.Collection (vec (sort (set record))) arena))
+            [^MemorySegment ctx log] (attach! m token adapters arena opts recorder undo!)
             _ (check-context ctx n-slots)
             n-batch (long (Llama/llama_n_batch ctx))
             batch (owned #(Llama/llama_batch_free (.-struct ^LlamaRuntime$Batch %))
@@ -982,9 +1087,12 @@
             described (describe m ctx (.-vocab m) adapters opts fp)
             splits (when (and (if (nil? split) (metal? fp) split) (some (:model described) [:recurrent? :hybrid?]))
                      (volatile! {:cells (recurrent/empty-cells n-slots) :off nil :steps 0 :split 0 :decodes 0}))
-            info (assoc described :split-recurrent? (some? splits))
+            info (cond-> (assoc described :split-recurrent? (some? splits))
+                   record (assoc :record (into (sorted-set) record)))
+            recording (when recorder
+                        (volatile! {:recorder recorder :bases (vec (sort (set record))) :layers {} :decodes []}))
             slots (LlamaSlots. m ctx (memory ctx) (.-vocab m) batch arena pool (:n-vocab info) n-batch info splits
-                               token adapters owns-model?)]
+                               recording token adapters owns-model?)]
         (reservations/reserve! slots (reduce + 0 (map :bytes ctx-buffers)) (str "llama.cpp context: " (:desc (:model info))))
         slots)
       (catch Throwable t
@@ -1010,7 +1118,16 @@
                     path (a model has its own, llama/model's option)
      :threads       CPU threads (default: on a Linux hybrid CPU its physical
                     performance cores, else llama.cpp's own)
-     :swa-full      a full-size cache for sliding-window layers (default true)"
+     :swa-full      a full-size cache for sliding-window layers (default true)
+     :record        experimental, for checks: llama.cpp's intermediate
+                    tensors to record at each decode, by their names'
+                    bases (#{\"ffn_moe_topk\"}, the experts each layer of a
+                    mixture of experts picks: recorded, experts). Default
+                    none, and no eval callback; with it, the context
+                    computes its graphs in pieces (slower, and rounding as
+                    the pieces do), a step advances one branch, and a
+                    decode that records no such tensor is a loud error,
+                    undone (:not-recorded)"
   ^java.io.Closeable [opts]
   (let [token (Object.)
         e (slots/engine #(open-slots opts token) "llama.cpp")]
@@ -1193,6 +1310,44 @@
   [e]
   (on-llama e (fn [^LlamaSlots s]
                 (some-> (.-splits s) deref (dissoc :cells)))))
+
+(defn recorded
+  "Experimental, for checks: the decodes that engine e (opened with
+   :record) ran since the last call, in order, and forget them: [{:slot
+   :positions [p …] :tensors {base {layer {position row}}}} …], a row a
+   host vector (longs of an I32 tensor, doubles of an F32 one) at each
+   position of the decode's batch where the layer computed one (llama.cpp's
+   last layer computes only the positions whose logits the decode reads).
+   An engine that records nothing is a loud error (:not-recording)."
+  [e]
+  (on-llama e (fn [^LlamaSlots s]
+                (let [r (.-recording s)]
+                  (when-not r
+                    (throw (ex-info "llama/recorded: the engine records no tensors (open it with :record)"
+                                    {:reason :not-recording})))
+                  (let [ds (:decodes @r)]
+                    (vswap! r assoc :decodes [])
+                    ds)))))
+
+(defn experts
+  "Experimental, for checks: the experts a mixture of experts' layers
+   picked in decodes (recorded's, of an engine recording
+   \"ffn_moe_topk\"): {slot {position [indices by layer]}}, each layer's
+   indices llama.cpp's top k (most probable first), nil at a position
+   where the layer computed none (the last layer's, but where the logits
+   were read); a later decode of a slot's position replaces an earlier
+   one's."
+  [decodes]
+  (reduce (fn [acc {:keys [slot positions tensors]}]
+            (let [by-layer (get tensors "ffn_moe_topk")]
+              (when-not by-layer
+                (throw (ex-info "llama/experts: the decodes recorded no ffn_moe_topk" {:reason :not-recorded})))
+              (let [layers (vec (keys by-layer))
+                    n (inc (long (peek layers)))]
+                (reduce (fn [acc p]
+                          (assoc-in acc [slot p] (mapv #(get-in by-layer [% p]) (range n))))
+                        acc positions))))
+          {} decodes))
 
 (defn kv-positions
   "Diagnostics: [min max] of the positions each slot holds in the KV cache

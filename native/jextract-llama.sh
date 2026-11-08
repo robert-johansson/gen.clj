@@ -28,6 +28,10 @@
 #   should change nothing; if it does, jextract's is the one to keep.
 #   (llama_adapter_lora_init_from_file_ptr is left out: it takes a C FILE
 #   pointer, which the JVM has no use for beside the path form.)
+#   The ggml functions (ggml_nelements … ggml_backend_tensor_get, which
+#   llama.h's includes declare: an eval callback's reads of a tensor) were
+#   added on 2026-11-08 the same way, without jextract, in jextract 25's
+#   form, before llama.h's own functions as its includes come first.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -44,6 +48,8 @@ out="$root/src-java"
 # The functions gen.llm.llama calls. Adding one here and regenerating is how
 # the binding grows.
 functions="
+  ggml_nelements ggml_nbytes ggml_element_size ggml_get_name
+  ggml_backend_tensor_get
   llama_version llama_backend_init llama_log_set llama_print_system_info
   llama_supports_gpu_offload llama_max_parallel_sequences
   llama_model_default_params llama_context_default_params

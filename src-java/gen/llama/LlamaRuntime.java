@@ -211,6 +211,154 @@ public final class LlamaRuntime {
     }
   }
 
+  // ---- recorded tensors -----------------------------------------------------------------
+
+  /** A recorder of a context's intermediate tensors, for checks (experimental):
+   *  through llama.cpp's eval callback (llama_context_params.cb_eval, the
+   *  ggml_backend_sched_eval_callback stub), the tensors of each graph the
+   *  context computes that llama.cpp names base-layer (llm_graph_context's
+   *  cb: "ffn_moe_topk-3", the experts layer 3 of a mixture of experts picks)
+   *  for one of the bases given, copied to the host (ggml_backend_tensor_get)
+   *  as the scheduler computes them. A recorded tensor is F32 or I32, of at
+   *  most 2 dimensions, its rows contiguous (a view's rows may be strided, as
+   *  ffn_moe_topk's, the first k of an argsort's).
+   *
+   *  The callback stops the scheduler at each tensor asked for (it computes
+   *  the graph in pieces, and synchronizes), so a recording context decodes
+   *  more slowly, and may round otherwise than one without (no fusion across
+   *  the pieces): a check reads the tensors and the logits of the same
+   *  decodes. Nothing may escape an upcall: a failure is kept, the callback
+   *  stops the graph, and drain throws it. One thread decodes a context, and
+   *  the callback runs on it (the scheduler calls it between the pieces). */
+  public static final class Recorder {
+    /** One tensor of a decode: its base name, layer, and rows × cols values
+     *  (ints for I32, floats for F32), row by row. */
+    public static final class Entry {
+      public final String base;
+      public final int layer;
+      public final int rows, cols;
+      public final int[] ints;
+      public final float[] floats;
+
+      Entry(String base, int layer, int rows, int cols, int[] ints, float[] floats) {
+        this.base = base;
+        this.layer = layer;
+        this.rows = rows;
+        this.cols = cols;
+        this.ints = ints;
+        this.floats = floats;
+      }
+    }
+
+    // struct ggml_tensor (ggml.h of v0.9.0): enum ggml_type type at 0, then
+    // the buffer pointer, int64_t ne[4] at 16 and size_t nb[4] at 48. Each
+    // read checks them against ggml's own accessors (count, element size and
+    // bytes), so a layout of another release is loud, not misread.
+    private static final long TYPE = 0, NE = 16, NB = 48, PREFIX = 80;
+    private static final int GGML_TYPE_F32 = 0, GGML_TYPE_I32 = 26;
+
+    private final java.util.Set<String> bases;
+    private final java.util.ArrayList<Entry> entries = new java.util.ArrayList<>();
+    private Throwable failure;
+
+    /** The callback's stub, for llama_context_params.cb_eval: valid while
+     *  arena is open (close it after freeing the context). */
+    public final MemorySegment stub;
+
+    public Recorder(java.util.Collection<String> bases, Arena arena) {
+      this.bases = java.util.Set.copyOf(bases);
+      try {
+        stub = Linker.nativeLinker().upcallStub(
+            MethodHandles.lookup().findVirtual(Recorder.class, "eval",
+                MethodType.methodType(boolean.class, MemorySegment.class, boolean.class, MemorySegment.class))
+                .bindTo(this),
+            FunctionDescriptor.of(JAVA_BOOLEAN, ADDRESS, JAVA_BOOLEAN, ADDRESS), arena);
+      } catch (ReflectiveOperationException e) {
+        throw new IllegalStateException(e);
+      }
+    }
+
+    /** bool (*ggml_backend_sched_eval_callback)(struct ggml_tensor * t, bool ask, void * user_data):
+     *  asked (ask), whether t is wanted; then, t computed, record it (and
+     *  go on). */
+    boolean eval(MemorySegment t, boolean ask, MemorySegment userData) {
+      try {
+        if (failure != null) return false;
+        String name = Llama.ggml_get_name(t).getString(0, StandardCharsets.UTF_8);
+        int dash = name.lastIndexOf('-');
+        if (dash <= 0 || dash == name.length() - 1 || !bases.contains(name.substring(0, dash))) return false;
+        for (int i = dash + 1; i < name.length(); i++) {
+          if (!Character.isDigit(name.charAt(i))) return false;
+        }
+        if (ask) return true;
+        entries.add(read(t, name.substring(0, dash), Integer.parseInt(name.substring(dash + 1)), name));
+        return true;
+      } catch (Throwable e) {
+        failure = e;
+        return false;
+      }
+    }
+
+    private static Entry read(MemorySegment tensor, String base, int layer, String name) {
+      MemorySegment t = tensor.reinterpret(PREFIX);
+      int type = t.get(JAVA_INT, TYPE);
+      long[] ne = new long[4], nb = new long[4];
+      for (int i = 0; i < 4; i++) {
+        ne[i] = t.get(JAVA_LONG, NE + 8L * i);
+        nb[i] = t.get(JAVA_LONG, NB + 8L * i);
+      }
+      if (type != GGML_TYPE_F32 && type != GGML_TYPE_I32) {
+        throw new IllegalStateException(name + " is of ggml type " + type + ", not F32 or I32");
+      }
+      long n = ne[0] * ne[1] * ne[2] * ne[3];
+      long bytes = Llama.ggml_nbytes(tensor);
+      long span = 4;
+      for (int i = 0; i < 4; i++) span += (ne[i] - 1) * nb[i];
+      if (n != Llama.ggml_nelements(tensor) || Llama.ggml_element_size(tensor) != 4 || nb[0] != 4
+          || (n > 0 && span != bytes)) {
+        throw new IllegalStateException("the layout of " + name + " (ne " + java.util.Arrays.toString(ne) + ", nb "
+            + java.util.Arrays.toString(nb) + ") is not ggml's (" + Llama.ggml_nelements(tensor) + " elements, "
+            + bytes + " bytes): another llama.cpp release's struct ggml_tensor?");
+      }
+      if (ne[2] != 1 || ne[3] != 1) {
+        throw new IllegalStateException(name + " has more than 2 dimensions: " + java.util.Arrays.toString(ne));
+      }
+      int rows = Math.toIntExact(ne[1]), cols = Math.toIntExact(ne[0]);
+      int[] ints = type == GGML_TYPE_I32 ? new int[rows * cols] : null;
+      float[] floats = type == GGML_TYPE_F32 ? new float[rows * cols] : null;
+      if (n > 0) {
+        try (Arena a = Arena.ofConfined()) {
+          MemorySegment host = a.allocate(bytes, 8);
+          Llama.ggml_backend_tensor_get(tensor, host, 0, bytes);
+          for (int r = 0; r < rows; r++) {
+            for (int c = 0; c < cols; c++) {
+              long at = r * nb[1] + 4L * c;
+              if (ints != null) ints[r * cols + c] = host.get(JAVA_INT, at);
+              else floats[r * cols + c] = host.get(JAVA_FLOAT, at);
+            }
+          }
+        }
+      }
+      return new Entry(base, layer, rows, cols, ints, floats);
+    }
+
+    /** Forget what was recorded (and a failure): before a decode. */
+    public void clear() {
+      entries.clear();
+      failure = null;
+    }
+
+    /** What the decodes since clear recorded, in the order computed, and
+     *  clear; or throw the callback's failure. */
+    public java.util.List<Entry> drain() {
+      Throwable f = failure;
+      java.util.List<Entry> out = java.util.List.copyOf(entries);
+      clear();
+      if (f != null) throw new IllegalStateException("the eval callback failed: " + f.getMessage(), f);
+      return out;
+    }
+  }
+
   // ---- rows of logits -------------------------------------------------------------------
 
   /** log Σ exp(row), over the n floats of a row of logits, in double: NaN

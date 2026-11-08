@@ -48,6 +48,308 @@ public class Llama extends Llama$shared {
      */
     public static final OfInt llama_seq_id = Llama.C_INT;
 
+    private static class ggml_nelements {
+        public static final FunctionDescriptor DESC = FunctionDescriptor.of(
+            Llama.C_LONG_LONG,
+            Llama.C_POINTER
+        );
+
+        public static final MemorySegment ADDR = SYMBOL_LOOKUP.findOrThrow("ggml_nelements");
+
+        public static final MethodHandle HANDLE = Linker.nativeLinker().downcallHandle(ADDR, DESC);
+    }
+
+    /**
+     * Function descriptor for:
+     * {@snippet lang=c :
+     * int64_t ggml_nelements(const struct ggml_tensor *tensor)
+     * }
+     */
+    public static FunctionDescriptor ggml_nelements$descriptor() {
+        return ggml_nelements.DESC;
+    }
+
+    /**
+     * Downcall method handle for:
+     * {@snippet lang=c :
+     * int64_t ggml_nelements(const struct ggml_tensor *tensor)
+     * }
+     */
+    public static MethodHandle ggml_nelements$handle() {
+        return ggml_nelements.HANDLE;
+    }
+
+    /**
+     * Address for:
+     * {@snippet lang=c :
+     * int64_t ggml_nelements(const struct ggml_tensor *tensor)
+     * }
+     */
+    public static MemorySegment ggml_nelements$address() {
+        return ggml_nelements.ADDR;
+    }
+
+    /**
+     * {@snippet lang=c :
+     * int64_t ggml_nelements(const struct ggml_tensor *tensor)
+     * }
+     */
+    public static long ggml_nelements(MemorySegment tensor) {
+        var mh$ = ggml_nelements.HANDLE;
+        try {
+            if (TRACE_DOWNCALLS) {
+                traceDowncall("ggml_nelements", tensor);
+            }
+            return (long)mh$.invokeExact(tensor);
+        } catch (Error | RuntimeException ex) {
+           throw ex;
+        } catch (Throwable ex$) {
+           throw new AssertionError("should not reach here", ex$);
+        }
+    }
+
+    private static class ggml_nbytes {
+        public static final FunctionDescriptor DESC = FunctionDescriptor.of(
+            Llama.C_LONG,
+            Llama.C_POINTER
+        );
+
+        public static final MemorySegment ADDR = SYMBOL_LOOKUP.findOrThrow("ggml_nbytes");
+
+        public static final MethodHandle HANDLE = Linker.nativeLinker().downcallHandle(ADDR, DESC);
+    }
+
+    /**
+     * Function descriptor for:
+     * {@snippet lang=c :
+     * size_t ggml_nbytes(const struct ggml_tensor *tensor)
+     * }
+     */
+    public static FunctionDescriptor ggml_nbytes$descriptor() {
+        return ggml_nbytes.DESC;
+    }
+
+    /**
+     * Downcall method handle for:
+     * {@snippet lang=c :
+     * size_t ggml_nbytes(const struct ggml_tensor *tensor)
+     * }
+     */
+    public static MethodHandle ggml_nbytes$handle() {
+        return ggml_nbytes.HANDLE;
+    }
+
+    /**
+     * Address for:
+     * {@snippet lang=c :
+     * size_t ggml_nbytes(const struct ggml_tensor *tensor)
+     * }
+     */
+    public static MemorySegment ggml_nbytes$address() {
+        return ggml_nbytes.ADDR;
+    }
+
+    /**
+     * {@snippet lang=c :
+     * size_t ggml_nbytes(const struct ggml_tensor *tensor)
+     * }
+     */
+    public static long ggml_nbytes(MemorySegment tensor) {
+        var mh$ = ggml_nbytes.HANDLE;
+        try {
+            if (TRACE_DOWNCALLS) {
+                traceDowncall("ggml_nbytes", tensor);
+            }
+            return (long)mh$.invokeExact(tensor);
+        } catch (Error | RuntimeException ex) {
+           throw ex;
+        } catch (Throwable ex$) {
+           throw new AssertionError("should not reach here", ex$);
+        }
+    }
+
+    private static class ggml_element_size {
+        public static final FunctionDescriptor DESC = FunctionDescriptor.of(
+            Llama.C_LONG,
+            Llama.C_POINTER
+        );
+
+        public static final MemorySegment ADDR = SYMBOL_LOOKUP.findOrThrow("ggml_element_size");
+
+        public static final MethodHandle HANDLE = Linker.nativeLinker().downcallHandle(ADDR, DESC);
+    }
+
+    /**
+     * Function descriptor for:
+     * {@snippet lang=c :
+     * size_t ggml_element_size(const struct ggml_tensor *tensor)
+     * }
+     */
+    public static FunctionDescriptor ggml_element_size$descriptor() {
+        return ggml_element_size.DESC;
+    }
+
+    /**
+     * Downcall method handle for:
+     * {@snippet lang=c :
+     * size_t ggml_element_size(const struct ggml_tensor *tensor)
+     * }
+     */
+    public static MethodHandle ggml_element_size$handle() {
+        return ggml_element_size.HANDLE;
+    }
+
+    /**
+     * Address for:
+     * {@snippet lang=c :
+     * size_t ggml_element_size(const struct ggml_tensor *tensor)
+     * }
+     */
+    public static MemorySegment ggml_element_size$address() {
+        return ggml_element_size.ADDR;
+    }
+
+    /**
+     * {@snippet lang=c :
+     * size_t ggml_element_size(const struct ggml_tensor *tensor)
+     * }
+     */
+    public static long ggml_element_size(MemorySegment tensor) {
+        var mh$ = ggml_element_size.HANDLE;
+        try {
+            if (TRACE_DOWNCALLS) {
+                traceDowncall("ggml_element_size", tensor);
+            }
+            return (long)mh$.invokeExact(tensor);
+        } catch (Error | RuntimeException ex) {
+           throw ex;
+        } catch (Throwable ex$) {
+           throw new AssertionError("should not reach here", ex$);
+        }
+    }
+
+    private static class ggml_get_name {
+        public static final FunctionDescriptor DESC = FunctionDescriptor.of(
+            Llama.C_POINTER,
+            Llama.C_POINTER
+        );
+
+        public static final MemorySegment ADDR = SYMBOL_LOOKUP.findOrThrow("ggml_get_name");
+
+        public static final MethodHandle HANDLE = Linker.nativeLinker().downcallHandle(ADDR, DESC);
+    }
+
+    /**
+     * Function descriptor for:
+     * {@snippet lang=c :
+     * const char *ggml_get_name(const struct ggml_tensor *tensor)
+     * }
+     */
+    public static FunctionDescriptor ggml_get_name$descriptor() {
+        return ggml_get_name.DESC;
+    }
+
+    /**
+     * Downcall method handle for:
+     * {@snippet lang=c :
+     * const char *ggml_get_name(const struct ggml_tensor *tensor)
+     * }
+     */
+    public static MethodHandle ggml_get_name$handle() {
+        return ggml_get_name.HANDLE;
+    }
+
+    /**
+     * Address for:
+     * {@snippet lang=c :
+     * const char *ggml_get_name(const struct ggml_tensor *tensor)
+     * }
+     */
+    public static MemorySegment ggml_get_name$address() {
+        return ggml_get_name.ADDR;
+    }
+
+    /**
+     * {@snippet lang=c :
+     * const char *ggml_get_name(const struct ggml_tensor *tensor)
+     * }
+     */
+    public static MemorySegment ggml_get_name(MemorySegment tensor) {
+        var mh$ = ggml_get_name.HANDLE;
+        try {
+            if (TRACE_DOWNCALLS) {
+                traceDowncall("ggml_get_name", tensor);
+            }
+            return (MemorySegment)mh$.invokeExact(tensor);
+        } catch (Error | RuntimeException ex) {
+           throw ex;
+        } catch (Throwable ex$) {
+           throw new AssertionError("should not reach here", ex$);
+        }
+    }
+
+    private static class ggml_backend_tensor_get {
+        public static final FunctionDescriptor DESC = FunctionDescriptor.ofVoid(
+            Llama.C_POINTER,
+            Llama.C_POINTER,
+            Llama.C_LONG,
+            Llama.C_LONG
+        );
+
+        public static final MemorySegment ADDR = SYMBOL_LOOKUP.findOrThrow("ggml_backend_tensor_get");
+
+        public static final MethodHandle HANDLE = Linker.nativeLinker().downcallHandle(ADDR, DESC);
+    }
+
+    /**
+     * Function descriptor for:
+     * {@snippet lang=c :
+     * void ggml_backend_tensor_get(const struct ggml_tensor *tensor, void *data, size_t offset, size_t size)
+     * }
+     */
+    public static FunctionDescriptor ggml_backend_tensor_get$descriptor() {
+        return ggml_backend_tensor_get.DESC;
+    }
+
+    /**
+     * Downcall method handle for:
+     * {@snippet lang=c :
+     * void ggml_backend_tensor_get(const struct ggml_tensor *tensor, void *data, size_t offset, size_t size)
+     * }
+     */
+    public static MethodHandle ggml_backend_tensor_get$handle() {
+        return ggml_backend_tensor_get.HANDLE;
+    }
+
+    /**
+     * Address for:
+     * {@snippet lang=c :
+     * void ggml_backend_tensor_get(const struct ggml_tensor *tensor, void *data, size_t offset, size_t size)
+     * }
+     */
+    public static MemorySegment ggml_backend_tensor_get$address() {
+        return ggml_backend_tensor_get.ADDR;
+    }
+
+    /**
+     * {@snippet lang=c :
+     * void ggml_backend_tensor_get(const struct ggml_tensor *tensor, void *data, size_t offset, size_t size)
+     * }
+     */
+    public static void ggml_backend_tensor_get(MemorySegment tensor, MemorySegment data, long offset, long size) {
+        var mh$ = ggml_backend_tensor_get.HANDLE;
+        try {
+            if (TRACE_DOWNCALLS) {
+                traceDowncall("ggml_backend_tensor_get", tensor, data, offset, size);
+            }
+            mh$.invokeExact(tensor, data, offset, size);
+        } catch (Error | RuntimeException ex) {
+           throw ex;
+        } catch (Throwable ex$) {
+           throw new AssertionError("should not reach here", ex$);
+        }
+    }
+
     private static class llama_version {
         public static final FunctionDescriptor DESC = FunctionDescriptor.of(
             Llama.C_POINTER    );
