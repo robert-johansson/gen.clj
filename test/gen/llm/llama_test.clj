@@ -132,6 +132,20 @@
           (is-within-noise :band (= [] (contract/run-check check e (opts e))))))
       (is (zero? (:live (br/info e))) "every check disposes what it makes"))))
 
+(deftest metal-buffers-are-recognized-by-either-name
+  ;; llama.cpp v0.9.0 names its Metal buffers MTL0… (GGML_METAL_NAME),
+  ;; earlier releases Metal…: split-recurrent steps' default (on Metal only)
+  ;; reads them. Planted (2026-11-08): the check for "Metal" alone, as it
+  ;; was, fails the first case.
+  (when-llama
+    (let [metal? (llama 'metal?)
+          fp (fn [buffer] {:buffers [{:kind :model :buffer buffer}]})]
+      (is (metal? (fp "MTL0_Mapped")) "v0.9.0's name")
+      (is (metal? (fp "Metal_Mapped")) "the earlier name")
+      (is (not (metal? (fp "CPU_Mapped"))))
+      (is (not (metal? (fp "CUDA0"))))
+      (is (not (metal? {:buffers [{:kind :kv :buffer "MTL0"}]})) "only the model's buffers count"))))
+
 (deftest the-engine-describes-itself
   (when-llama
     (let [{:keys [n-vocab max-branches n-ctx n-batch eog eos model] :as info} (br/info (engine))]

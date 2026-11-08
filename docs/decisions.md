@@ -6649,3 +6649,84 @@ runs spread about ±6%):
 8. **For upstream (the owner's call):** MLX's CUDA custom kernels hash their
    whole source at every launch, and the paged-attention kernel's source is
    large.
+
+### The MoE against llama.cpp on llama.cpp's own experts
+
+(The owner's call of 2026-11-08, "loose now, exact check next", built; the
+choices inside it PROVISIONAL, owner to confirm; genclj-ansx)
+
+**The hook.** gen.llm.llama's `:record #{"ffn_moe_topk" …}` (experimental,
+off by default; with it off nothing changes):
+- an FFM upcall on llama.cpp's cb_eval (LlamaRuntime$Recorder) asks for the
+  tensors named `<base>-<layer>`, and copies them to the host with
+  ggml_backend_tensor_get, strided views included;
+- `recorded` gives each decode by slot, position and layer; `experts`
+  gives position → layer → indices;
+- while recording, n_ubatch is n_batch, so a single-sequence decode is one
+  graph;
+- ggml_tensor's offsets are written by hand, and every read checks them
+  against ggml_nelements, ggml_nbytes and ggml_element_size, so a wrong
+  layout is loud;
+- loud: a missing base or layer, or a decode split over ubatches
+  (`:not-recorded`, the decode undone); several branches' step
+  (`:unsupported`); `recorded` on an engine without `:record`
+  (`:not-recording`);
+- five ggml functions are added to native/jextract-llama.sh's list, written
+  in jextract's form (jextract isn't installed on the Mac).
+
+against-llama's readings from llama.cpp record its experts, and
+compare-readings forces ours to them, beside the unforced comparison.
+
+**The bands, Qwen3.6-35B-A3B Q4_K_M** (general / digits, max |Δ log p|):
+
+| | unforced | forced | forced band |
+|---|---|---|---|
+| Metal (MacBook) | 0.97 / 5.97 | 6.4e-3 / 8.0e-2 | 0.16 |
+| CUDA (fenrir) | 2.19 / 6.24 | 0.45 / 1.91 | 3.9 |
+
+- Recording moves llama.cpp's own readings by at most 2.2e-4 (the tiny
+  MoE).
+- On Metal the forced gap grows with the prompt: at most 2e-3 up to 15
+  tokens, 6.8e-2 at 44, 9.2e-2 at 157.
+- CUDA's forced band stays wide because llama.cpp's CUDA build rounds
+  activations to 8 bits.
+
+**Planted errors, forced** (the least over the general prompts):
+- Metal: all clear 0.16 except RoPE's pairs (least 0.056, median 0.20,
+  0.95 on the test's 44-token prompt, so the test catches it). The rest:
+  the conv state's oldest 2.23, KV tiled 2.43, the router unnormalized 2.97,
+  the others 6.2 to 10.6.
+- CUDA: 6 of 10 clear 3.9 at their least. The exceptions are RoPE 0.13,
+  the conv state's oldest 2.04, KV tiled 2.46 and the router unnormalized
+  3.52; off the Mac the test asserts mutation-nats (0.75) for those.
+
+**Tests.** The tiny MoE fixture has no vocabulary, so llama.cpp refuses it;
+the forced tiny tests run on the opt-in `-Dgen.qwen35.vocab-models` models.
+- The forced band there is 0.04. Experts one layer off miss by 7.1–8.8 nats;
+  one position off by 8.3–10.0.
+- The recorded top-k equals the top-k of ffn_moe_probs; the next layer's
+  probabilities fail it.
+- Bugs planted in the recorder (the view's stride ignored; the positions
+  reversed) fail it.
+
+**Fixed at the merge (the lead):**
+- **qk-norms-skipped had narrowed.** Since genclj-yesw the GatedDeltaNet
+  normalizes q and k as one 5-D array, and the error skipped only 4-D
+  rms-norms. It skips every per-head norm (4-D or more) again.
+- **llama.cpp's Metal buffers were not recognized.** v0.9.0 names them
+  "MTL0…", not "Metal…", so the split-recurrent default (Metal only, DESIGN
+  §9) was off since the pin. Both names are recognized, with a test
+  (metal-buffers-are-recognized-by-either-name) and a CHANGELOG line.
+  The tests' gen.llm.llama.bands/device had the same check, so on Metal it
+  answered :cpu. :cpu's bands are Metal's, so no band changed, but
+  the-split-switch compared a wrong default with a wrong expectation and
+  passed. With the engine fixed it failed. With both fixed it passes and
+  checks the real default.
+
+**For the owner:**
+1. **RoPE's pairs on short prompts.** A band under 0.056 would catch them
+   there: twice the general prompts' 6.4e-3 gives 0.013, a 4.3× margin. No
+   band under 0.056 covers the bare digit runs. 0.16 is set; a separate
+   general-prompts band of 0.013 is open.
+2. **A tiny MoE fixture with a vocabulary,** committed, would make the forced
+   tiny tests run in every battery.

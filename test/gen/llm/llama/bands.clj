@@ -23,12 +23,16 @@
 
 (defn device
   "The backend holding the model's weights, from the engine's footprint
-   (llama.cpp's buffer names): :metal, :cuda or :cpu."
+   (llama.cpp's buffer names: CUDA0…, MTL0… or Metal…): :metal, :cuda or
+   :cpu."
   [info]
   (let [names (keep (fn [{:keys [kind buffer]}] (when (= kind :model) (str buffer)))
                     (get-in info [:footprint :buffers]))]
     (cond (some #(str/starts-with? % "CUDA") names) :cuda
-          (some #(str/starts-with? % "Metal") names) :metal
+          ;; v0.9.0 names Metal's buffers MTL0… (GGML_METAL_NAME), earlier
+          ;; releases Metal…; before this read both, Metal read as :cpu
+          ;; (whose bands are Metal's)
+          (some #(re-find #"^(MTL|Metal)" %) names) :metal
           :else :cpu)))
 
 (defn quantized?

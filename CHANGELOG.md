@@ -38,6 +38,15 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Fixed (experimental): llama.cpp's recurrent and hybrid models split
+  their steps on Metal again by default** (gen.llm.llama; found by
+  genclj-ansx). The default (gen.llama.split-recurrent unset: split only
+  on Metal, DESIGN §9) looked for llama.cpp's Metal buffers by the name
+  "Metal…", which v0.9.0 renamed "MTL0…", so since the v0.9.0 pin a
+  Qwen3.5 engine on Metal stepped unsplit. Both names are recognized.
+  **Draws**: a split step replays the recurrent states, so a recurrent
+  model's next-token values on Metal move within llama.cpp's own band.
+
 - **Added (experimental): llama.cpp's intermediate tensors recorded, for
   checks: `gen.llm.llama`'s `:record`, `recorded` and `experts`**
   (genclj-ansx). An engine opened with `:record #{"ffn_moe_topk"}` passes

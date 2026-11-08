@@ -240,9 +240,10 @@
 
 (defn- metal?
   "Are the model's weights on Metal (fp, the engine's footprint: llama.cpp's
-   buffer names)?"
+   buffer names, \"MTL0…\" from v0.9.0, its GGML_METAL_NAME, and
+   \"Metal…\" before)?"
   [fp]
-  (boolean (some (fn [{:keys [kind buffer]}] (and (= kind :model) (.startsWith (str buffer) "Metal")))
+  (boolean (some (fn [{:keys [kind buffer]}] (and (= kind :model) (re-find #"^(MTL|Metal)" (str buffer))))
                  (:buffers fp))))
 
 (defn- split-recurrent

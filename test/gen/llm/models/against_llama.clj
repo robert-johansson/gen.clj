@@ -141,7 +141,10 @@
    :rope-traditional {#'array/rope (fn rope-traditional
                                      ([x dims] (rope-traditional x dims nil))
                                      ([x dims opts] (rope x dims (assoc opts :traditional? true))))}
-   :qk-norms-skipped {#'array/rms-norm (fn [x w eps] (if (= 4 (array/ndim x)) x (rms-norm x w eps)))}})
+   ;; every per-head norm (4-D, and Qwen3.5's GatedDeltaNet q and k
+   ;; normed as one 5-D array since genclj-yesw), the hidden state's
+   ;; (3-D) kept
+   :qk-norms-skipped {#'array/rms-norm (fn [x w eps] (if (<= 4 (array/ndim x)) x (rms-norm x w eps)))}})
 
 (def ^:private causal-conv @#'qwen35/causal-conv)
 
