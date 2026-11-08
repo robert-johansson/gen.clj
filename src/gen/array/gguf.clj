@@ -591,9 +591,10 @@
    (a var the tests redefine, to read their small tensors in chunks)."
   (bit-shift-left 1 24))
 
-(defn- uncached?
-  "Does the host reader read past the file cache: unless
-   -Dgen.gguf.cache=true?"
+(defn uncached?
+  "Does load-gguf leave a file's pages out of the file cache: unless
+   -Dgen.gguf.cache=true? The host reader reads past it; MLX's loader
+   evicts the pages its load brought in (gen.backend.mlx.io)."
   []
   (not (Boolean/getBoolean "gen.gguf.cache")))
 

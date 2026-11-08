@@ -19,6 +19,8 @@
    - on MLX, mlx_load_gguf's arrays against the JVM backend's reader, bit
      for bit; and the host reader's on MLX (a file of K-quants loads so
      there) against both;
+   - on MLX, mlx_load_gguf's load leaving the file cache as it found it:
+     the pages it brought in evicted, those cached before kept;
    - a model split over files against the same model in one;
    - the loud errors: unsupported tensor types, files that are no GGUF or
      cut short, a split's file missing or loaded from another than its
@@ -251,6 +253,52 @@
             (is (= (if (vector? h) [:uint32 :float32 :float32] (array/dtype t))
                    (if (vector? h) (mapv array/dtype h) (array/dtype h)))
                 name)))))))
+
+(deftest mlx-s-loader-leaves-the-file-cache-as-it-found-it
+  ;; mlx_load_gguf reads its file through the file cache (it maps it);
+  ;; load-gguf evicts the pages that load brought in and keeps those
+  ;; cached before (the header's, which gen.array.gguf reads first, or a
+  ;; file another reader had cached), as the host reader leaves the
+  ;; cache. -Dgen.gguf.cache=true keeps the pages: that the load brings
+  ;; them in. Planted bugs, each failing here (2026-11-08): no eviction;
+  ;; every page evicted, those cached before too; the ranges evicted a
+  ;; page short
+  (if (ts/jvm?)
+    (println "gen.array.gguf-test: MLX's loader's file cache is checked on MLX")
+    (let [io (do (require 'gen.backend.mlx.io) (the-ns 'gen.backend.mlx.io))
+          cached (ns-resolve io 'cached-bytes)
+          residency (ns-resolve io 'residency)
+          evict! (ns-resolve io 'evict!)
+          cold! (fn [path]
+                  (with-open [arena (java.lang.foreign.Arena/ofConfined)]
+                    (let [r (residency arena path)]
+                      (evict! arena (assoc r :vector (.allocate arena (.byteSize ^java.lang.foreign.MemorySegment (:vector r))))))))]
+      (doseq [file ["qwen3-tiny-f32.gguf" "qwen3-small-f16.gguf"]
+              :let [f (fixture file)]]
+        (testing file
+          (Files/readAllBytes (.toPath (io/file f)))
+          (let [whole (long (cached f))]
+            (is (<= (.length (io/file f)) whole) "a file read is in the cache")
+            (array/load-gguf f)
+            (is (= whole (cached f)) "a file cached before stays cached")
+            (cold! f)
+            (is (zero? (cached f)) "evicted")
+            (gguf/header f)
+            (let [header (long (cached f))]
+              (is (< header (quot whole 2)) "the header's pages, read first")
+              (let [{:keys [tensors]} (array/load-gguf f)]
+                (is (seq tensors))
+                (is (= header (cached f)) "the pages the load brought in evicted, the header's kept"))
+              (cold! f)
+              (gguf/header f)
+              (let [p (System/getProperty "gen.gguf.cache")]
+                (try
+                  (System/setProperty "gen.gguf.cache" "true")
+                  (array/load-gguf f)
+                  (is (= whole (cached f)) "-Dgen.gguf.cache=true: the load's pages kept")
+                  (finally
+                    (if p (System/setProperty "gen.gguf.cache" p) (System/clearProperty "gen.gguf.cache"))
+                    (cold! f)))))))))))
 
 (deftest split-models-load-from-their-first-file
   (let [one (array/load-gguf (fixture "qwen3-tiny-q8_0.gguf"))
