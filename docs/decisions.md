@@ -5756,3 +5756,88 @@ paged and continuous cells show kernel / composite; 8 clients at once):
 **For the owner:** in float16 SMC the paged mode now beats the static one on
 both Metal and CUDA. That was the stated condition for making paged the
 default. Flipping it is the owner's call; the default is still static.
+
+### Token SMC on CUDA: reads from MLX's buffer, rows lent, forks in one call
+
+(PROVISIONAL, owner to confirm; genclj-4acj, 2026-11-08)
+
+**Where the gap was.** On fenrir (C2), with Qwen3-0.6B Q8_0 in f16 and 16
+particles, one SMC step took 17.1 ms paged against llama.cpp's 7.3. The
+profile is bench/gen/smc_profile.clj.
+- Reading the logits to the host took 3.1 ms (1.2 of it widening), copying
+  each row 1.8, fork hand-offs to the engine thread 0.6, and normalization
+  2.2.
+- MLX does 2.34 evaluations a step; llama.cpp syncs once.
+- **Most of what remains is MLX's own encoding on CUDA:** 7.0 ms encoding
+  against 0.3 waiting on the GPU, at 16 rows. Turning CUDA graphs off,
+  raising MLX_MAX_OPS_PER_BUFFER from 50 to 1000, or pinning to P-cores
+  changes nothing.
+- The 8B is bound by the GPU instead: 13.3 ms an evaluation against about
+  6.5 for llama.cpp, whose 8-bit matmuls are faster.
+
+**The fixes.** Every one gives the same draws for the same key.
+1. **MLX reads 16-bit floats straight from its buffer** in Java, without
+   copying the bit patterns, bit-identical to before. Reads of 2^18 entries or
+   more run in parallel chunks on Java's common pool, float32 included.
+2. **On CUDA, a read of at least 1 MiB is first moved to the host in one
+   cudaMemPrefetchAsync.** MlxRuntime calls libcudart.so.13 directly; where it
+   is absent (macOS, a CPU build) nothing happens. The property
+   gen.mlx.prefetch-bytes sets the threshold, and 0 turns it off.
+   - It replaces page faults on MLX's managed memory.
+   - Memory that isn't managed is left alone, its error cleared so MLX never
+     sees it.
+3. **Rows lent, not copied:** token SMC and completions borrow the LM's own
+   row arrays (lm/batch-next-logprobs-lent, the optional protocol LentRows).
+   SMC still copies under a user-function proposal.
+4. **A step's forks in one call** to the engine thread, all or none
+   (br/fork-each, the optional protocol ForkEach). The LM cache uses it.
+   - Both protocols are new and optional, so the 1.x promise holds.
+
+**Measured on fenrir, tokens/s** (median across JVMs, main and the branch
+alternated because a JVM's result varies by up to 30%):
+
+| Run | main | branch | llama.cpp, main | llama.cpp, branch |
+|---|---:|---:|---:|---:|
+| SMC 0.6B f16, paged | 1008 | 1272 | 2177 | 2579 |
+| SMC 0.6B f16, continuous | 1056 | 1445 | | |
+| SMC 0.6B f32, paged / continuous | 834 / 957 | 983 / 972 | 2124 | 2576 |
+| SMC 8B f16, paged | 835 | 882 | 1455 | 1600 |
+| 8 clients 0.6B, continuous | 522 | 549 | 505 | 501 |
+| 8 clients 8B, continuous | – | 236 | – | 144 |
+
+- llama.cpp gains too: its LM path also takes the lent rows and the
+  one-call forks.
+- The 1158 recorded for paged-cuda was a high sample; today it gives 970.
+- Under Graal: paged 1200, llama.cpp 2132, against C2's 1272 and 2579.
+  Keep C2 on x86.
+- 4 host threads stay the default (8 moved results by at most ±4%).
+
+**Not taken:**
+- Borrowed rows: keeping the copies; copying on a thread pool; relaxing
+  next-logprobs's promise of new arrays.
+- ForkEach: one engine call a fork; batching through resample, which
+  consumes the parents.
+- The prefetch: leaving the page faults; patching MLX's C++; a direct
+  device-to-host copy, which needs a device pointer MLX doesn't expose.
+- Parallel reads: single-threaded reads; a pool the backend owns; a new
+  array function that reads raw 16-bit patterns so normalization skips
+  widening, which would change the backend contract.
+
+**Levers left, the owner's call:**
+- fused q/k/v and gate/up projections (about 84 of about 600 kernels a step;
+  it affects LoRA);
+- a newer MLX;
+- a compiled paged prefill;
+- the scores-only advance (genclj-t46p).
+
+**Tests.**
+- smc-test checks lent rows against a copying LM. Rows returned reversed fail
+  7 checks; a draw writing into its row fails 8.
+- branching-test covers fork-each. Reversed counts fail it, and so does a
+  refusal that leaves forks behind.
+- mlx-test checks reads over every float16 and bfloat16 bit pattern, across
+  chunks and past the parallel threshold. Planted bugs in the Java fail 18,
+  12 and 1 checks.
+- array-engine-qwen35-continuous-test's band (2e-5, measured on Metal) fails
+  on CUDA by 2.2–2.4e-5, on main as well. Its per-platform band is being
+  measured (cuda-check).
