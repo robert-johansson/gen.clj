@@ -6888,3 +6888,37 @@ after it. Cold-cache load times (5 runs, medians):
 2. **A faster host reader** (decode into native memory with no zeroing, and
    hand MLX its buffers without the mlx_array_new_data copy) could pass the
    rule on CUDA too, and then every file would go through it.
+
+### 1.3.0's release triage
+
+(Owner, 2026-11-08 evening: "Yes, I approve this. Try to get to the final
+test battery as soon as possible", and "the release gate. Run it as soon as
+possible.")
+
+- **Closed as done or decided:**
+  - genclj-ssiv: MLX stays on NVIDIA, with float16 for quantized models;
+  - genclj-2krw: Qwen3.5's band measured, the CUDA gated-delta kernel
+    ported;
+  - genclj-c7uf: the profiles and cuts done; its re-measurements move on;
+  - genclj-ho24 and genclj-tc9g: process beans.
+- **Finished before the tag:**
+  - genclj-6fik, the CUDA crash on the tiny fixture;
+  - the docs: CHANGELOG [1.3.0], README, the book's version pages, DESIGN,
+    benchmarks;
+  - the THIRD-PARTY-NOTICES check, with ggml-quants.c's provenance.
+- **Moved to genclj-sgue, "gen.clj 1.3.x — follow-ups after 1.3.0"** (20
+  beans):
+  - engine: ond4, t46p, qmnq, h80d, ew7g, 5gfm, p9sb, 9a1l;
+  - weights: k8gx, 44hz, 4gar;
+  - families: afy0, dnt5;
+  - foundation: 9ti1, c6jo;
+  - training: 6zx0, wfv1, oze3, 8xua;
+  - measurement: pnw2.
+- **The epics** sb46, g890, an16, o21t and q4xv are closed, their open
+  children moved; c09l holds the gate and 6fik.
+- **The gate (genclj-0ye6) adjusted:** "speed against mlx-node" dropped (the
+  narrowed scope; llama.cpp is the speed reference), and the M5 leg moved
+  with ew7g. Its legs are the JVM battery with the book, Metal full, MLX's
+  CPU (float32 full, float64 light), llama.cpp and the real models per model
+  on Metal (the MacBook) and CUDA (fenrir), the CUDA battery, and the
+  dependents. The tag waits for the owner's go.
