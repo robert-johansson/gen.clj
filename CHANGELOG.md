@@ -413,6 +413,13 @@ other values for the same key, from the same distribution.
   cache for the next read's cast in unified memory, so that the device
   wrote, and the host read, pages the other side held: Qwen3-0.6B's 16
   rows of float16 logits took 26 ms to read on fenrir, against 4.6 now.
+- **Performance (experimental): MLX's `array/->floats` widens a float16
+  or bfloat16 array's bits about 1.5 to 4 times faster** (genclj-9y6y's
+  follow-up; `gen.array.host/halves->floats`, internal), the same floats,
+  bit for bit: each loop runs to its array's length, a float16's four
+  entries at a time. On the M4, 16 rows of 151,936
+  (bench/gen/widen_bench.clj), ns an entry: Graal's JIT, float16 0.56 to
+  0.38 and bfloat16 0.43 to 0.10; C2 0.60 to 0.34 and 0.52 to 0.25.
 - **Performance (experimental): `gen.llm.token`'s draw walks a row
   about 2x faster** (genclj-9y6y): its inverse CDF sums each token's
   probability by `gen.llm.host/exp`. The total moves in its last bits, so

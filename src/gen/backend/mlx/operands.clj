@@ -5,6 +5,7 @@
    call, and arrays from host data and read back."
   {:api :internal}
   (:require [gen.array.dtype :as dt]
+            [gen.array.host :as host]
             [gen.array.shape :as sh]
             [gen.backend.mlx.array :refer [aux-stream check-dtype code defaults device fence handle mlx-array? stream wrap]]
             [gen.backend.mlx.memory :refer [at-buffer-limit evaluating]])
@@ -337,28 +338,16 @@
     (float-array 0)
     (.toArray (data-segment (Mlx/mlx_array_data_float32 h) (* 4 n)) ValueLayout/JAVA_FLOAT)))
 
-(def ^:private ^"[F" half-floats
-  "Each float16 bit pattern's float (exact), by its pattern as an index."
-  (let [t (float-array 65536)]
-    (dotimes [i 65536] (aset t i (Float/float16ToFloat (unchecked-short i))))
-    t))
-
 (defn- read-halves
   "The n float16 or bfloat16 (dtype) elements of the evaluated,
-   row-contiguous handle h, widened to floats on the host, exactly: their
-   bit patterns read (mlx-c's uint16 accessor, which any 16-bit dtype's
-   buffer answers; its float16 one is absent where its compiler lacks
-   _Float16), a float16's looked up, a bfloat16's the high half of a
-   float's."
+   row-contiguous handle h, widened to floats on the host, exactly
+   (gen.array.host/halves->floats): their bit patterns read (mlx-c's
+   uint16 accessor, which any 16-bit dtype's buffer answers; its float16
+   one is absent where its compiler lacks _Float16)."
   ^floats [^long h ^long n dtype]
-  (let [out (float-array n)]
-    (when (pos? n)
-      (let [^shorts bits (.toArray (data-segment (Mlx/mlx_array_data_uint16 h) (* 2 n)) ValueLayout/JAVA_SHORT)]
-        (if (= :bfloat16 dtype)
-          (dotimes [j n] (aset out j (Float/intBitsToFloat (unchecked-int (bit-shift-left (bit-and (long (aget bits j)) 0xFFFF) 16)))))
-          (let [t half-floats]
-            (dotimes [j n] (aset out j (aget t (bit-and (long (aget bits j)) 0xFFFF))))))))
-    out))
+  (if (zero? n)
+    (float-array 0)
+    (host/halves->floats (.toArray (data-segment (Mlx/mlx_array_data_uint16 h) (* 2 n)) ValueLayout/JAVA_SHORT) dtype)))
 
 ;; A float16 or bfloat16 array is read as its own bits, widened on the
 ;; host, rather than cast to float32 on the device first (genclj-9y6y). On

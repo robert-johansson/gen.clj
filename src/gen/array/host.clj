@@ -4,6 +4,8 @@
      vectors into a shape and row-major values, checked, and gives the
      backend those (docs/array-api.md §10), and a backend array prints as
      gen.serialize writes it (print-array);
+   - 16-bit floats' bit patterns widened to floats, exactly, for a
+     backend's reads (halves->floats);
    - the math of host scalars, every elementwise op and reduction as
      gen.array computes them on the host, shared with the tape."
   {:api :internal}
@@ -75,6 +77,70 @@
     (.write w (str "#gen/array {:dtype " dtype ", :shape [" (str/join " " shape) "], :data "))
     (print-method elements w)
     (.write w "}")))
+
+;; ---------------------------------------------------------------------------
+;; 16-bit floats widened
+;; ---------------------------------------------------------------------------
+
+;; Each loop runs to its array's length, not to a long argument as the
+;; read's loop did (the array's size): on the M4 that alone ran 1.3 to 4
+;; times faster under either JIT, Graal's or C2. A float16's float is
+;; looked up four at a time, the four held together, in a loop of fours of
+;; its own, then the rest (not one loop of both, as gen.llm.host's
+;; conversions are: on the M4 that was the slowest form under either
+;; JIT). The Graal JIT on x86 (fenrir's)
+;; vectorizes no Clojure loop (a long index), and a float16 read of logits
+;; there spent about half its time widening, about 1 ns an entry
+;; (genclj-9y6y). A bfloat16's widening is a shift, which the JITs
+;; vectorize one at a time on the M4. The read's loop against these, 16
+;; rows of 151,936 on the M4 (bench/gen/widen_bench.clj, 2026-11-08), ns
+;; an entry: Graal's JIT, float16 0.56 to 0.38, bfloat16 0.43 to 0.10; C2,
+;; 0.60 to 0.34 and 0.52 to 0.25.
+
+(def ^:private ^"[F" half-floats
+  "Each float16 bit pattern's float (exact, Float/float16ToFloat's), by
+   its pattern as an index."
+  (let [t (float-array 65536)]
+    (dotimes [i 65536] (aset t i (Float/float16ToFloat (unchecked-short i))))
+    t))
+
+(defn- widen-halves!
+  "out[j] = the float of float16 bit pattern bits[j], by table t, for
+   every j of out."
+  [^shorts bits ^floats t ^floats out]
+  (let [n (alength out)
+        n4 (bit-and n -4)]
+    (loop [j 0]
+      (when (< j n4)
+        (let [a (aget t (bit-and (long (aget bits j)) 0xFFFF))
+              b (aget t (bit-and (long (aget bits (+ j 1))) 0xFFFF))
+              c (aget t (bit-and (long (aget bits (+ j 2))) 0xFFFF))
+              d (aget t (bit-and (long (aget bits (+ j 3))) 0xFFFF))]
+          (aset out j a) (aset out (+ j 1) b) (aset out (+ j 2) c) (aset out (+ j 3) d)
+          (recur (+ j 4)))))
+    (loop [j n4]
+      (when (< j n)
+        (aset out j (aget t (bit-and (long (aget bits j)) 0xFFFF)))
+        (recur (inc j))))))
+
+(defn- widen-bfloats!
+  "out[j] = the float of bfloat16 bit pattern bits[j], for every j of
+   out."
+  [^shorts bits ^floats out]
+  (dotimes [j (alength out)]
+    (aset out j (Float/intBitsToFloat (unchecked-int (bit-shift-left (bit-and (long (aget bits j)) 0xFFFF) 16))))))
+
+(defn halves->floats
+  "The float16 (dtype :float16) or bfloat16 (:bfloat16) values whose bit
+   patterns are bits, as a new float array, exactly: a float16's float
+   looked up among all 65,536 (Float/float16ToFloat's), a bfloat16's the
+   high half of a float's."
+  ^floats [^shorts bits dtype]
+  (let [out (float-array (alength bits))]
+    (case dtype
+      :float16 (widen-halves! bits half-floats out)
+      :bfloat16 (widen-bfloats! bits out))
+    out))
 
 ;; ---------------------------------------------------------------------------
 ;; Host math: the semantics of every elementwise op on host scalars
