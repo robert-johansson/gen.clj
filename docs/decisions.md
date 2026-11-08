@@ -5320,3 +5320,47 @@ before writing the pools, and a step stores its pools at once.
 - Under Qwen3.5 the step also consumes the recurrent states. After a failed
   normalization those rows' groups were donated, so they are lost: the
   continuous mode's behaviour, genclj-8ni2's to align.
+
+### Safetensors checkpoints: gen.array/load-safetensors
+
+(PROVISIONAL, owner to confirm; genclj-9pn4, 2026-11-08)
+
+**What was built.**
+- **array/load-safetensors** (experimental) takes a file, an index or a
+  checkpoint directory. MLX reads with mlx_load_safetensors on the CPU
+  stream; the JVM backend uses a host reader.
+- **gen.array.json** is a strict internal JSON reader, with no dependency.
+- **qwen3/load and qwen35/load take a checkpoint** wherever they took a GGUF.
+  The checkpoint becomes the GGUF llama.cpp's converter would write from it,
+  checked against the pinned llama.cpp's conversion/qwen.py: Qwen3-Next's +1
+  on the norms, ssm_a = -exp(A_log), value heads tiled, the conv kernel
+  squeezed, per-expert matrices stacked.
+- **MLX-community quantized checkpoints** load as load-gguf's quantized maps.
+
+**Checked.**
+- Six tiny checkpoints (Qwen3, Qwen3.5 with unequal heads, MoE, sharded,
+  mlx-lm's 8-bit layout) give the same config, weights and logits as their
+  GGUFs on the JVM: a gap of 0.0.
+- Qwen3.5-0.8B's HF bf16 against ggml-org's BF16 GGUF on Metal: every weight
+  equal, max |Δ log p| 2.7e-5, argmax 128/128.
+- Qwen3-0.6B against its F16 GGUF: 4.4e-5.
+- Planted at real scale: the +1 missed moves log p by 25.6 nats.
+
+**The lead's calls, on the implementing agent's recommendations:**
+1. **ILoading gains -load-safetensors.** It is an experimental, unreleased
+   protocol, so the 1.x rule doesn't bind.
+2. **load-gguf reads BF16,** through the host reader on MLX.
+3. **F64 tensors load on the JVM only.** MLX 0.32.4's loader rejects files
+   holding them.
+4. **The +1 is applied in float32,** as transformers does. mlx-lm does it in
+   bf16.
+5. **Eps and theta are rounded to float32,** as the GGUF stores them.
+6. **A tied output drops its stored lm_head copy.**
+7. **The fused gate_up_proj [E, 2I, H] stays loud.** The converter's source
+   confirms its layout, so support is a few lines when wanted.
+8. **mlx-lm's layout is detected from the conv kernel's shape,** as mlx-lm's
+   sanitize does.
+9. **The JSON reader is strict:** duplicate keys are loud, and NaN and
+   Infinity are accepted.
+10. **Fixtures add 2.1 MB** under test/fixtures/safetensors, from random
+    weights, regenerated deterministically.
