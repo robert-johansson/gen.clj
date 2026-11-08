@@ -51,6 +51,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
             [gen.array.nn]
+            [gen.llm.models.against-llama :as against]
             [gen.llm.models.common :as common]
             [gen.llm.models.qwen35 :as qwen35]
             [gen.random :as rng]
@@ -384,6 +385,26 @@
             (is (= half (array/dtype (get-in layers [0 :moe :shared-gate]))) "the rest in the model's dtype")
             (is (= :float32 (array/dtype logits)) "the logits")
             (is (= [[1]] (ts/host (first (top-k (array/softmax logits {:axis -1}) 1)))) "the larger logit's expert")))))))
+
+(deftest a-read-with-the-reference-s-experts-is-its-own
+  ;; against-llama's forced routing (genclj-fxag), which
+  ;; cuda-reference-test's float16 check of a mixture of experts reads:
+  ;; the experts a reference read records (each position's, each layer's
+  ;; top k), forced on the same model, give its own readings (whole, a
+  ;; chunk, steps); on the JVM backend exactly. Other experts move them:
+  ;; forced one off (each index + 1 mod E), the worst reading 4.88 nats.
+  ;; Planted bug: each forward forced with the next position's experts
+  ;; fails the own check (4.63; JVM, 2026-11-08)
+  (let [m (:moe-f32 @models)
+        {:keys [experts experts-used]} (:config m)
+        r (against/reference m (subvec ctx 0 6) 3)
+        band (if (ts/jvm?) 0.0 2e-4)
+        read-with (fn [forced] (mapv :max-diff (against/compare-readings m (assoc r :forced forced) 0)))
+        one-off (mapv (fn [layers] (mapv (fn [idx] (mapv #(mod (inc (long %)) (long experts)) idx)) layers)) (:experts r))]
+    (is (= 9 (count (:experts r))) "the prompt's 6 positions and 3 steps")
+    (is (every? (fn [layers] (and (seq layers) (every? #(= experts-used (count %)) layers))) (:experts r)))
+    (is (every? #(<= % band) (read-with (:experts r))) "the reference's experts")
+    (is (< 0.5 (reduce max (read-with one-off))) "experts one off (a planted bug)")))
 
 ;; ---------------------------------------------------------------------------
 ;; 5. MLX against the JVM backend

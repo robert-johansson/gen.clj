@@ -128,14 +128,16 @@
 (defn- band
   "The band of MLX's CUDA forward against its CPU's on the GGUF file at
    path, in dtype (the measurements above): by family (Qwen3; Qwen3.5 and
-   Qwen3.6) and quantization (Q8_0; K-quants, the MoE's), and dtype."
-  [path dtype]
+   Qwen3.6) and quantization (Q8_0; K-quants, the MoE's), and dtype; with
+   forced?, a mixture of experts' with the CPU's experts."
+  [path dtype forced?]
   (let [qwen35? (#{"qwen35" "qwen35moe"} (against/architecture path))
         k? (against/k-quants? path)]
     (get-in {:qwen3 {:float32 5.1e-4 :float16 0.19}
              :qwen35 {:float32 7.5e-4 :float16 0.48}
-             :qwen35-k {:float32 0.80 :float16 12.2}}
-            [(cond (and qwen35? k?) :qwen35-k qwen35? :qwen35 :else :qwen3) dtype])))
+             :qwen35-k {:float32 0.80 :float16 12.2}
+             :qwen35-k-forced {:float16 0.35}}
+            [(cond (and qwen35? k? forced?) :qwen35-k-forced (and qwen35? k?) :qwen35-k qwen35? :qwen35 :else :qwen3) dtype])))
 
 (def ^:private prompts
   "gen.llm.models.qwen35-llama-test's: of 2 to about 60 tokens, and one
@@ -167,31 +169,41 @@
 (defn- check
   "The forward on CUDA in dtype against the CPU's in float32: every reading
    of every prompt within the band; with planted? every planted error
-   outside it, its worst gap over the prompts (a reading it would fail)."
-  [dtype planted?]
+   outside it, its worst gap over the prompts (a reading it would fail).
+   With forced?, a mixture of experts' forward takes the CPU's experts
+   (against-llama/compare-readings' :forced)."
+  [dtype planted? forced?]
   ((mlx 'collect!))
-  (let [refs @reference
+  (let [refs (cond->> @reference forced? (mapv #(assoc % :forced (:experts %))))
         m (against/load-model model-path {:dtype dtype})
-        b (band model-path dtype)]
+        b (band model-path dtype forced?)]
     (doseq [[text {toks :tokens :as r}] (map vector prompts refs)]
-      (testing (str (name dtype) ", " (count toks) " tokens: " (pr-str (subs text 0 (min 30 (count text)))))
+      (testing (str (name dtype) (when forced? ", the CPU's experts") ", " (count toks) " tokens: "
+                    (pr-str (subs text 0 (min 30 (count text)))))
         (doseq [{:keys [what max-diff argmax? top5?]} (against/compare-readings m r b)]
           (is (<= max-diff b) (str what ": |Δ log p| " max-diff " (band " b ")"))
           (is argmax? (str what ": the argmax"))
           (is top5? (str what ": the top 5")))))
     (when planted?
-      (testing (str (name dtype) ", the planted convention errors")
+      (testing (str (name dtype) (when forced? ", the CPU's experts") ", the planted convention errors")
         (doseq [mutation (sort (keys (against/mutations-of m)))]
           (let [ds (mapv #(against/mutated m % mutation) refs)
                 d (reduce max ds)]
-            (println (format "cuda-reference-test %s %s: worst %.3f nats, by prompt %s (band %s)"
-                             (name dtype) (name mutation) d (mapv #(Double/parseDouble (format "%.3g" %)) ds) b))
+            (println (format "cuda-reference-test %s%s %s: worst %.3f nats, by prompt %s (band %s)"
+                             (name dtype) (if forced? " forced" "") (name mutation) d
+                             (mapv #(Double/parseDouble (format "%.3g" %)) ds) b))
             (is (< b d) (str (name mutation) ": |Δ log p| " d ", inside the band " b))))))))
 
 (deftest ^:slow float32-forward-is-the-cpu-s
   (ts/when-native :cuda available?
-    (check :float32 true)))
+    (check :float32 true false)))
 
 (deftest ^:slow float16-forward-is-the-cpu-s
   (ts/when-native :cuda available?
-    (check :float16 false)))
+    (check :float16 false false)))
+
+(deftest ^:slow float16-forward-with-the-cpu-s-experts-is-the-cpu-s
+  (ts/when-native :cuda available?
+    (if (:experts (first @reference))
+      (check :float16 true true)
+      (println "cuda-reference-test: the CPU's experts forced on a mixture of experts only"))))

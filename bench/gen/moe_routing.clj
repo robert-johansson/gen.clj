@@ -26,12 +26,13 @@
    CPU's 64 most likely tokens) at positions with no flip up to them, a
    flip before only, and a flip at them; the readings' gap (the prompt's
    last position and the 8 steps: the reference test's :whole and steps);
-   each prompt's. Unless -Dgen.bench.readings=false, the unforced
-   variants also through against-llama/compare-readings (whole, chunk,
-   steps: cuda-reference-noise's statistic, against the CPU's readings
-   rebuilt from their top 64), and with -Dgen.bench.mutations=true f16's
-   planted convention errors (against-llama/mutated) on the general
-   prompts.
+   each prompt's. Unless -Dgen.bench.readings=false, every variant also
+   through against-llama/compare-readings (whole, chunk, steps:
+   cuda-reference-noise's statistic, against the CPU's readings rebuilt
+   from their top 64; a forced variant with the CPU's experts, its
+   :forced), and with -Dgen.bench.mutations=true the float16 and forced
+   variants' planted convention errors (against-llama/mutated) on the
+   general prompts.
 
    Run on MLX's CUDA, one GPU JVM at a time (the CPU's model about 31 GB
    resident; then CUDA's):
@@ -225,18 +226,20 @@
 
 (defn- readings
   "The CPU's data as against-llama/reference's readings: each reading's
-   log-probabilities a float[vocab] of its top 64, the rest -1e30."
-  [{:keys [top steps vocab]} n-tok]
+   log-probabilities a float[vocab] of its top 64, the rest -1e30; with
+   forced?, :forced the CPU's experts (compare-readings forces them)."
+  [{:keys [top steps vocab sets]} n-tok forced?]
   (let [dense (fn [[ts ^floats vs]]
                 (let [a (float-array vocab (float -1e30))]
                   (dorun (map-indexed (fn [j t] (aset a (int t) (aget vs (int j)))) ts))
                   a))]
-    {:root (dense (top (dec n-tok)))
-     :steps (mapv (fn [i] [(steps i) (dense (top (+ n-tok i)))]) (range (count steps)))}))
+    (cond-> {:root (dense (top (dec n-tok)))
+             :steps (mapv (fn [i] [(steps i) (dense (top (+ n-tok i)))]) (range (count steps)))}
+      forced? (assoc :forced (mapv (fn [layers] (mapv first layers)) sets)))))
 
-(defn- set-readings [title sets refs m]
+(defn- set-readings [title sets refs m forced?]
   (doseq [[set-name items] sets]
-    (let [rs (mapv (fn [item ref] (against/compare-readings m (assoc (readings ref (count (:tokens item))) :tokens (:tokens item)) 0))
+    (let [rs (mapv (fn [item ref] (against/compare-readings m (assoc (readings ref (count (:tokens item)) forced?) :tokens (:tokens item)) 0))
                    items (get refs set-name))
           all (apply concat rs)
           kind (fn [r] (let [w (:what r)] (if (vector? w) :step w)))]
@@ -247,11 +250,11 @@
                        (reduce max (map :max-diff all)) (count (filter :argmax? all)) (count all) (count (filter :top5? all))))
       (flush))))
 
-(defn- mutations [title sets refs m]
+(defn- mutations [title sets refs m forced?]
   (when-let [items (some (fn [[s xs]] (when (= "general" s) xs)) sets)]
     (println (str "\n" title ": the planted convention errors, worst |Δ log p| of each general prompt (whole, chunk, one step):"))
     (doseq [mutation (sort (keys (against/mutations-of m)))]
-      (let [ds (mapv (fn [item ref] (against/mutated m (assoc (readings ref (count (:tokens item))) :tokens (:tokens item)) mutation))
+      (let [ds (mapv (fn [item ref] (against/mutated m (assoc (readings ref (count (:tokens item)) forced?) :tokens (:tokens item)) mutation))
                      items (get refs "general"))]
         (println (format "  %-24s min %.3f  median %.3f  max %.3f nats" (name mutation)
                          (reduce min ds) (nth (sort ds) (quot (count ds) 2)) (reduce max ds)))
@@ -312,10 +315,10 @@
                                          got (read-prompt m (:tokens item) (:steps ref) forced experts)]
                                      [item ref (compare-prompt ref got experts-used)]))))]
                 (report (str v " against the CPU's float32 (" (format "%.1f s" (seconds t3)) ")") rows layers)
-                (when-not (or forced? (= "false" (System/getProperty "gen.bench.readings")))
+                (when-not (= "false" (System/getProperty "gen.bench.readings"))
                   (with-redefs-fn (if old? {#'qwen35/router-logits old-router} {})
-                    #(do (set-readings v sets refs m)
-                         (when (and (= "true" (System/getProperty "gen.bench.mutations")) (= :float16 dtype))
-                           (mutations v sets refs m)))))))
+                    #(do (set-readings v sets refs m forced?)
+                         (when (and (= "true" (System/getProperty "gen.bench.mutations")) (or forced? (= :float16 dtype)))
+                           (mutations v sets refs m forced?)))))))
             ((native "gen.backend.mlx" (quote collect!)))))))
     (shutdown-agents)))
