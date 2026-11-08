@@ -35,6 +35,7 @@ clojure -X:test:fast                  # the same in one JVM (also any backend), 
 clojure -X:test                       # every test in one JVM, ~7 min
 clojure -X:test:conformance           # the backend conformance suite (array level)
 clojure -J-Dgen.require-native=mlx -J-Dgen.backend=mlx -X:test   # a release gate's run: fails if a native suite named (mlx, llama) skipped; every run prints their skips
+clojure -J-Dgen.require-native=mlx,llama,cuda -J-Dgen.backend=mlx -J-Dgen.llama.test-model=<gguf> -X:test:c2   # fenrir's (CUDA) gate run: also fails if the NVIDIA reference test (gen.llm.models.cuda-reference-test, MLX's CUDA against its CPU) skipped
 clojure -X:test :patterns '["gen.book.*"]'   # the book (book/): every chapter run, its results checked (Parts II-V ^:slow)
 clojure -M:test -m gen.book sync      # write the book's includes (from book/src) and figures
 clojure -M:test -m gen.book pdf       # the book as a PDF (pandoc, xelatex, rsvg-convert): target/book/

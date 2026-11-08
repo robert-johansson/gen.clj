@@ -6420,3 +6420,20 @@ compare-readings forces them when the readings carry `:forced`.
 **The MoE's open cost** (the ~20 s model load included): paged 28 s, its 27
 shapes compiled in 7.3 s (float16) or 8.4 s (float32); continuous 34–40 s,
 its 34 shapes in 10–18.5 s. No traces after open, so the set stays as it is.
+
+### The owner's calls on the open items (2026-11-08, late afternoon)
+
+(Owner, 2026-11-08: "I am okay with all of these proposals.")
+
+1. **CLAUDE.md's Running section gains fenrir's gate run:**
+   `-Dgen.require-native=mlx,llama,cuda`, so the NVIDIA reference test can't
+   skip silently there.
+2. **Batch-1 decode on NVIDIA is worked on.** The MoE gets 52–59 tokens/s
+   against llama.cpp's 139. The floor is MLX's encoding, about 5 µs a kernel.
+   The work is fewer primitives in the generic Qwen3.5 layers (about 180
+   copies and 156 aranges a step, from "The MoE on CUDA"); upstream MLX work
+   stays outward-facing, for the owner.
+3. **The 4% token SMC cost of compiling at open (Qwen3.5) is worked on:**
+   the gen.array hook for clearing MLX's buffer cache after the open-time
+   warm-up ("The paged default and shapes compiled at open, as built",
+   choice 3).
