@@ -5188,3 +5188,42 @@ from before genclj-c7uf's fix.
   with no GCs.
 - Long contexts are not bound by it, and the pools need no segments
   (genclj-1ovd).
+
+### Small fixes; the engine's host path, phase 2
+
+(PROVISIONAL, owner to confirm; genclj-qfu2, genclj-h7ru, genclj-5t5l,
+genclj-9y6y, 2026-11-08)
+
+**Small fixes.**
+- qwen35/log-probs takes :temperature, through gen.llm.models.common's
+  check-temperature and tempered-head.
+- A GRPO round on Qwen3.5 starts with |ρ - 1| at 1.3e-5 at most, on Metal.
+- SFT passes on Metal: tape and native suites; sft-llama-test within
+  0.017 nats of llama.cpp; held-out NLL equal to fenrir's to four digits.
+
+**The paged mode's edge cases.**
+- score keeps :lost-slots and frees the lost branches.
+- A failed row normalization leaves the slots over the pools the step wrote.
+- Reads normalize before writing their books, in the static mode too.
+
+**The lead's calls, on the implementing agents' recommendations:**
+1. **After a failed normalization a paged step keeps its branches.** The
+   continuous mode still loses those it read; aligning it is genclj-8ni2.
+2. **The read-ordering fix went beyond its bean's wording:** the same kind
+   of bug, in the static mode too.
+
+**The engine's host path** (genclj-9y6y; numbers in its bean):
+- **Anomaly 1, the 0.6B's slow read at 16 rows** (26.8 ms on CUDA). MLX
+  moves a buffer the host reads to managed memory, then recycles it into
+  device allocations by size alone, so the next device write and host read
+  page-fault. 16-bit logits are now read as their bits and widened on the
+  host, bit-identical: 4.9 ms. The root, in MLX's allocator, is genclj-p9sb (the
+  owner's call).
+- **Anomaly 2, the batch-1 floor:** bisect results on fenrir, recorded when
+  read.
+- **Graal against C2 on x86:** measured, decided after the logs. C2 runs
+  llama.cpp's path 20% faster at the 0.6B's batch 1.
+- **Defaults kept:** a pool of 4 host threads (8 gives about 20% more at 16
+  rows), and llama.cpp's own normalization.
+- **A scores-only advance** for consumers needing less than full rows is a
+  protocol change: genclj-t46p (the owner's call).
