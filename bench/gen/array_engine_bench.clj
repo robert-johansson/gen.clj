@@ -113,7 +113,8 @@
    float32 691 → 757, Qwen3.5-0.8B float16 887 → 970, float32 706 → 783;
    8 clients' first token at the median 319 → 249, 373 → 268, 447 → 317,
    556 → 340 ms, tokens/s within ±5% (102 → 97, 91 → 93, 78 → 77, 70 →
-   73)."
+   73; Qwen3 float16 again, two JVMs each alternated: 101, 102 → 104,
+   104)."
   (:require [clojure.string :as str]
             [gen.array :as array]
             [gen.gfi :as gfi]
