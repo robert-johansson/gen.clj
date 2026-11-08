@@ -38,32 +38,6 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
-- **Fixed (experimental): rope of small rotations over many rows on MLX's
-  CUDA** (gen.backend.mlx.rope-cuda; genclj-6fik). MLX 0.32.4's CUDA rope
-  kernel asks a block of more than CUDA's 64 threads on its z axis for a
-  rotation of 16 dimensions or fewer over 128 rows or more (a row each at
-  its own position), and its launch failed (`cudaLaunchKernelExC: invalid
-  argument`): the tiny Qwen3 fixture's paged engine failed to open there
-  (its 128-token chunks), in every dtype. Those shapes now take
-  gen.array's composite; every other rope still runs MLX's kernel (every
-  real model's rotation, 32 dimensions and up, launches). Unchanged off
-  CUDA.
-
-- **Changed (experimental): load-gguf on MLX leaves the file cache as it
-  found it for every file** (gen.backend.mlx.io; genclj-vn28). A file of
-  only F32, F16, I32, Q8_0, Q4_0 and Q4_1 still loads by MLX's loader
-  (mlx_load_gguf), which reads through the file cache; the pages its load
-  brought in are now evicted after it (msync `MS_INVALIDATE` on macOS,
-  `posix_fadvise` `DONTNEED` on Linux), those cached before kept, so it
-  no longer leaves the model cached (+0.64 GB for Qwen3-0.6B-Q8_0, +0.83
-  GB for Qwen3.5-0.8B-Q8_0, +8.7 GB for Qwen3-8B-Q8_0). The arrays are
-  unchanged. Load time, cold: 2 to 5% more (the M4: Qwen3-0.6B 1.18 to
-  1.20 s, Qwen3.5-0.8B 1.40 to 1.47 s; fenrir's CUDA: Qwen3-8B 3.36 to
-  3.45 s). `-Dgen.gguf.cache=true` keeps the pages, as it keeps the host
-  reader's; a failed eviction call is loud (`:io`). Not taken: every file
-  through the host reader on MLX (the owner's rule, 2026-11-08), which
-  loads faster on the M4 (0.81 against 1.18 s, Qwen3-0.6B) but about
-  twice as slowly on fenrir's CUDA (7.5 against 3.4 s, Qwen3-8B).
 ## [1.3.0] - 2026-11-08
 
 The MLX engine and training (DESIGN §9; docs/decisions.md, "1.3.0's scope
@@ -476,6 +450,18 @@ Checked before the tag: CHECKED
   `(qwen3/rewind cache offsets)`**, a static cache with its rows moved
   back (each to at most its own offset): the positions past them are
   dropped and written over by the next steps (a rollback, a slot reused).
+
+- **Fixed (experimental): rope of small rotations over many rows on MLX's
+  CUDA** (gen.backend.mlx.rope-cuda; genclj-6fik). MLX 0.32.4's CUDA rope
+  kernel asks a block of more than CUDA's 64 threads on its z axis for a
+  rotation of 16 dimensions or fewer over 128 rows or more (a row each at
+  its own position), and its launch failed (`cudaLaunchKernelExC: invalid
+  argument`): the tiny Qwen3 fixture's paged engine failed to open there
+  (its 128-token chunks), in every dtype. Those shapes now take
+  gen.array's composite; every other rope still runs MLX's kernel (every
+  real model's rotation, 32 dimensions and up, launches). Unchanged off
+  CUDA.
+
 - **Fixed (experimental): llama.cpp's recurrent and hybrid models split
   their steps on Metal again by default** (gen.llm.llama; found by
   genclj-ansx). The default (gen.llama.split-recurrent unset: split only
