@@ -48,7 +48,35 @@
    and 157 tokens of vocab-prompts, F32 and Q8_0, dense and MoE (random
    weights: their attention and states are less tame than a trained
    model's); the value heads grouped where the converter tiles them fail
-   it by 7.1 to 11.1 nats."
+   it by 7.1 to 11.1 nats.
+   Off the Mac the band is 7.1 nats, and 12.3 on a model of K-quants
+   (against-llama/band): twice the largest |Δ log p| (rounded up) that
+   the bench measured on fenrir as qwen3-llama-test's (2026-11-08, MLX's
+   forward on CUDA against llama.cpp v0.9.0's CUDA and x86 CPU builds,
+   which quantize the activations to 8 bits; gen.llama-noise's 20 prompts
+   and its 20 of digits, each read whole, as a chunk and through 8 steps):
+   - Qwen3.5-0.8B-Q8_0: 0.88 on the general prompts (CUDA; 0.87 on the
+     CPU build), 3.38 on the digits (CPU 3.53), the largest at greedy
+     steps of the chat prompts' replies; median 0.16 to 0.30; the argmax
+     equal in 195 to 197 of each 200. llama.cpp's own spread on CUDA:
+     0.57 and 2.59.
+   - Qwen3.6-35B-A3B-Q4_K_M (ggml-org's: Q4_K experts, Q8_0 attention and
+     shared expert; 256 experts, 8 used; 16 key and 32 value heads): 2.35
+     on the general prompts, 6.13 on the digits (CUDA), median 0.25 to
+     0.75; the argmax equal in 196 and 197 of 200. llama.cpp's own spread
+     there is as large, 3.88 and 6.09: its batched and lone reads choose
+     other experts too.
+   There the planted errors measured, the least and the median over the
+   20 general prompts (0.8B on CUDA; the MoE): the conv state's oldest
+   inputs 1.37 and 4.80, 2.34 and 5.92; the conv kernel reversed 8.21
+   and 14.4, 9.73 and 13.8; attn_q's query and gate swapped 13.9 and
+   22.2, 10.3 and 15.9; KV heads tiled 5.62 and 9.72, 2.65 and 4.34; the
+   q/k norms skipped 10.9 and 16.4, 11.2 and 13.1; RoPE's traditional
+   pairs 0.14 and 0.39, 0.19 and 0.66. And on the MoE (against-llama's
+   value-heads-mutations and moe-mutations): the value heads grouped 6.80
+   and 14.2; the experts' gate and up swapped 9.57 and 14.2; the router's
+   top k not renormalized 2.78 and 6.08; the shared expert ungated 7.18
+   and 13.8."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gen.llm.models.against-llama :as against]
             [gen.llm.models.qwen35 :as qwen35]
@@ -58,15 +86,16 @@
   (or (System/getProperty "gen.llama.test-model") (System/getenv "GEN_LLAMA_TEST_MODEL")))
 
 (def ^:private band
-  ;; Per platform, as llama.cpp's own bands are (DESIGN §9): Metal's from
-  ;; the measurement above; elsewhere qwen3-llama-test's (llama.cpp's x86
-  ;; and CUDA Q8_0 paths differ from MLX's forward by 0.27 to 0.32 nats
-  ;; for Qwen3 on fenrir; Qwen3.5's unmeasured there)
-  (if (.startsWith (System/getProperty "os.name") "Mac") 0.035 0.65))
+  ;; Per platform and quantization, from the measurements above
+  ;; (against-llama/band; on Metal, K-quants unmeasured); 0 without a test
+  ;; model (the tests skip)
+  (if (and model-path (.isFile (java.io.File. ^String model-path))) (against/band model-path) 0.0))
 
 (def ^:private mutation-nats
   "What a planted convention error must exceed, on every platform:
-   qwen3-llama-test's, ten times its Metal band."
+   qwen3-llama-test's, ten times its Metal band. Off the Mac most of the
+   errors lie inside the band (llama.cpp's noise there), and Metal's band
+   is the check of the conventions."
   0.75)
 
 (defn- llama

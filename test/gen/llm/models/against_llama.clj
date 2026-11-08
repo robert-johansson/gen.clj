@@ -62,6 +62,33 @@
   [path]
   (if (#{"qwen35" "qwen35moe"} (architecture path)) (qwen35/load path) (qwen3/load path)))
 
+(defn- k-quants?
+  "Does the GGUF file at path hold K-quant tensors?"
+  [path]
+  (boolean (some #{:q4_k :q5_k :q6_k} (map :type (:tensors (gguf/header path))))))
+
+(defn band
+  "The band of the forward against llama.cpp on the GGUF file at path
+   (compare-prompt's |Δ log p|, and its tie), per platform as llama.cpp's
+   own bands are (DESIGN §9): twice the largest |Δ log p| that
+   bench/gen/qwen3_llama_noise.clj measured, rounded up, by the model's
+   family and quantization. qwen3-llama-test's and qwen35-llama-test's
+   docstrings give the measurements.
+   - On Metal: Qwen3 0.075 (Q8_0), 0.47 (K-quants); Qwen3.5 0.035 (Q8_0;
+     K-quants unmeasured).
+   - Elsewhere, against llama.cpp's CUDA and x86 CPU builds, which
+     quantize the activations to 8 bits for their dot products (fenrir,
+     2026-11-08, the general and the digit prompts): Qwen3 2.4 (Q8_0;
+     K-quants unmeasured), Qwen3.5 7.1 (Q8_0) and 12.3 (K-quants:
+     Qwen3.6-35B-A3B's Q4_K experts, on CUDA, where llama.cpp's own spread
+     reaches 6.1)."
+  [path]
+  (let [qwen35? (#{"qwen35" "qwen35moe"} (architecture path))
+        k? (k-quants? path)]
+    (if (.startsWith (System/getProperty "os.name") "Mac")
+      (cond qwen35? 0.035 k? 0.47 :else 0.075)
+      (cond (and qwen35? k?) 12.3 qwen35? 7.1 :else 2.4))))
+
 (def ^:private sdpa array/sdpa)
 (def ^:private rope array/rope)
 (def ^:private rms-norm array/rms-norm)

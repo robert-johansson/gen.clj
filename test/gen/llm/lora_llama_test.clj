@@ -29,8 +29,9 @@
    Qwen3-0.6B's GGUF given as -J-Dgen.llama.test-model (the fixtures'
    shapes are its); skipped with a note otherwise, and for another model.
 
-   The band: qwen3-llama-test's, per platform (0.075 on Metal, 0.65
-   elsewhere). Measured on fenrir (2026-11-07, MLX CUDA against
+   The band: qwen3-llama-test's, per platform (against-llama/band: 0.075
+   on Metal, 2.4 elsewhere, from 40 prompts with digits; 0.65 when these
+   numbers were measured). Measured on fenrir (2026-11-07, MLX CUDA against
    llama.cpp v0.9.0's CUDA build, Qwen3-0.6B-Q8_0), the adapter's size
    (its largest |Δ log p| from the base, our forward) and the largest
    |Δ log p| against llama.cpp, within its CUDA band:
@@ -71,12 +72,15 @@
 (def ^:private fixture "test/fixtures/lora/qwen3-0.6b-lora.gguf")
 
 (def ^:private band
-  "qwen3-llama-test's band, per platform."
-  (if (.startsWith (System/getProperty "os.name") "Mac") 0.075 0.65))
+  "qwen3-llama-test's band, per platform (against-llama/band); 0 without
+   a test model (the tests skip)."
+  (if (and model-path (.isFile (java.io.File. ^String model-path))) (against/band model-path) 0.0))
 
 (def ^:private mutation-nats
-  "What a planted convention error must exceed: twice the largest
-   platform's band."
+  "What a planted convention error must exceed: twice the off-Mac band of
+   0.65 that this test's prompts were measured against (their largest gap
+   0.445 on CUDA). The off-Mac band is now 2.4, measured over wider
+   prompts: the silent errors' 3.0 to 4.7 nats on CUDA still exceed it."
   1.3)
 
 (defn- llama

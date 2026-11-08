@@ -25,12 +25,10 @@
      greedy pass rate; the pass rate at each checkpoint (4 a prompt);
    - the adapter, saved in the last checkpoint, loads in llama.cpp
      (gen.llm.llama's :adapters) and reads as the forward, every argmax
-     the same, its gap printed beside the base model's own on the same
-     prompts: on these prompts of digits the base exceeds the platform's
-     band (qwen3-llama-test's 0.65 on CUDA; 0.73 measured), so the
-     adapter's is held to twice the band, the LoRA round trip's
-     threshold for convention errors (gen.llm.lora-llama-test);
-     llama.cpp's greedy replies are scored as the array engine's are.
+     the same, within the platform's band (qwen3-llama-test's, measured
+     on prompts of digits too: 2.4 on CUDA), its gap printed beside the
+     base model's own on the same prompts; llama.cpp's greedy replies are
+     scored as the array engine's are.
    Measured on fenrir (2026-11-07, MLX CUDA, native gradients, Q8_0,
    MLX's limit 9.3 GB: gen.llm.grpo's docstring; 40 rounds in 5.5 min):
    - the first step's max |ρ - 1| 1.0e-4 (every round's first: 5e-5 to
@@ -44,7 +42,8 @@
      0.740, 0.752;
    - llama.cpp: every argmax the same, max |Δ log p| 0.903 against the
      forward where the base's own gap is 0.731 (both above the band of
-     0.65 on these prompts); its greedy pass rate 0.781 (the array
+     0.65 then, inside the band of 2.4 measured since over prompts of
+     digits, genclj-fc6u); its greedy pass rate 0.781 (the array
      engine's 0.789).
    Prints the numbers. Needs the MLX backend, llama.cpp's libraries and
    Qwen3-0.6B's GGUF as -J-Dgen.llama.test-model (as gen.llm.sft-llama-
@@ -74,8 +73,9 @@
   (or (System/getProperty "gen.llama.test-model") (System/getenv "GEN_LLAMA_TEST_MODEL")))
 
 (def ^:private band
-  "qwen3-llama-test's band, per platform."
-  (if (.startsWith (System/getProperty "os.name") "Mac") 0.075 0.65))
+  "qwen3-llama-test's band, per platform (against-llama/band); 0 without
+   a test model (the test skips)."
+  (if (and model-path (.isFile (java.io.File. ^String model-path))) (against/band model-path) 0.0))
 
 (defn- llama
   "A function of gen.llm.llama, loaded only when the test runs."
@@ -234,11 +234,7 @@
               (println (format "grpo-llama: llama.cpp's greedy replies held out %.3f (the array engine's %.3f, the base's %.3f)"
                                (mean served) (mean (:greedy after)) (mean (:greedy before))))
               (is (every? :argmax? cs) (pr-str cs))
-              ;; the base itself exceeds the band on these prompts (0.73
-              ;; measured): the adapter's gap is held to the LoRA
-              ;; round trip's threshold for convention errors, twice the
-              ;; band (gen.llm.lora-llama-test)
-              (is (<= (worst cs) (* 2 band)) (pr-str cs))))
+              (is (<= (worst cs) band) (pr-str cs))))
           (if-let [keep (System/getProperty "gen.grpo.keep")]
             (println "grpo-llama: the checkpoints kept in" dir "(gen.grpo.keep" keep ")")
             (doseq [f (reverse (file-seq (java.io.File. dir)))] (.delete ^java.io.File f))))))))
