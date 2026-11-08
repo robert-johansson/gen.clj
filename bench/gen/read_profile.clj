@@ -6,18 +6,20 @@
 
    One GPU JVM at a time. After gen.bench.prompt tokens (64) read into a
    static cache of gen.bench.batch rows (16) and gen.bench.warm steps (16),
-   gen.bench.steps steps (32), each step's outputs evaluated first, then
-   its logits read as the engine does and, apart, in parts:
-   - the logits' dtype, shape, row-contiguity and strides;
-   - astype: the logits cast to float32 on the device and evaluated (a
-     float32 model's are themselves);
-   - pointer: mlx_array_data_float32, which on CUDA moves a device buffer
-     to unified memory (MLX's Buffer::raw_ptr: a cudaMallocManaged, a
-     cudaMemcpy, the device buffer freed);
-   - copy: the bytes copied into a float array (MemorySegment.toArray);
-   - read: array/->floats of the logits, as the engine reads them (on a
-     step of its own: an array already moved would read faster).
-   gen.bench.dtype (float16) as gen.qwen3-bench's."
+   gen.bench.steps steps (32) for each mode, in the order engine, freed,
+   kept, f16, engine, each step's outputs evaluated (eval) and its logits
+   read (their dtype, shape, row-contiguity and strides printed once):
+   - engine: array/->floats, as the engine reads them (read);
+   - freed: as ->floats read them before genclj-9y6y: cast to float32 on
+     the device (astype), the cast's pointer (mlx_array_data_float32,
+     which on CUDA moves a device buffer to unified memory: MLX's
+     Buffer::raw_ptr, a cudaMallocManaged and a cudaMemcpy), its bytes
+     copied into a float array (copy), the cast freed at once (free);
+   - kept: the same, the cast a gen.array array the GC frees later;
+   - f16: the float16 logits' own bits read (pointer, copy) and widened
+     on the host (widen), as ->floats reads them since genclj-9y6y.
+   Times are ms a step, under [mode part]. gen.bench.dtype (float16) as
+   gen.qwen3-bench's."
   (:require [gen.array :as array]
             [gen.array.gguf :as gguf]
             [gen.llm.models.qwen3 :as qwen3]
