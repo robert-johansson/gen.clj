@@ -32,7 +32,9 @@
    0.1), since its kernels round activations to half precision. Against
    llama.cpp the same five gave at most 1.4e-2 (reads 4.0e-3 to 1.1e-2,
    advanced together up to 1.4e-2, scores up to 8.9e-3), every argmax
-   the same."
+   the same. The engines compute in float32, the dtype the bands were
+   measured in, given as :dtype: on MLX's CUDA a quantized file's default
+   is float16."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gen.array.gguf :as gguf]
             [gen.array.memory :as reservations]
@@ -93,7 +95,7 @@
   []
   (or @shared
       (reset! shared {:vocab ((llama 'vocabulary) model-path)
-                      :engine (ae/engine {:model model-path :max-branches 255})
+                      :engine (ae/engine {:model model-path :dtype :float32 :max-branches 255})
                       :llama ((llama 'engine) {:model model-path :max-branches 12 :n-ctx 2048})})))
 
 (use-fixtures :once (fn [f]
@@ -168,7 +170,7 @@
   ;; reads mix decode rows and chunks of other callers'); the largest
   ;; |Δ log p| printed
   (ts/when-native :llama available?
-    (with-open [e (ae/engine {:model model-path :max-branches 64 :continuous? true :n-batch 8})]
+    (with-open [e (ae/engine {:model model-path :dtype :float32 :max-branches 64 :continuous? true :n-batch 8})]
       (let [worst (atom 0.0)
             seen (fn [_ d] (swap! worst max (double d)))
             at-once [:normalized :fork-matches-fresh :batch-matches-single :score-matches-steps :threads]]
@@ -193,7 +195,7 @@
           tok ((llama 'tokenizer) vocab)
           s {:engine engine
              :lm #(lm/lm engine tok {:max-branches 12})
-             :fresh (fn [] (let [e (ae/engine {:model model-path :max-branches 16 :precompile? false})]
+             :fresh (fn [] (let [e (ae/engine {:model model-path :dtype :float32 :max-branches 16 :precompile? false})]
                              [e (lm/lm e tok {:max-branches 12})]))}]
       (doseq [[k check] lc/checks]
         (testing k
@@ -240,7 +242,7 @@
   ;; 224 KiB a position in float32: a read of 200 tokens (capacity 224)
   ;; makes 49 MB of it
   (ts/when-native :llama available?
-    (with-open [e (ae/engine {:model model-path :max-branches 8 :block 32 :paged? false})]
+    (with-open [e (ae/engine {:model model-path :dtype :float32 :max-branches 8 :block 32 :paged? false})]
       (let [ctx (vec (take 200 (cycle (tokens " the tide is full, the moon lies fair" {:add-special? false}))))
             b (br/open e (tokens "The sea is calm tonight." {}))
             [s] (br/advance [(br/fork b)] [13])

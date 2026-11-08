@@ -1,20 +1,28 @@
 (ns gen.llm.models.against-llama
   "A forward over gen.array (gen.llm.models.qwen3, or qwen35 for Qwen3.5
-   and Qwen3.6) against the llama.cpp engine (gen.llm.llama) on the same
-   GGUF, for the tests (gen.llm.models.qwen3-llama-test,
+   and Qwen3.6) against a reference on the same GGUF: the llama.cpp engine
+   (gen.llm.llama), for the tests (gen.llm.models.qwen3-llama-test,
    qwen35-llama-test) and their bands' bench
-   (bench/gen/qwen3_llama_noise.clj): the next-token log-probabilities of
-   one prompt, by both, compared as the Branching contract compares two
+   (bench/gen/qwen3_llama_noise.clj); or the same forward on another
+   backend (a model loaded there: MLX's CPU, for
+   gen.llm.models.cuda-reference-test and its bench,
+   bench/gen/cuda_reference_noise.clj). The next-token log-probabilities
+   of one prompt, by both, compared as the Branching contract compares two
    computations (gen.llm.branching-contract's max-diff: max |Δ log p| over
-   the reference's 64 most likely tokens, llama.cpp's here), with the
-   argmax and the top 5 (as sets; a swap across the boundary between
-   tokens llama.cpp holds within a tie of each other is noise).
+   the reference's 64 most likely tokens), with the argmax and the top 5
+   (as sets; a swap across the boundary between tokens the reference holds
+   within a tie of each other is noise). The forward's log-probabilities
+   are its logits' log-softmax in float32 (a half-float model's logits
+   widened first, as the engine normalizes them on the host).
 
    Each prompt is read three ways by the forward:
    - :whole, a prefill of the prompt;
    - :chunk, a prefill of its first half and a step of the rest;
-   - :step i, the prompt's cache stepped i times by greedy tokens
-     (llama.cpp's argmax), against llama.cpp's branch advanced so.
+   - :step i, the prompt's cache stepped i times by greedy tokens (the
+     reference's argmax), against the reference advanced so.
+   The reference's readings are taken first (reference), so that a planted
+   error (below) changes only the forward under test, even where the
+   reference is the same forward.
 
    And the planted convention errors (mutations), as with-redefs-fn's
    redefinitions of gen.array's operations, each self-consistent:
@@ -58,11 +66,12 @@
 
 (defn load-model
   "The model of the GGUF file at path, by its architecture: qwen3/load or
-   qwen35/load."
-  [path]
-  (if (#{"qwen35" "qwen35moe"} (architecture path)) (qwen35/load path) (qwen3/load path)))
+   qwen35/load, with their opts (:dtype)."
+  ([path] (load-model path nil))
+  ([path opts]
+   (if (#{"qwen35" "qwen35moe"} (architecture path)) (qwen35/load path opts) (qwen3/load path opts))))
 
-(defn- k-quants?
+(defn k-quants?
   "Does the GGUF file at path hold K-quant tensors?"
   [path]
   (boolean (some #{:q4_k :q5_k :q6_k} (map :type (:tensors (gguf/header path))))))
@@ -153,11 +162,12 @@
     mutations))
 
 (defn- logprobs
-  "The log-probabilities of logits' last row (logits [1 T vocab]), a
-   float[]."
+  "The log-probabilities of logits' last row (logits [1 T vocab]), in
+   float32, a float[]."
   ^floats [logits]
-  (let [t (long (second (array/shape logits)))]
-    (float-array (flatten (array/->clj (array/log-softmax (array/slice logits 1 (dec t) t)))))))
+  (let [t (long (second (array/shape logits)))
+        last-row (array/slice logits 1 (dec t) t)]
+    (array/->floats (array/log-softmax (if (= :float32 (array/dtype last-row)) last-row (array/astype last-row :float32))))))
 
 (defn- same-top?
   "Are lp's k most likely tokens ref's, but for a swap across the k-th
@@ -180,34 +190,76 @@
    :argmax? (same-top? ref lp 1 tie)
    :top5? (same-top? ref lp 5 tie)})
 
-(defn compare-prompt
-  "The forward of model m against llama.cpp engine e on the prompt's
-   tokens (a vector of at least 2): a vector of {:what :max-diff :argmax?
-   :top5?}, :what :whole, :chunk or [:step i] (i from 1 to steps); tie as
-   verdict's (0: exactly the same tokens)."
-  [e m tokens steps tie]
-  (let [n (count tokens)
-        root (br/open e tokens)]
-    (try
-      (let [ref (br/logprobs root)
-            [whole cache] (prefill m [tokens] {:logits :last})
-            [_ half] (prefill m [(subvec tokens 0 (quot n 2))])
-            [chunk] (step m half [(subvec tokens (quot n 2))] {:logits :last})]
-        (loop [i 1 b (br/fork root) c cache
-               out [(assoc (verdict ref (logprobs whole) tie) :what :whole)
-                    (assoc (verdict ref (logprobs chunk) tie) :what :chunk)]]
+(defn- model-backend
+  "The backend model m's weights live on."
+  [m]
+  (array/backend (first (filter array/backend-array? (array/tree-leaves (:weights m))))))
+
+(defn reference
+  "The readings of the reference ref on the prompt's tokens (a vector of
+   at least 2) and steps greedy tokens after it, each the reference's
+   argmax: {:tokens :root lp :steps [[t lp] …]}, each lp a float[] of the
+   next token's log-probabilities. ref is a Branching engine (llama.cpp's)
+   or a model (qwen3/load's, qwen35/load's) on any backend, read on its
+   own (the backend its weights live on)."
+  [ref tokens steps]
+  (if (map? ref)
+    (array/with-backend (model-backend ref)
+      (let [[lg cache] (prefill ref [tokens] {:logits :last})]
+        (loop [i 1 c cache lp (logprobs lg) out {:tokens tokens :root lp :steps []}]
           (if (> i steps)
-            (do (br/dispose! b) out)
-            (let [t (first (top-tokens (br/logprobs b) 1))
-                  [b'] (br/advance [b] [t])
-                  [lg c'] (step m c [[t]])]
-              (recur (inc i) b' c' (conj out (assoc (verdict (br/logprobs b') (logprobs lg) tie) :what [:step i])))))))
-      (finally (br/dispose! root)))))
+            out
+            (let [t (first (top-tokens lp 1))
+                  [lg c'] (step ref c [[t]])
+                  lp' (logprobs lg)]
+              (recur (inc i) c' lp' (update out :steps conj [t lp'])))))))
+    (let [root (br/open ref tokens)]
+      (try
+        (let [lp (br/logprobs root)]
+          (loop [i 1 b (br/fork root) lp lp out {:tokens tokens :root lp :steps []}]
+            (if (> i steps)
+              (do (br/dispose! b) out)
+              (let [t (first (top-tokens lp 1))
+                    [b'] (br/advance [b] [t])
+                    lp' (br/logprobs b')]
+                (recur (inc i) b' lp' (update out :steps conj [t lp']))))))
+        (finally (br/dispose! root))))))
+
+(defn compare-readings
+  "The forward of model m against a reference's readings (reference's):
+   a vector of {:what :max-diff :argmax? :top5?}, :what :whole, :chunk or
+   [:step i] (i from 1, one a reading's step); tie as verdict's (0:
+   exactly the same tokens)."
+  [m {:keys [tokens root steps]} tie]
+  (array/with-backend (model-backend m)
+    (let [n (count tokens)
+          [whole cache] (prefill m [tokens] {:logits :last})
+          [_ half] (prefill m [(subvec tokens 0 (quot n 2))])
+          [chunk] (step m half [(subvec tokens (quot n 2))] {:logits :last})]
+      (loop [i 1 c cache sts (seq steps)
+             out [(assoc (verdict root (logprobs whole) tie) :what :whole)
+                  (assoc (verdict root (logprobs chunk) tie) :what :chunk)]]
+        (if-let [[t lp] (first sts)]
+          (let [[lg c'] (step m c [[t]])]
+            (recur (inc i) c' (next sts) (conj out (assoc (verdict lp (logprobs lg) tie) :what [:step i]))))
+          out)))))
+
+(defn compare-prompt
+  "The forward of model m against the reference e (a Branching engine,
+   llama.cpp's, or a model on another backend: reference's) on the
+   prompt's tokens (a vector of at least 2): compare-readings of e's
+   readings and steps greedy steps, :what :whole, :chunk or [:step i] (i
+   from 1 to steps); tie as verdict's (0: exactly the same tokens)."
+  [e m tokens steps tie]
+  (compare-readings m (reference e tokens steps) tie))
 
 (defn mutated
   "The worst :max-diff of the forward under mutation (a key of
-   (mutations-of m)) on the prompt's tokens: its :whole and :chunk
-   readings, and one step."
-  [e m tokens mutation]
-  (with-redefs-fn ((mutations-of m) mutation)
-    #(reduce max (map :max-diff (compare-prompt e m tokens 1 0)))))
+   (mutations-of m)) on the prompt's tokens, against the reference e (as
+   compare-prompt's), or against readings (reference's, taken once for
+   several mutations): its :whole and :chunk readings, and one step."
+  ([e m tokens mutation] (mutated m (reference e tokens 1) mutation))
+  ([m readings mutation]
+   (let [readings (update readings :steps #(vec (take 1 %)))]
+     (with-redefs-fn ((mutations-of m) mutation)
+       #(reduce max (map :max-diff (compare-readings m readings 0)))))))

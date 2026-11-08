@@ -29,6 +29,26 @@
 (defn- mlx [] @(requiring-resolve 'gen.backend.mlx/backend))
 
 ;; ---------------------------------------------------------------------------
+;; The device (gen.array/device)
+;; ---------------------------------------------------------------------------
+
+(deftest the-backend-names-its-device
+  ;; :cpu for the JVM backend and MLX's CPU; MLX's GPU :metal on macOS and
+  ;; :cuda elsewhere; a batch tracer's (a wrapping backend's) the one it
+  ;; wraps
+  (is (= :cpu (array/device (array/backend-named :jvm))))
+  (when-mlx
+    (let [make (requiring-resolve 'gen.backend.mlx/make-backend)
+          gpu (if (.startsWith (System/getProperty "os.name") "Mac") :metal :cuda)]
+      (is (= :cpu (array/device (make {:device :cpu}))))
+      (when ((requiring-resolve 'gen.backend.mlx/gpu?))
+        (let [b (make {:device :gpu})
+              seen (atom nil)]
+          (is (= gpu (array/device b)))
+          ((array/vmap (fn [x] (reset! seen (array/device (array/backend x))) x)) (array/with-backend b (array/array [1.0 2.0])))
+          (is (= gpu @seen) "under the batch tracer"))))))
+
+;; ---------------------------------------------------------------------------
 ;; The ABI: a struct { void* ctx; } passed and returned by value is a pointer
 ;; ---------------------------------------------------------------------------
 

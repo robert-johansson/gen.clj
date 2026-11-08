@@ -26,7 +26,9 @@
    bench/gen/qwen3_bench.clj, 467: the protocols cost nothing visible);
    token SMC 325 against 940 (124 stacked steps of 8.5 rows on average).
    The array engine computes in gen.bench.dtype (float32, the backend's
-   default float), with blocks of gen.bench.block positions (64).
+   default float; default: no :dtype, the engine's own default, float16
+   for a quantized file on MLX's CUDA), with blocks of gen.bench.block
+   positions (64).
    gen.bench.sections (decode,smc) picks the rows; gen.bench.paged-kernel
    false makes the paged modes attend by gen.array's composite, the
    backend's kernel (Metal's or CUDA's) declined. On fenrir's CUDA (RTX
@@ -157,7 +159,9 @@
    ;; gen.bench.warm-runs, or gen.bench.warm
    :warm (long-prop "warm-runs" (long-prop "warm" 1))
    :block (long-prop "block" 64)
-   :dtype (keyword (prop "dtype" "float32"))
+   ;; gen.bench.dtype default: no :dtype, the engine's own default
+   ;; (float16 for a quantized file on MLX's CUDA, genclj-1vk7)
+   :dtype (let [d (prop "dtype" "float32")] (when-not (= "default" d) (keyword d)))
    :sections (set (map keyword (str/split (prop "sections" "decode,smc") #",")))
    ;; the engines: gen.bench.engines, of static, paged and llama
    :engines (set (map keyword (str/split (prop "engines" "static,paged,continuous,llama") #",")))
@@ -181,6 +185,12 @@
    :shapes? (= "true" (prop "shapes" "false"))})
 
 (defn- llama [sym] @(requiring-resolve (symbol "gen.llm.llama" (name sym))))
+
+(defn- dtype-opt
+  "An array engine's options m with gen.bench.dtype's :dtype, unless it
+   is default."
+  [m]
+  (cond-> m (:dtype settings) (assoc :dtype (:dtype settings))))
 
 (defn- median-ms
   "The median of (:runs settings) timings of (f) in ms, after one untimed
@@ -340,19 +350,19 @@
         ;; the engine's :precompile?, when given (genclj-i3fp)
         pre #(cond-> % (some? (:precompile? settings)) (assoc :precompile? (:precompile? settings)))
         engines (filterv (fn [[k]] ((:engines settings) k))
-                         [[:static "gen.array (MLX)" #(ae/engine {:model path :max-branches 64 :block (:block settings) :dtype (:dtype settings) :paged? false})]
+                         [[:static "gen.array (MLX)" #(ae/engine (dtype-opt {:model path :max-branches 64 :block (:block settings) :paged? false}))]
                           [:paged (str "gen.array paged (MLX), min-rows " (:min-rows settings) (when-not (:paged-kernel settings) ", composite"))
-                           #(ae/engine (pre {:model path :max-branches 64 :dtype (:dtype settings) :paged? true
-                                             :block-size (:block-size settings) :pool-blocks (:pool-blocks settings)
-                                             :min-rows (:min-rows settings)}))]
+                           #(ae/engine (pre (dtype-opt {:model path :max-branches 64 :paged? true
+                                                        :block-size (:block-size settings) :pool-blocks (:pool-blocks settings)
+                                                        :min-rows (:min-rows settings)})))]
                           [:continuous (str "gen.array continuous (MLX), wait " (:wait settings) (when-not (:paged-kernel settings) ", composite"))
-                           #(ae/engine (pre (cond-> {:model path :max-branches 64 :dtype (:dtype settings) :paged? true :continuous? true
-                                                     :block-size (:block-size settings) :pool-blocks (:pool-blocks settings)
-                                                     :min-rows (:min-rows settings) :wait (:wait settings)}
+                           #(ae/engine (pre (cond-> (dtype-opt {:model path :max-branches 64 :paged? true :continuous? true
+                                                                :block-size (:block-size settings) :pool-blocks (:pool-blocks settings)
+                                                                :min-rows (:min-rows settings) :wait (:wait settings)})
                                               (:max-chunks settings) (assoc :max-chunks (:max-chunks settings)))))]
                           [:llama "llama.cpp" #((llama 'engine) {:model path :max-branches 64 :n-ctx 8192})]])
         stats (fn [k e] (when-not (= :llama k)
-                          (println "|" (pr-str (ae/stats e)) (if (= :continuous k) (pr-str (slots/schedule e)) "") "| | |")))
+                          (println "|" (pr-str (assoc (ae/stats e) :dtype (:dtype (:model (br/info e))))) (if (= :continuous k) (pr-str (slots/schedule e)) "") "| | |")))
         ;; an engine made, its open time and the traces since printed after
         ;; its rows (genclj-i3fp)
         opened (fn [k make rows]

@@ -71,6 +71,39 @@ other values for the same key, from the same distribution.
   every shape called, with its calls. **Draws**: the paged and
   continuous modes' rows move within float round-off (kernels differ by
   shape), so draws at near-ties can change.
+- **Changed (experimental): the array engine computes a quantized GGUF
+  file in float16 on MLX's CUDA** (genclj-1vk7; the owner's call,
+  2026-11-08; **Draws**, on CUDA). `gen.llm.array-engine/engine` given a
+  GGUF file whose weights are quantized (Q8_0, Q4_0/1, Q5_0/1, K-quants)
+  and no `:dtype` loads it in float16 on MLX's CUDA backend, where it
+  loaded it in the backend's default float (float32). MLX's fast
+  quantized products on CUDA (qmm_sm80) take half floats only, and every
+  lead over llama.cpp on NVIDIA was measured in float16. Unchanged: an
+  explicit `:dtype`, an unquantized file, a model passed loaded (GRPO's
+  adapted policy among them), the Mac (Metal and MLX's CPU) and the JVM
+  backend; training (gen.llm.lora, sft, grpo) loads its models through
+  the families, in float32. The engine's `br/info` shows the dtype
+  (`[:model :dtype]`). Against MLX's CPU in float32
+  (gen.llm.models.cuda-reference-test), float16 moves the next-token
+  log-probabilities by 0.02 nats (median; at most 0.09 and 0.24) on
+  Qwen3-0.6B and Qwen3.5-0.8B Q8_0, and by 0.2 to 0.6 on the
+  Qwen3.6-35B-A3B MoE (at most 6.1, as far as llama.cpp's CUDA build is
+  from the float32 forward; genclj-fxag looks into it). On fenrir's RTX PRO
+  6000 with the default (tokens/s, each engine in a JVM of its own, the
+  median of 5 runs): token SMC at 16 particles on Qwen3-0.6B Q8_0 paged
+  1462, continuous 1517, static 1136, llama.cpp 2552; on the MoE paged
+  847, continuous 818, llama.cpp 1886. Eight clients of the continuous
+  mode, after 6 untimed runs: Qwen3-0.6B 718 (llama.cpp 504; 251 after
+  one, its forwards still tracing new shapes), the MoE 135 (llama.cpp
+  162).
+- **Added (experimental): `gen.array/device`** (genclj-1vk7). `(array/device
+  b)` is the device backend b computes on: `:cpu` (the JVM backend, MLX's
+  CPU), `:metal` (MLX's GPU on macOS) or `:cuda` (MLX's GPU elsewhere), by
+  the new optional protocol `gen.array.protocols/IDevice`; a wrapping
+  backend's (a tape's, a batch tracer's) is the one it wraps. For runtime
+  choices measured per device, such as the engine's default dtype; never
+  for semantics code.
+
 - **Added (experimental): paged attention of a run, and several prompts
   in one continuous forward** (genclj-6qb6, PROVISIONAL).
   `gen.array/paged-attention` also takes T queries a sequence: q

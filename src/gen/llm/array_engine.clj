@@ -1422,6 +1422,23 @@
                         {:reason :invalid-option :mode mode :unread (vec unread)}))))
     opts))
 
+(defn- quantized-file?
+  "Does the GGUF model at path (its files, a split's too) hold quantized
+   weights: Q8_0, Q4_0/1, Q5_0/1 or K-quants?"
+  [path]
+  (boolean (some #(or (gguf/quantized? %) (= :q6_k %)) (map :type (mapcat :tensors (gguf/headers path))))))
+
+(defn- default-dtype
+  "Checked opts, with :dtype :float16 where the engine loads a GGUF file of
+   quantized weights on MLX's CUDA (backend b) and no :dtype is given (the
+   owner's call, 2026-11-08: MLX's fast quantized products on CUDA take
+   half floats only, and every lead over llama.cpp there was measured in
+   float16); as given elsewhere."
+  [{:keys [model dtype] :as opts} b]
+  (if (and (nil? dtype) (string? model) (= :cuda (array/device b)) (quantized-file? model))
+    (assoc opts :dtype :float16)
+    opts))
+
 (defn- model-backend
   "The backend m's weights live on."
   [m]
@@ -1538,8 +1555,14 @@
                     or a model loaded already, a Qwen3 model with a LoRA
                     adapter among them (gen.llm.lora/adapt; its dropout off,
                     without a :key) (required)
-     :dtype         with a file: the float dtype it computes in (default
-                    the backend's default float); its KV caches hold it too
+     :dtype         with a file: the float dtype it computes in; its KV
+                    caches hold it too. Default: the backend's default
+                    float, but float16 for a file of quantized weights
+                    (Q8_0, Q4_0/1, Q5_0/1, K-quants) on MLX's CUDA
+                    (gen.array/device :cuda), whose fast quantized
+                    products take half floats only. A loaded model
+                    computes in its own dtype (gen.llm.lora, sft and grpo
+                    train in float32)
      :max-branches  live branches at most (default 32): memory is the
                     bound, a branch's row costing 2 × layers × KV-heads ×
                     head-dim floats a position of its capacity (Qwen3-0.6B
@@ -1580,8 +1603,8 @@
    chosen mode does not read (:block in the paged mode, :wait in the
    static one)."
   ^java.io.Closeable [opts]
-  (let [opts (check-options opts)
-        b array/*backend*]
+  (let [b array/*backend*
+        opts (default-dtype (check-options opts) b)]
     (slots/engine #(open-slots opts b) "gen.array")))
 
 (defn stats
