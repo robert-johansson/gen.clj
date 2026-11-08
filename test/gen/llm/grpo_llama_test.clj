@@ -69,6 +69,13 @@
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
 
+(defn- shown
+  "x printed by fmt and read back: a value as the log shows it, in
+   Locale/ROOT (a machine's locale may print a decimal comma, which
+   Double/parseDouble refuses)."
+  [fmt x]
+  (Double/parseDouble (String/format java.util.Locale/ROOT ^String fmt (object-array [x]))))
+
 (def ^:private model-path
   (or (System/getProperty "gen.llama.test-model") (System/getenv "GEN_LLAMA_TEST_MODEL")))
 
@@ -206,13 +213,13 @@
               greedy (paired (:greedy before) (:greedy after))]
           (println (format "grpo-llama: %d rounds in %.1f min; the first step's max |ρ - 1| %.3g" (count history) minutes first-ratio))
           (println (format "grpo-llama: the training reward by 10 rounds %s"
-                           (pr-str (mapv #(Double/parseDouble (format "%.3f" (mean %))) (partition-all 10 rewards)))))
+                           (pr-str (mapv #(shown "%.3f" (mean %)) (partition-all 10 rewards)))))
           (println (format "grpo-llama: held out (%d prompts, %d samples each at temperature 1): before %.3f after %.3f, paired difference %.3f ± %.3f (z %.1f)"
                            (count held) samples (:before sampled) (:after sampled) (:diff sampled) (:se sampled) (:z sampled)))
           (println (format "grpo-llama: held out, greedy: before %.3f after %.3f, paired difference %.3f ± %.3f (z %.1f)"
                            (:before greedy) (:after greedy) (:diff greedy) (:se greedy) (:z greedy)))
           (println (format "grpo-llama: held out by round (4 samples a prompt): %s"
-                           (pr-str (mapv (fn [[r p]] [r (Double/parseDouble (format "%.3f" p))]) curve))))
+                           (pr-str (mapv (fn [[r p]] [r (shown "%.3f" p)]) curve))))
           (is (= (str dir (format "/step-%08d" (* 2 rounds))) checkpoint))
           (is (< first-ratio 1e-3) "the first step's ratios are 1 but for float round-off")
           (is (> (:diff sampled) (* 3 (:se sampled))) "the held-out pass rate rises, at 3 standard errors")
@@ -229,8 +236,8 @@
                   served (pass-rates e tok held 1 eval-key)]
               (println (format "grpo-llama: llama.cpp against the forward, max |Δ log p| over 8 held-out prompts: the base %.3g, the adapter served %.3g (band %s)"
                                (worst base-cs) (worst cs) band))
-              (println "grpo-llama: by comparison, the adapter's" (pr-str (mapv #(Double/parseDouble (format "%.3f" (:max-diff %))) cs)))
-              (println "grpo-llama: by comparison, the base's   " (pr-str (mapv #(Double/parseDouble (format "%.3f" (:max-diff %))) base-cs)))
+              (println "grpo-llama: by comparison, the adapter's" (pr-str (mapv #(shown "%.3f" (:max-diff %)) cs)))
+              (println "grpo-llama: by comparison, the base's   " (pr-str (mapv #(shown "%.3f" (:max-diff %)) base-cs)))
               (println (format "grpo-llama: llama.cpp's greedy replies held out %.3f (the array engine's %.3f, the base's %.3f)"
                                (mean served) (mean (:greedy after)) (mean (:greedy before))))
               (is (every? :argmax? cs) (pr-str cs))

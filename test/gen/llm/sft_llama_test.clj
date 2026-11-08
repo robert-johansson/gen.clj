@@ -56,6 +56,13 @@
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
 
+(defn- shown
+  "x printed by fmt and read back: a value as the log shows it, in
+   Locale/ROOT (a machine's locale may print a decimal comma, which
+   Double/parseDouble refuses)."
+  [fmt x]
+  (Double/parseDouble (String/format java.util.Locale/ROOT ^String fmt (object-array [x]))))
+
 (def ^:private model-path
   (or (System/getProperty "gen.llama.test-model") (System/getenv "GEN_LLAMA_TEST_MODEL")))
 
@@ -163,7 +170,7 @@
               after (with-open [e (ae/engine {:model adapted :max-branches 32 :n-ctx 512})] (replies e tok questions))
               checkpoint (sft/latest-checkpoint dir)]
           (println (format "sft-llama: %d steps in %.0f s; held-out NLL by step %s" (count history) seconds
-                           (pr-str (mapv (fn [{:keys [step nll]}] [step (Double/parseDouble (format "%.4f" nll))]) evaluations))))
+                           (pr-str (mapv (fn [{:keys [step nll]}] [step (shown "%.4f" nll)]) evaluations))))
           (println (format "sft-llama: the format, before %d/16 (correct %d), after %d/16 (correct %d)"
                            (count-of (fn [r _] (follows? r)) before answers) (count-of correct? before answers)
                            (count-of (fn [r _] (follows? r)) after answers) (count-of correct? after answers)))

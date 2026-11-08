@@ -118,6 +118,13 @@
             [gen.llm.models.against-llama :as against]
             [gen.test-support :as ts]))
 
+(defn- shown
+  "x printed by fmt and read back: a value as the log shows it, in
+   Locale/ROOT (a machine's locale may print a decimal comma, which
+   Double/parseDouble refuses)."
+  [fmt x]
+  (Double/parseDouble (String/format java.util.Locale/ROOT ^String fmt (object-array [x]))))
+
 (def ^:private model-path
   (or (System/getProperty "gen.llama.test-model") (System/getenv "GEN_LLAMA_TEST_MODEL")))
 
@@ -213,7 +220,7 @@
                 d (reduce max ds)]
             (println (format "cuda-reference-test %s%s %s: worst %.3f nats, by prompt %s (band %s)"
                              (name dtype) (if forced? " forced" "") (name mutation) d
-                             (mapv #(Double/parseDouble (format "%.3g" %)) ds) b))
+                             (mapv #(shown "%.3g" %) ds) b))
             (is (< b d) (str (name mutation) ": |Δ log p| " d ", inside the band " b))))))))
 
 (deftest ^:slow float32-forward-is-the-cpu-s
