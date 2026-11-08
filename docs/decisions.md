@@ -6831,3 +6831,17 @@ only"; not taken for now, the apps-open run on the MacBook)
 - The owner declined the apps-open test for now; the result stands for the
   big apps closed: 11–19 GB available at the engine's peak under the strict
   guard.
+
+### The loader's two calls (the owner, 2026-11-08 evening)
+
+(Owner: "Ok with your recommendation".)
+
+1. **Reads skip the file cache by default,** and `-Dgen.gguf.cache=true`
+   restores cached reads: confirmed, the name kept.
+2. **Every GGUF file goes through gen.clj's host reader on MLX,** if its load
+   time is within about 20% of mlx_load_gguf's on Q8_0 models (Qwen3-0.6B,
+   Qwen3.5-0.8B, Qwen3-8B). Otherwise mlx_load_gguf stays for the types it
+   reads, and only its file cache is evicted after the load. Why: one reader
+   gives one memory behaviour (no file cache, cast at load, bounded host
+   memory), fewer MLX loader bugs to rely on (float64 metadata, BF16), and
+   the same arrays.
