@@ -89,6 +89,19 @@ src/gen/backend/mlx/gated_delta.clj (the var source: a Metal kernel)
             OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
             SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+src/gen/backend/mlx/gated_delta_cuda.clj (the var source: a CUDA kernel)
+  Project:  mlx-lm (https://github.com/ml-explore/mlx-lm), the same
+            gated-delta Metal kernel as gen/backend/mlx/gated_delta.clj's
+            above, translated to CUDA for mlx_fast_cuda_kernel by gen.clj
+            (genclj-yesw): thread positions from blockIdx and threadIdx,
+            simd_sum as a warp's __shfl_xor_sync butterfly, the token count
+            read from q's shape.
+  Upstream: mlx_lm/models/gated_delta.py at commit
+            760c5abcc80565132a43126561601152356de16a (tag v0.31.1),
+            https://github.com/ml-explore/mlx-lm/blob/760c5abcc80565132a43126561601152356de16a/mlx_lm/models/gated_delta.py
+  License:  MIT; its notice is the entry above's (Copyright © 2023
+            Apple Inc.).
+
 src/gen/backend/mlx/paged_attention.clj (the vars header, body and
 reduce-body: Metal source)
   Project:  kernels-community/paged-attention (Hugging Face's kernels,

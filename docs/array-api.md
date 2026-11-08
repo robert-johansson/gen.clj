@@ -312,7 +312,9 @@ each capability is an optional protocol of its own:
     head has its own keys: a model with fewer key heads repeats them
     first. MLX's Metal has mlx-lm's kernel (gen.backend.mlx.gated-delta,
     ported per THIRD-PARTY-NOTICES), declined under MLX's native
-    gradients, on its CPU device and for Dk not a multiple of 32.
+    gradients, on its CPU device and for Dk not a multiple of 32; MLX's
+    CUDA its port (gen.backend.mlx.gated-delta-cuda, genclj-yesw), for
+    reads shorter than `:chunk-size`, float32 and float16.
   - The half floats are normalized, rotated and softmaxed (and the gated
     delta rule computed) in float32, as MLX's fast ops are.
 - **`quantize`, `dequantize`, `quantized-matmul`, `gather-qmm`** are

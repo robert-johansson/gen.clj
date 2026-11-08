@@ -9,7 +9,8 @@
       (the JVM backend, float64);
    4. a batch tracer's run (vmap) is each row's alone;
    5. on MLX, the fused Metal kernel (:auto, Dk a multiple of 32: mlx-lm's
-      gated-delta kernel, gen.backend.mlx.nn) is the composite;
+      gated-delta kernel, gen.backend.mlx.nn) is the composite, and so is
+      its CUDA port (reads shorter than a chunk);
    6. misuse is loud.
    Planted bugs fail them (with-redefs-fn), each by more than 0.01
    (measured on the JVM backend, 2026-11-07): the decay ignored (exp the
@@ -17,8 +18,8 @@
    triangular inverse dropped, (I + A)⁻¹ as I (0.24), or to first order,
    I - A (0.021) (2); the chunk's attention strict, a token blind to its
    own key (1.4) (2); the gradient of one entry against another's
-   difference (3); and on Metal the kernel's query and key swapped (5),
-   which shows :auto ran it.
+   difference (3); and on Metal or CUDA the kernel's query and key
+   swapped (5), which shows :auto ran it.
    The bands: on the JVM backend 1e-12 (float64's round-off, measured
    ≤ 2.3e-15); on MLX float32's (below)."
   (:require [clojure.test :refer [deftest is testing]]
@@ -187,24 +188,34 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- kernel-gap
-  "max |Δ| between :auto (on Metal the kernel) and the token loop over
-   shapes the kernel takes."
-  []
-  (reduce max (for [[t dk dv] [[1 32 32] [7 64 32] [100 128 128]]
-                    :let [operands (vec (inputs 2 t 4 dk dv t))
-                          run #(apply array/gated-delta (conj operands {:method %}))]]
-                (gap (run :auto) (run :loop)))))
+  "max |Δ| between :auto (on Metal the kernel; on CUDA its port, below a
+   chunk's 64 tokens) and the token loop over shapes the kernel takes,
+   in float32 and, with half?, operands in float16 (its float32 state, as
+   a half-float model's)."
+  ([] (kernel-gap false))
+  ([half?]
+   (reduce max (for [[t dk dv] [[1 32 32] [7 64 32] [1 128 128] [100 128 128]]
+                     :let [operands (cond-> (vec (inputs 2 t 4 dk dv t))
+                                      half? (-> (update 0 array/astype :float16) (update 1 array/astype :float16)
+                                                (update 2 array/astype :float16)))
+                           run #(apply array/gated-delta (conj operands {:method %}))]]
+                 (gap (run :auto) (run :loop))))))
 
 (deftest the-fused-kernel-is-the-composite
+  ;; on MLX's GPU, Metal's kernel or CUDA's (genclj-yesw); a planted bug in
+  ;; the kernel (its query and key swapped) shows :auto ran it
   (if (ts/jvm?)
     (println "gen.array.gated-delta-test: the fused kernel is checked on MLX")
-    (do (is (<= (kernel-gap) band))
-        (when (and (= :gpu ((requiring-resolve 'gen.backend.mlx/device) array/*backend*))
-                   (.contains (.toLowerCase (System/getProperty "os.name")) "mac"))
-          (testing "a planted bug fails it (so :auto ran the kernel): its query and key swapped"
-            (let [kernel-var (requiring-resolve 'gen.backend.mlx.gated-delta/gated-delta)
-                  kernel @kernel-var]
-              (is (< 0.01 (with-redefs-fn {kernel-var (fn [b q k v g beta s] (kernel b k q v g beta s))} kernel-gap)))))))))
+    (let [gpu? (= :gpu ((requiring-resolve 'gen.backend.mlx/device) array/*backend*))
+          mac? (.contains (.toLowerCase (System/getProperty "os.name")) "mac")
+          kernel-var (when gpu? (requiring-resolve (if mac? 'gen.backend.mlx.gated-delta/gated-delta
+                                                       'gen.backend.mlx.gated-delta-cuda/gated-delta)))]
+      (is (<= (kernel-gap) band))
+      (is (<= (kernel-gap true) band) "float16 operands")
+      (when kernel-var
+        (testing "a planted bug fails it (so :auto ran the kernel): its query and key swapped"
+          (let [kernel @kernel-var]
+            (is (< 0.01 (with-redefs-fn {kernel-var (fn [b q k v g beta s] (kernel b k q v g beta s))} kernel-gap)))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; 6. Loud errors

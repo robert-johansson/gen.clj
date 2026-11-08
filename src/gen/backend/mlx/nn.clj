@@ -1,7 +1,9 @@
 (ns gen.backend.mlx.nn
   "The MLX backend's neural-network ops (gen.backend.mlx): MLX's fast
    kernels for gen.array's composites rms-norm, rope and sdpa, mlx-lm's
-   Metal kernel for gated-delta (gen.backend.mlx.gated-delta), and vLLM's
+   Metal kernel for gated-delta (gen.backend.mlx.gated-delta; on CUDA its
+   port, gen.backend.mlx.gated-delta-cuda, for reads shorter than a
+   chunk), and vLLM's
    paged attention for paged-attention (gen.backend.mlx.paged-attention
    on Metal, gen.backend.mlx.paged-attention-cuda on CUDA) (p/IFused),
    and its quantized weights (p/IQuantized: mlx_quantize,
@@ -28,6 +30,7 @@
   (:require [gen.array.shape :as sh]
             [gen.backend.mlx.array :refer [code device fence stream with-device wrap wrap-all]]
             [gen.backend.mlx.gated-delta :as gated-delta]
+            [gen.backend.mlx.gated-delta-cuda :as gated-delta-cuda]
             [gen.backend.mlx.paged :as paged]
             [gen.backend.mlx.paged-attention :as paged-attention]
             [gen.backend.mlx.paged-attention-cuda :as paged-attention-cuda]
@@ -112,11 +115,15 @@
                             ;; mlx_fast_rope takes an int offset
                             (and (integer? offset) (not (<= Integer/MIN_VALUE (long offset) Integer/MAX_VALUE))))
                 (rope b x dims opts)))
-      :gated-delta (let [[q k v g beta state] args]
+      :gated-delta (let [[q k v g beta state {:keys [chunk-size]}] args]
                      ;; mlx-lm's Metal kernel: no VJP, so not under MLX's
-                     ;; gradients; Metal only (the GPU on macOS)
-                     (when (and (not *differentiating*) (= :gpu (device b)) @mac? (gated-delta/applies? b q))
-                       (gated-delta/gated-delta b q k v g beta state)))
+                     ;; gradients; Metal only (the GPU on macOS). On CUDA
+                     ;; its port, for the composite's token loop's reads
+                     (cond
+                       (and (not *differentiating*) (= :gpu (device b)) @mac? (gated-delta/applies? b q))
+                       (gated-delta/gated-delta b q k v g beta state)
+                       (gated-delta-cuda/applies? b q v chunk-size)
+                       (gated-delta-cuda/gated-delta b q k v g beta state)))
       :paged-write (let [[k-pool v-pool k v slots] args] (paged/paged-write b k-pool v-pool k v slots))
       :put-blocks (let [[pool blocks dst] args] (paged/put-blocks b pool blocks dst))
       :paged-attention (let [[q k-pool v-pool tables lens opts] args]
