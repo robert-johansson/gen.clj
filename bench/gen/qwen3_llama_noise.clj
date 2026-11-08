@@ -160,7 +160,9 @@
                                               (swap! groups #(conj (pop %) (conj (peek %) p)))
                                               (router-top-k p k))}
               f)
-        gs @groups]
+        ;; a lower arity calls the full one through its var: an outer
+        ;; call's group stays empty
+        gs (filterv seq @groups)]
     (array/eval! (vec (apply concat gs)))
     [out (mapv (fn [ps] (reduce min Double/POSITIVE_INFINITY (map #(least-margin (array/->floats %) experts experts-used) ps))) gs)]))
 
