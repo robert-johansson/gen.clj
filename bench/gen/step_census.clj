@@ -15,6 +15,8 @@
    CUDA_INJECTION64_PATH), each part's calls are marked, so its kernels
    are counted and named. Parts, at gen.bench.rows (1) rows:
    - step: the whole step, gen.bench.steps (48) of them, each evaluated;
+   - paged: the paged mode's step (compile-paged-step), its states held
+     and the last step's released, as the array engine's held steps;
    - delta: one GatedDeltaNet layer's mixer (batch-delta-net);
    - gated-delta: gen.array/gated-delta alone, on that layer's shapes;
    - attention: one attention layer's mixer (batch-attention);
@@ -43,7 +45,7 @@
    :steps (parse-long (prop "steps" "48"))
    :graphs (prop "graphs" "target/census")
    :variant (keyword (prop "variant" "none"))
-   :parts (set (map keyword (str/split (prop "parts" "step,delta,gated-delta,attention,ffn,block") #",")))})
+   :parts (set (map keyword (str/split (prop "parts" "step,paged,delta,gated-delta,attention,ffn,block") #",")))})
 
 ;; ---------------------------------------------------------------------------
 ;; kprof's marks, MLX's print_graph
@@ -148,6 +150,38 @@
         (mark! (str "step " r) n)
         ms))))
 
+(defn- paged-step-part
+  "The paged mode's compiled step at r rows (compile-paged-step, a token
+   a row), its states held (read, not consumed: the array engine's held
+   steps), the last step's released once the next is evaluated: its
+   graph once warm, then steps steps, each evaluated."
+  [m ^long r]
+  (let [f (qwen35/compile-paged-step m {:donate? true})
+        pools (mapv #(select-keys % [:k :v]) (qwen35/paged-pools m (* (inc r) (long (bp "width"))) (bp "block-size")))
+        carry (volatile! [pools (doto (qwen35/paged-states m r) array/eval!)])
+        pos (volatile! 64)
+        one (fn []
+              (let [{:keys [positions tables slots]} ((bp "batch") r @pos (vec (repeat r 1)))
+                    [pools states] @carry
+                    [l layers] (f pools positions tables slots (mapv vector (repeat r (+ 1000 (long @pos)))) states)
+                    out [l layers]]
+                (vreset! carry [(mapv #(select-keys % [:k :v]) layers) (mapv #(select-keys % [:conv :state]) layers)])
+                (vswap! pos inc)
+                [out states]))
+        run (fn [] (let [[out old] (one)] (array/eval! out) (array/release! old)))]
+    (dotimes [_ 8] (run))
+    (let [[out old] (one)]
+      (report! (str "paged " r) out 1)
+      (array/eval! out)
+      (array/release! old))
+    (mark! "warm" 9)
+    (let [n (long (:steps settings))
+          t0 (System/nanoTime)]
+      (dotimes [_ n] (run))
+      (let [ms (/ (- (System/nanoTime) t0) 1e6 n)]
+        (mark! (str "paged " r) n)
+        ms))))
+
 (defn- layer-parts
   "One layer of each part, compiled alone at r rows: {part ms}."
   [{:keys [config weights] :as m} ^long r]
@@ -221,9 +255,11 @@
     (println "- os:" (System/getProperty "os.name") (System/getProperty "os.arch") "; java" (System/getProperty "java.version"))
     (mark! "load" 0)
     (let [step (when (parts :step) (step-part m rows))
+          paged (when (parts :paged) (paged-step-part m rows))
           ps (layer-parts m rows)]
       (println "\n### ms a call (each evaluated)\n")
       (when step (println "- step:" (format "%.3f" (double step))))
+      (when paged (println "- paged:" (format "%.3f" (double paged))))
       (doseq [[k v] ps] (println (str "- " (name k) ": " (format "%.3f" (double v))))))
     (shutdown-agents)))
 
