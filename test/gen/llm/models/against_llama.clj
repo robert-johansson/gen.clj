@@ -80,7 +80,7 @@
      quantize the activations to 8 bits for their dot products (fenrir,
      2026-11-08, the general and the digit prompts): Qwen3 2.4 (Q8_0;
      K-quants unmeasured), Qwen3.5 7.1 (Q8_0) and 12.3 (K-quants:
-     Qwen3.6-35B-A3B's Q4_K experts, on CUDA, where llama.cpp's own spread
+     Qwen3.6-35B-A3B's Q4_K experts, where llama.cpp's own spread on CUDA
      reaches 6.1)."
   [path]
   (let [qwen35? (#{"qwen35" "qwen35moe"} (architecture path))
