@@ -46,8 +46,9 @@ other values for the same key, from the same distribution.
   `posix_fadvise` `DONTNEED` on Linux), those cached before kept, so it
   no longer leaves the model cached (+0.64 GB for Qwen3-0.6B-Q8_0, +0.83
   GB for Qwen3.5-0.8B-Q8_0, +8.7 GB for Qwen3-8B-Q8_0). The arrays are
-  unchanged. Load time: about +2% on the Mac (Qwen3-0.6B, 1.18 to 1.21
-  s cold). `-Dgen.gguf.cache=true` keeps the pages, as it keeps the host
+  unchanged. Load time, cold: 2 to 5% more (the M4: Qwen3-0.6B 1.18 to
+  1.20 s, Qwen3.5-0.8B 1.40 to 1.47 s; fenrir's CUDA: Qwen3-8B 3.36 to
+  3.45 s). `-Dgen.gguf.cache=true` keeps the pages, as it keeps the host
   reader's; a failed eviction call is loud (`:io`). Not taken: every file
   through the host reader on MLX (the owner's rule, 2026-11-08), which
   loads faster on the M4 (0.81 against 1.18 s, Qwen3-0.6B) but about
