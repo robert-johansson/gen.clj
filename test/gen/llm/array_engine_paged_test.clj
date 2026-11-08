@@ -31,7 +31,8 @@
      ahead of its branch;
    - a run's shapes (prompts, 16 forks and their copies, subsets of
      them, an extend, a score) are those compiled when the engine opened
-     (genclj-i3fp): no trace, on MLX no call of qwen3's forwards;
+     (genclj-i3fp): no trace, on MLX no call of qwen3's forwards; then
+     the backend's cache is given back, once (genclj-v1kg);
    - misuse is loud.
    Planted mutations fail the contract checks named in
    planted-bugs-fail-the-contract: copy-on-write skipped (a fork's step
@@ -404,6 +405,27 @@
     (with-open [e (ae/engine (merge paged-opts {:model (:f32 @models) :max-branches 64 :pool-blocks 256 :precompile? false}))]
       (run e)
       (is (pos? (:traces (ae/stats e))) "without :precompile?"))))
+
+(deftest the-compile-at-open-gives-back-its-cache
+  ;; genclj-v1kg: once its shapes are compiled, the engine gives back the
+  ;; memory its backend keeps for later arrays (array/release-cache!), once,
+  ;; the model's backend's; on MLX its buffer cache is then empty, not
+  ;; full of the warm calls' buffers (on Metal they cost Qwen3.5-0.8B's
+  ;; token SMC 2-3%). Without :precompile? nothing. Planted (2026-11-08):
+  ;; the call removed fails the first check, and on Metal the second;
+  ;; MLX's -release-cache! freeing nothing, the second
+  (let [released (atom [])
+        release @#'array/release-cache!
+        memory (when-not (ts/jvm?) (requiring-resolve 'gen.backend.mlx/memory))]
+    (with-redefs-fn {#'array/release-cache! (fn [b] (swap! released conj (array/backend-name b)) (release b))}
+      (fn []
+        (with-open [_ (ae/engine (merge paged-opts {:model (:f32 @models) :max-branches 16}))]
+          (is (= [(ts/backend-name)] @released) "once, the model's backend")
+          (when memory
+            (is (zero? (:cache (memory))) "MLX's cache empty")))
+        (reset! released [])
+        (with-open [_ (ae/engine (merge paged-opts {:model (:f32 @models) :max-branches 16 :precompile? false}))]
+          (is (= [] @released) "without :precompile?"))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Misuse

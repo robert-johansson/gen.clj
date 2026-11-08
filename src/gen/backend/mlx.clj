@@ -647,6 +647,11 @@
     (doseq [x xs] (transforms/donate! x))
     (MlxRuntime/settleFresh))
 
+  p/ICaching
+  ;; under the evaluation lock, on the evaluation thread where there is one
+  ;; (CUDA's)
+  (-release-cache! [_] (memory/evaluating (memory/clear-cache!)))
+
   p/IDevice
   (-device [b] (if (= :cpu (device b)) :cpu (if @mac? :metal :cuda)))
 

@@ -322,6 +322,40 @@
         (array/eval! (array/with-backend b (array/+ (array/zeros [100000]) 1.0))))
       (is (< (- (live) base) 8e6) "unreachable arrays are freed"))))
 
+(deftest the-buffer-cache-is-released
+  ;; gen.array/release-cache! (genclj-v1kg): on MLX the buffer cache freed,
+  ;; live arrays kept; through a wrapping backend (the batch tracer's) the
+  ;; one it wraps; on the JVM backend nothing. Planted (2026-11-08, Metal):
+  ;; an MLX -release-cache! freeing nothing fails the cache's check, and
+  ;; one ignoring a wrapping backend the tracer's
+  (is (nil? (array/release-cache! (array/backend-named :jvm))) "the JVM backend: nothing")
+  (when-mlx
+    (let [b (mlx)
+          memory (requiring-resolve 'gen.backend.mlx/memory)
+          collect! (requiring-resolve 'gen.backend.mlx/collect!)
+          ;; MLX's allocators but the CPU's on Linux (no cache there) keep
+          ;; freed buffers
+          caches? (or (.startsWith (System/getProperty "os.name") "Mac") ((requiring-resolve 'gen.backend.mlx/gpu?)))
+          kept (array/eval! (array/with-backend b (array/+ (array/zeros [100000]) 2.0)))
+          ;; 8 MB of evaluated arrays, unreachable, then collected: their
+          ;; buffers freed into the cache
+          fill! (fn []
+                  (dotimes [_ 20] (array/eval! (array/with-backend b (array/+ (array/zeros [100000]) 1.0))))
+                  (collect!)
+                  (:cache (memory)))]
+      (let [cached (fill!)]
+        (when caches? (is (< 4e6 cached) "freed buffers are cached")))
+      (is (nil? (array/release-cache! b)))
+      (is (zero? (:cache (memory))) "the cache freed")
+      (is (= 2.0 (array/item (array/mean kept))) "a live array keeps its buffer")
+      (testing "through the batch tracer"
+        (let [xs (array/with-backend b (array/array [1.0 2.0]))
+              cached (fill!)
+              after (atom nil)]
+          (when caches? (is (< 4e6 cached)))
+          ((array/vmap (fn [x] (array/release-cache! (array/backend x)) (reset! after (:cache (memory))) x)) xs)
+          (is (zero? @after)))))))
+
 (deftest array-pressure-collects
   (when-mlx
     (let [b (mlx)

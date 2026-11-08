@@ -264,6 +264,17 @@
      now (a graph still reading one keeps what it reads), and every later
      read of one is loud, as a donated array's (array/compile's :donate)."))
 
+(defprotocol ^{:api :experimental} ICaching
+  "A backend that keeps freed arrays' native memory for its next arrays
+   (MLX's buffer cache), which a runtime may give back:
+   gen.array/release-cache!. A backend without it (the JVM's, whose arrays
+   the GC frees) keeps none. Experimental: outside the 1.x promise
+   (DESIGN §9)."
+  (^{:api :experimental} -release-cache! [b]
+    "Give back the memory b keeps for its next arrays (MLX: its buffer
+     cache freed). Arrays live now keep theirs; later arrays allocate
+     anew, and the cache fills again."))
+
 (defprotocol ICompiling
   "A backend that compiles functions of its arrays (MLX: mlx_compile)."
   (-compile [b f opts]
