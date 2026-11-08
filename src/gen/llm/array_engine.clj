@@ -85,8 +85,9 @@
    gdn_states_bench.clj, Qwen3.5-0.8B's states, 16 rows, ms a step with
    the GC): a lane 6.7, read in place 12.5 (the kernel's fresh states
    are new bytes, collected), stacked from one group 17.7, from two
-   groups with padding 30 (two copies) to 42 (the three copies before);
-   a pool of every slot's states costs more (18-26: the kernel cannot
+   groups with padding 23.9 (slices, one concatenate; 42 by the three
+   copies before); a pool of every slot's states costs more (18-26:
+   the kernel cannot
    write a pool in place, so its states are written back, a copy, and
    in one call MLX may copy the whole pool, 32 ms at 8 rows).
    - A copy (fork) shares the table and copies nothing; a step that writes

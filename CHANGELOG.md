@@ -235,8 +235,8 @@ other values for the same key, from the same distribution.
     place when other branches hold it too (forks: `stats`'
     `:held-steps`), and stack rows in one copy where they stacked in up
     to three. Token SMC at 16 particles, Qwen3.5-0.8B: 677 tokens/s
-    in float32 against 595, 826 in float16 against 698. The values read
-    are the same.
+    in float32 against main's 627 the same day, 826 in float16 against
+    744. The values read are the same.
   - A paged or continuous step that consumed a lane's states and whose
     rows then fail to normalize names those slots lost (`:lost-slots`),
     where they were left holding consumed states.
