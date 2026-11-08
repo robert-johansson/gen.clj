@@ -130,7 +130,8 @@
   "A backend with fused kernels for some of gen.array's neural-network
    composites (rms-norm, rope, sdpa, gated-delta, paged-attention), which
    it may compute in one op instead of the composite (MLX: its fast ops,
-   and Metal kernels for gated-delta and paged-attention). gen.array asks
+   Metal kernels for gated-delta and paged-attention, and a CUDA kernel
+   for paged-attention). gen.array asks
    only a
    backend whose arrays are the operands themselves: a wrapping backend
    (the tape, the batch tracer) and the staging backend implement no

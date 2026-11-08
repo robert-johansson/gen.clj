@@ -117,6 +117,37 @@ source)
             section 4(b)): the kernel's signature replaced by
             mlx_fast_metal_kernel's, its body and helpers kept.
 
+src/gen/backend/mlx/paged_attention_cuda.clj (the vars header and body:
+CUDA source)
+  Project:  vLLM (https://github.com/vllm-project/vllm), its CUDA paged
+            attention kernel, v1 (PagedAttention, Kwon et al., 2023), which
+            originated there (kernels-community's CUDA files are copies
+            of it, and its Metal kernel, the entry above, a port), adapted
+            by vLLM from NVIDIA's FasterTransformer
+            (decoder_masked_multihead_attention, Apache-2.0). vLLM deleted
+            its paged attention kernels on 2026-07-02 (d715b3a, "Delete
+            PagedAttention"); gen.clj ports them from the commit before,
+            the last that has them.
+  Upstream: csrc/libtorch_stable/attention/attention_kernels.cuh,
+            paged_attention_v1.cu and attention_utils.cuh;
+            csrc/attention/attention_generic.cuh, dtype_float32.cuh,
+            dtype_float16.cuh, dtype_bfloat16.cuh and dtype_fp8.cuh; and
+            csrc/cuda_compat.h, at commit
+            258f8de91f99b40a4dfb234e55a09e9493c6ece8,
+            https://github.com/vllm-project/vllm/tree/258f8de91f99b40a4dfb234e55a09e9493c6ece8/csrc
+  License:  Apache License 2.0 (the repository's LICENSE; the files'
+            headers: Copyright (c) 2023, The vLLM team; Copyright (c)
+            2020-2023, NVIDIA CORPORATION). Its text in
+            LICENSE-APACHE-2.0. The joined source keeps each file's
+            license header (cuda_compat.h and dtype_fp8.cuh carry none).
+            Neither vLLM (at that commit) nor FasterTransformer
+            (release/v5.3_tag) has a NOTICE file (checked 2026-11-08).
+  Modified: yes, as the file's Changes line states (Apache License 2.0,
+            section 4(b)): the files joined, the includes NVRTC lacks
+            replaced by a prologue, the fp8 conversions declared only,
+            and the v1 kernel's body made mlx_fast_cuda_kernel's source;
+            paged_attention_kernel and its helpers kept.
+
 src/gen/array/gguf/quants.clj (Clojure: GGML's quantizers)
   Project:  llama.cpp (https://github.com/ggml-org/llama.cpp), its
             reference quantizers in ggml (quantize_row_q8_0_ref,

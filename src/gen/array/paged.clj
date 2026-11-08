@@ -5,7 +5,8 @@
    (put-along-axis, take, sdpa), so every backend computes it and the
    composite is the reference a backend's kernel is checked against
    (rule 1); a backend with a kernel (p/IFused's :paged-attention: MLX's
-   Metal, gen.backend.mlx.paged-attention) computes it in one op where its
+   Metal, gen.backend.mlx.paged-attention, and CUDA,
+   gen.backend.mlx.paged-attention-cuda) computes it in one op where its
    arrays are the operands.
 
    The layouts are vLLM's (Kwon et al., 2023), which the kernels read:

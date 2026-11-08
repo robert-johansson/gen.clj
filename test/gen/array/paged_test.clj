@@ -290,6 +290,31 @@
               (testing (str "a bug planted in the CUDA kernel's source fails it: " label)
                 (is (< 0.1 (with-redefs-fn (planted-source (kernel-var sym) old new) #(max-diff (attend) composite))))))))))))
 
+(deftest the-cuda-kernel-reads-long-tables
+  ;; CUDA's kernel holds a sequence's scores in shared memory sized by
+  ;; tiers of positions: a table of 12,000 runs its largest (64,000
+  ;; bytes, past the 48 KB a launch gets without opting in), and one past
+  ;; 16,000 the composite
+  (if-not (= 'gen.backend.mlx.paged-attention-cuda (kernel-ns))
+    (is true "MLX's CUDA only")
+    (let [kernel-v (kernel-var 'paged-attention)
+          kernel @kernel-v
+          run (fn [c]
+                (let [[kp vp tables lens dn] (written c)
+                      attend #(array/eval! (array/paged-attention (:q dn) kp vp tables lens))]
+                  {:fused (attend)
+                   :composite (with-redefs-fn {#'paged/fused-attention (fn [& _] nil)} attend)
+                   :short (with-redefs-fn {kernel-v (fn [b q kp vp t l opts] (kernel b q kp vp t (array/maximum (array/- l 1) 0) opts))}
+                            attend)}))]
+      (testing "12,000 positions: the kernel"
+        (let [{:keys [fused composite short]} (run {:lens [12000 1 700] :hq 4 :hk 2 :d 32 :bs 16 :dtype :float32 :seed 9})]
+          (is (<= (max-diff fused composite) (get-in kernel-band [(kernel-ns) :float32])))
+          (is (< 0.1 (max-diff short composite)) "a planted bug fails it (the lengths one short), so the kernel ran")))
+      (testing "16,500 positions: the composite"
+        (let [{:keys [fused composite short]} (run {:lens [16500 3] :hq 4 :hk 2 :d 32 :bs 16 :dtype :float32 :seed 9})]
+          (is (== 0.0 (max-diff fused composite)))
+          (is (== 0.0 (max-diff short composite)) "the kernel not called"))))))
+
 ;; ---------------------------------------------------------------------------
 ;; 5. Values
 ;; ---------------------------------------------------------------------------

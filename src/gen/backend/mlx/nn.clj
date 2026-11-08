@@ -1,8 +1,10 @@
 (ns gen.backend.mlx.nn
   "The MLX backend's neural-network ops (gen.backend.mlx): MLX's fast
-   kernels for gen.array's composites rms-norm, rope and sdpa, and
-   mlx-lm's Metal kernel for gated-delta (gen.backend.mlx.gated-delta)
-   (p/IFused), and its quantized weights (p/IQuantized: mlx_quantize,
+   kernels for gen.array's composites rms-norm, rope and sdpa, mlx-lm's
+   Metal kernel for gated-delta (gen.backend.mlx.gated-delta), and vLLM's
+   paged attention for paged-attention (gen.backend.mlx.paged-attention
+   on Metal, gen.backend.mlx.paged-attention-cuda on CUDA) (p/IFused),
+   and its quantized weights (p/IQuantized: mlx_quantize,
    mlx_dequantize, mlx_quantized_matmul, mlx_gather_qmm).
 
    The fast kernels take float32 and the half floats. float64 (the CPU

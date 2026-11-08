@@ -1492,11 +1492,13 @@
    are checked where readable (array/concrete?).
    A composite of gen.array's ops: each sequence's blocks gathered
    (take), then sdpa under a mask of its length, the reference that a
-   backend's kernel is checked against. MLX's Metal computes it by
-   kernels-community's paged_attention kernel (vLLM's, through
-   mlx_fast_metal_kernel; gen.backend.mlx.paged-attention, ported per
-   THIRD-PARTY-NOTICES), which reads the blocks in place; it computes the
-   softmax in float32 and adds 1e-6 to its normalizer, as vLLM's does.
+   backend's kernel is checked against. MLX's GPU computes it by vLLM's
+   paged attention kernel (v1), which reads the blocks in place: on Metal
+   kernels-community's port of it (through mlx_fast_metal_kernel;
+   gen.backend.mlx.paged-attention), on CUDA vLLM's own (through
+   mlx_fast_cuda_kernel; gen.backend.mlx.paged-attention-cuda), each
+   ported per THIRD-PARTY-NOTICES; they compute the softmax in float32
+   and add 1e-6 to its normalizer, as vLLM's does.
    Experimental: outside the 1.x promise (DESIGN §9)."
   ([q k-pool v-pool tables lens] (paged-attention q k-pool v-pool tables lens nil))
   ([q k-pool v-pool tables lens opts] ((:paged-attention @paged) q k-pool v-pool tables lens opts)))
