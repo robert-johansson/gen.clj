@@ -1384,9 +1384,9 @@
        ([layers positions tables slots tokens held] (go layers positions tables slots tokens held))))))
 
 ;; ---------------------------------------------------------------------------
-;; Batched paged steps (genclj-6qb6): decode rows and a prefill chunk, as
-;; qwen3's (genclj-b3ow), the chunk one sequence through the GatedDeltaNet
-;; layers
+;; Batched paged steps (genclj-6qb6): decode rows and prefill chunks, as
+;; qwen3's (genclj-b3ow), each chunk one sequence through the GatedDeltaNet
+;; layers (K chunks a batch of K sequences)
 ;; ---------------------------------------------------------------------------
 
 (defn- batch-attention

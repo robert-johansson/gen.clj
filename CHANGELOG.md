@@ -55,7 +55,13 @@ other values for the same key, from the same distribution.
   `:chunk-len` `[K]`. `ae/stats` counts `:chunks`. A single caller's
   reads are unchanged, bit for bit; concurrent callers' are gathered
   otherwise (within the engine's band, as before).
-  Measured on Metal: see the bench (bench/gen/array_engine_bench.clj).
+  At most a power of 2 of chunks a forward, so that forwards trace for
+  few shapes. On Metal (M4), 8 clients: Qwen3-0.6B float16 402 → 422
+  tokens/s, read p90 16.8 → 14.9 ms, first token 215 → 210 ms (largest
+  429 → 361); Qwen3.5-0.8B float16 278 → 285, p90 27.8 → 22.0 ms
+  (bench/gen/array_engine_bench.clj). Eight prompts of 32 tokens in one
+  forward take 84.6 ms against 150.7 in eight (Qwen3, float16;
+  bench/gen/prefill_bench.clj).
 
 - **Added (experimental): token SMC and completions read the LM's rows
   lent, and an LM forks a step's parents in one call** (genclj-4acj).

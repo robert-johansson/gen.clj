@@ -145,7 +145,8 @@
      the decode rows, at least a block, padded to t rows, a power of 2
      within the budget; and chunks of the next longer reads, at most t
      tokens each, padded to t rows, while the budget holds them (at most
-     :max-chunks in all; genclj-6qb6). Each chunk's rows are written
+     :max-chunks in all, and a power of 2 of them, so that forwards
+     trace for few shapes; genclj-6qb6). Each chunk's rows are written
      into its blocks and attend over them (gen.array/paged-attention of
      a run: its blocks gathered once, each row to its own position); a
      chunk's padding rows sit at its last position. Longer reads past
@@ -914,8 +915,9 @@
    (n-batch tokens) leaves, at least a block (bs), its rows t padded to
    a power of 2 within the budget; then the next longer reads' chunks of
    at most t tokens each, padded to t rows, while the budget holds them,
-   at most max-chunks in all (genclj-6qb6). {:decode [indices] :d-rows
-   :chunks [indices] :cs [their tokens] :t}."
+   at most max-chunks in all, and a power of 2 of them, so that a
+   forward's shapes are few (the rest wait a forward; genclj-6qb6).
+   {:decode [indices] :d-rows :chunks [indices] :cs [their tokens] :t}."
   [reads min-rows n-batch bs max-chunks]
   (let [decode (filterv #(one-token? (reads %)) (range (count reads)))
         d (count decode)
@@ -925,7 +927,8 @@
         n-of #(count (:tokens (reads %)))
         c (when (seq longer) (min (long (n-of (first longer))) left))
         t (when c (min (next-pow2 c) (max (long c) left)))
-        chunks (when t (vec (take (min (long max-chunks) (quot left (long t))) longer)))]
+        k (when t (min (long max-chunks) (quot left (long t)) (count longer)))
+        chunks (when t (vec (take (Long/highestOneBit k) longer)))]
     {:decode decode :d-rows d-rows :chunks (or chunks []) :t t
      :cs (mapv #(min (long (n-of %)) (long t)) chunks)}))
 
@@ -995,9 +998,10 @@
         ;; a padding row writes the scratch slot of its row's index, and a
         ;; padding decode row reads that slot's block
         pad-table (fn [^long i] (vec (cons (quot i bs) (repeat (dec width) 0))))
-        ;; chunk j's rows: its c tokens, then padding to t rows at its last
-        ;; position (seeing what that sees: within its table)
-        base (fn ^long [^long j] (c/+ d-rows (c/* j t)))
+        ;; chunk j's rows (row i of it at (at j i)): its c tokens, then
+        ;; padding to t rows at its last position (seeing what that sees:
+        ;; within its table)
+        at (fn [j i] (c/+ d-rows (c/* (long j) t) (long i)))
         per-chunk (fn [f] (into [] (mapcat f) (map vector (range) chunks cs)))
         tokens (-> []
                    (into (map #(vector (first (:tokens (reads %))))) decode)
@@ -1013,16 +1017,16 @@
         slots (-> []
                   (into (map first) (subvec write-slots 0 d))
                   (into (range d d-rows))
-                  (into (mapcat (fn [j sl c] (concat sl (range (c/+ (base j) (long c)) (c/+ (base j) t))))
+                  (into (mapcat (fn [j sl c] (concat sl (range (at j (long c)) (at j t))))
                                 (range) (subvec write-slots d) cs)))
         ;; the rows read: each decode row, each chunk's last when it ends
         ;; its read, then the chunks' scored rows
         ends (mapv (fn [i c] (c/== (long c) (count (:tokens (reads i))))) chunks cs)
         ended (filterv ends (range nk))
-        lp-rows (into (vec (range d)) (map #(c/+ (base %) (dec (long (cs %))))) ended)
+        lp-rows (into (vec (range d)) (map #(at % (dec (long (cs %))))) ended)
         ;; each chunk's scored rows: those of its targets among its tokens
         ks (mapv (fn [i c] (if-let [tg (:targets (reads i))] (min (long c) (count tg)) 0)) chunks cs)
-        out (into lp-rows (mapcat (fn [j k] (map #(c/+ (base j) (long %)) (range k))) (range) ks))
+        out (into lp-rows (mapcat (fn [j k] (map #(at j (long %)) (range k))) (range) ks))
         o (next-pow2 (count out))
         targets (when (some pos? ks)
                   (-> (vec (repeat (count lp-rows) 0))

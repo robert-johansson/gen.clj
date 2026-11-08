@@ -891,7 +891,8 @@
          (f pools positions tables slots ids))))))
 
 ;; ---------------------------------------------------------------------------
-;; Batched paged steps (genclj-b3ow): decode rows and a prefill chunk
+;; Batched paged steps (genclj-b3ow): decode rows and prefill chunks (K of
+;; them, genclj-6qb6)
 ;; ---------------------------------------------------------------------------
 
 (defn- batch-attention

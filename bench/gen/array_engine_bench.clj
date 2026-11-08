@@ -66,7 +66,14 @@
      gen.bench.client-tokens tokens (64, no end tokens) after a prompt of
      its own: tokens/s is clients × tokens over the wall time, and each
      LM read's latency (a token's) is reported at its median, 90th
-     percentile and largest;
+     percentile and largest; then each client's time to its first token
+     (from the start to its first read's end: its prompt admitted, at the
+     median and largest), prompt admission's share of the wall time (the
+     continuous mode's forwards that read a chunk of a longer read, and
+     the paged mode's runs), and each timed run's traces of the batched
+     step (a trace per new shape; genclj-6qb6). The clients run
+     gen.bench.warm times (1) untimed first; gen.bench.max-chunks sets
+     the continuous engine's :max-chunks;
    - lone: one such client alone, the same latencies.
    token SMC runs gen.bench.smc-clients runs at once (1), each over an
    LM of its own.
@@ -88,7 +95,19 @@
    352 → 529 (its dropped caches released), 8 continuous clients 214 →
    264; float16 8 clients 368 → 382 (p90 27.5 → 18.3 ms), llama.cpp 98,
    token SMC llama.cpp 944. bench/gen/batch_profile.clj breaks a step
-   down."
+   down. Several prompts' chunks a forward (genclj-6qb6, 2026-11-08;
+   gen.bench.warm 5, runs 6; main, then the branch), 8 clients: Qwen3-0.6B
+   float16 402 → 422 tokens/s, read p90 16.8 → 14.9 ms, time to first
+   token p50 215 → 210 ms (largest 429 → 361), admission 27.6 → 23.9% of
+   the wall time; float32 273 → 287, 27.9 → 23.7, 270 → 231 (479 → 428),
+   22.0 → 18.5%; llama.cpp 99 tokens/s, p90 77-80 ms, first token 312-319
+   ms. Qwen3.5-0.8B float16 278 → 285, 27.8 → 22.0, 296 → 277 (612 →
+   596), 27.0 → 24.0%; float32 208 → 217, 38.8 → 30.6, 324 → 346 (701 →
+   676), 23.5 → 21.1%; llama.cpp 70 tokens/s, p90 112-114, first token
+   413-431. The same branch with :max-chunks 1 against 16 in one session:
+   Qwen3 float16 398 → 441, first token 252 → 197; Qwen3.5 float16 275 →
+   298, 328 → 274. With one warm run, 0 to 7 of each timed run's forwards
+   trace a new shape (50-125 ms each), moving these by up to 20%."
   (:require [clojure.string :as str]
             [gen.array :as array]
             [gen.gfi :as gfi]
@@ -112,6 +131,8 @@
    :particles (long-prop "particles" 16)
    :smc-tokens (long-prop "smc-tokens" 32)
    :runs (long-prop "runs" 3)
+   ;; the clients' untimed runs first (each traces the forwards' new shapes)
+   :warm (long-prop "warm" 1)
    :block (long-prop "block" 64)
    :dtype (keyword (prop "dtype" "float32"))
    :sections (set (map keyword (str/split (prop "sections" "decode,smc") #",")))
@@ -123,7 +144,8 @@
    :min-rows (long-prop "min-rows" 1)
    ;; the continuous mode's (genclj-b3ow)
    :wait (parse-double (prop "wait" 0.25))
-   :max-chunks (long-prop "max-chunks" 16)
+   ;; the engine's :max-chunks, when given (genclj-6qb6)
+   :max-chunks (some-> (System/getProperty "gen.bench.max-chunks") parse-long)
    :clients (long-prop "clients" 8)
    :client-tokens (long-prop "client-tokens" 64)
    :smc-clients (long-prop "smc-clients" 1)
@@ -255,7 +277,7 @@
   [label e tok prompt n]
   (admitting
    (fn []
-     (client-run e tok prompt n)
+     (dotimes [_ (:warm settings)] (client-run e tok prompt n))
      (let [runs (vec (repeatedly (:runs settings) #(client-run e tok prompt n)))
            ms (nth (sort (map first runs)) (quot (count runs) 2))
            lat (mapcat second runs)
@@ -281,10 +303,10 @@
                                         :block-size (:block-size settings) :pool-blocks (:pool-blocks settings)
                                         :min-rows (:min-rows settings)})]
                           [:continuous (str "gen.array continuous (MLX), wait " (:wait settings) (when-not (:paged-kernel settings) ", composite"))
-                           #(ae/engine {:model path :max-branches 64 :dtype (:dtype settings) :paged? true :continuous? true
-                                        :block-size (:block-size settings) :pool-blocks (:pool-blocks settings)
-                                        :min-rows (:min-rows settings) :wait (:wait settings)
-                                        :max-chunks (:max-chunks settings)})]
+                           #(ae/engine (cond-> {:model path :max-branches 64 :dtype (:dtype settings) :paged? true :continuous? true
+                                                :block-size (:block-size settings) :pool-blocks (:pool-blocks settings)
+                                                :min-rows (:min-rows settings) :wait (:wait settings)}
+                                         (:max-chunks settings) (assoc :max-chunks (:max-chunks settings))))]
                           [:llama "llama.cpp" #((llama 'engine) {:model path :max-branches 64 :n-ctx 8192})]])
         stats (fn [k e] (when-not (= :llama k)
                           (println "|" (pr-str (ae/stats e)) (if (= :continuous k) (pr-str (slots/schedule e)) "") "| | |")))]

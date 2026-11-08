@@ -414,8 +414,8 @@
 
 (def ^:private prompts
   "Prompts of 5, 7, 3, 8 and 12 tokens: in a budget of 40 tokens the
-   first's 5 make chunks of 8 rows, five of them in one forward, the
-   last read in two (8 tokens, then 4 in a forward of its own)."
+   first's 5 make chunks of 8 rows, four of them (a power of 2) in one
+   forward, the last read in a forward of its own."
   (mapv (fn [n i] (vec (take n (drop i (cycle [95 51 72 69 0 67 65 80 73 84 65 76 13 7 99 42])))))
         [5 7 3 8 12] (range)))
 
@@ -483,7 +483,7 @@
         (let [[failures d] (several-prompts k e)]
           (is (= [] failures))
           (is (= 2 (:forwards d)) (pr-str d))
-          (is (= 6 (:chunks d)) "five chunks in the first forward, the last prompt's rest in the second")
+          (is (= 5 (:chunks d)) "four chunks in the first forward (a power of 2), the last prompt in the second")
           (is (zero? (:live (br/info e))))))))
   (testing "planted bugs fail it"
     (doseq [[what redefs] (merge planted-chunk-bugs (select-keys planted ["a chunk's tokens run as sequences of their own"]))]
