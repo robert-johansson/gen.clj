@@ -296,8 +296,10 @@
           readings (nth rs 3)]
       (doseq [mutation (sort (keys (against/mutations-of m)))]
         (is (< mutation-nats (against/mutated m readings mutation)) (name mutation))
+        ;; forced, past the forced band where it is the tighter (Metal's),
+        ;; else past mutation-nats as unforced
         (when (:experts readings)
-          (is (< forced-band (against/mutated m (forced readings) mutation))
+          (is (< (min forced-band mutation-nats) (against/mutated m (forced readings) mutation))
               (str (name mutation) ", llama.cpp's experts forced")))))))
 
 ;; ---------------------------------------------------------------------------
