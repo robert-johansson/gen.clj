@@ -7,7 +7,7 @@
   (:require [gen.array.dtype :as dt]
             [gen.array.shape :as sh]
             [gen.backend.mlx.array :refer [aux-stream check-dtype code defaults device fence handle mlx-array? stream wrap]]
-            [gen.backend.mlx.memory :refer [at-buffer-limit evaluating]])
+            [gen.backend.mlx.memory :refer [at-buffer-limit cuda-gpu? evaluating]])
   (:import [gen.backend.mlx.array MlxArray]
            [gen.mlx Mlx MlxRaw MlxRuntime MlxException]
            [java.lang.foreign Arena MemorySegment ValueLayout]))
@@ -332,9 +332,10 @@
 (def ^:private prefetch-bytes
   "The bytes from which a host read on MLX's CUDA moves its pages in one
    go (prefetched): reads of rows of logits; the system property
-   gen.mlx.prefetch-bytes (0 turns it off; default 1 MiB)."
+   gen.mlx.prefetch-bytes (0 turns it off; default 1 MiB). nil where MLX
+   computes on no CUDA GPU, or the CUDA runtime is not at hand."
   (delay (let [n (Long/getLong "gen.mlx.prefetch-bytes" (* 1024 1024))]
-           (when (and (pos? (long n)) (MlxRuntime/canPrefetch)) (long n)))))
+           (when (and (pos? (long n)) (cuda-gpu?) (MlxRuntime/canPrefetch)) (long n)))))
 
 (defn- host-segment
   "The data segment (bytes long) of the evaluated handle h, whose pointer
