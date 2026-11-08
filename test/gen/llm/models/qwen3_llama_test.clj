@@ -54,7 +54,9 @@
    Q8_0's dot products, which Metal's does not, and their own spread
    differs: on CUDA a batched read against a lone one reaches 0.85
    (gen.llama-noise), on the CPU nothing (its reads are deterministic,
-   its gap a bias). There the planted errors measured at the least 17.4,
+   its gap a bias). MLX's forward on its CPU (-Dgen.mlx.device=cpu) gives
+   the same gaps to three digits as on CUDA (the digit prompts): the gap
+   is llama.cpp's. There the planted errors measured at the least 17.4,
    11.9 and 2.45 nats (CUDA; 2.53 on the CPU build)."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gen.array.gguf :as gguf]

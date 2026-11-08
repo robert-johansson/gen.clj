@@ -38,7 +38,8 @@
    pairs, 0.14 and 0.34 (RoPE covers 64 of a head's 256 dims, in 6 of 24
    layers: a short prompt barely sees it).
    The value-head order the converter tiles is the identity at 0.8B (16
-   key and 16 value heads), and the 0.8B has no experts: the tiny random
+   key and 16 value heads), and the 0.8B has no experts: a trained model
+   checks both off the Mac (Qwen3.6-35B-A3B, below), and the tiny random
    models generate.py --with-vocabulary writes (2 key and 4 value heads;
    a Qwen3.5-MoE of 4 experts, 2 used, and a shared one; the 0.8B's
    tokenizer, as llama.cpp needs one) check both, given as
@@ -59,7 +60,8 @@
      CPU build), 3.38 on the digits (CPU 3.53), the largest at greedy
      steps of the chat prompts' replies; median 0.16 to 0.30; the argmax
      equal in 195 to 197 of each 200. llama.cpp's own spread on CUDA:
-     0.57 and 2.59.
+     0.57 and 2.59. MLX's forward on its CPU gives the same gaps to three
+     digits (the digit prompts): the gap is llama.cpp's.
    - Qwen3.6-35B-A3B-Q4_K_M (ggml-org's: Q4_K experts, Q8_0 attention and
      shared expert; 256 experts, 8 used; 16 key and 32 value heads): 2.35
      on the general prompts, 6.13 on the digits (CUDA), median 0.25 to
