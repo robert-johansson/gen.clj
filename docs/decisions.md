@@ -6744,3 +6744,71 @@ guard tolerating "warn". The levers, each measured:
 - the host decode's garbage bounded so the load needs little heap.
 The K-quants' in-memory scales stay as "k-quants: exact" has them; scales
 in float16 is a numerics change, not part of this.
+
+### load-gguf's memory: past the file cache, cast at load, bounded buffers
+
+(The owner's call of 2026-11-08 evening, built; the choices inside it
+PROVISIONAL, owner to confirm; genclj-0nxn)
+
+**What loads the MoE:** all of Qwen3.6-35B-A3B goes through our host reader,
+because Q4_K is a type MLX's loader doesn't read. mlx_load_gguf is never
+called for it.
+
+**The three changes:**
+1. **Cast at load:** load-gguf takes `{:dtype d}` (a dtype, or a function of
+   the tensor's name). qwen35/load passes the model's dtype, with the router
+   kept in float32; qwen3/load passes it too. This is what drops the float16
+   peak.
+2. **Past the file cache:** the reader opens the file with
+   ExtendedOpenOption/DIRECT (F_NOCACHE on macOS, O_DIRECT on Linux) and
+   reads aligned chunks of 2^24 values. A failed read throws `:io`.
+   `-Dgen.gguf.cache=true` restores cached reads.
+3. **Bounded host memory:** chunks are decoded into reused buffers and copied
+   to native memory, a tensor at a time to MLX.
+
+**Measured on the MacBook** from a cold file cache (evicted by mmap and
+msync(MS_INVALIDATE), no sudo):
+
+| | float16 before | float16 after | float32 before | float32 after |
+|---|---|---|---|---|
+| MLX peak | 33.7 GB (needed "warn" tolerated) | 23.1 GB | 28.4 GB | 28.4 GB |
+| RSS peak | 33.1 GB | 25.3 GB | 35.2 GB | 31.7 GB |
+| Heap used | 2.5 GB | 0.34 GB | 3.0 GB | 0.34 GB |
+| File cache | 2.8 → 21.2 GB | 4.0 → 4.0 GB | 4.0 → 23.9 GB | 4.0 → 4.0 GB |
+| Worst pressure | warn | normal | normal | normal |
+| Load time | 20.7 s | 12.3 s | 16.6 s | 11.1 s |
+
+- With the default heap and the strict guard (kill at the first "warn"),
+  both dtypes load. The engine decodes at batch 1 at 36.5 tokens/s (float32)
+  and 40.1 (float16); its MLX peak is 29.7 and 24.3 GB.
+- **Headroom under the strict guard**, the lowest kernel free figure and
+  available: the engine bench 39% / 11 GB in float32 and 49% / 19 GB in
+  float16; the load alone 88% / 32–38 GB.
+- **On fenrir** (cold page cache): float16's MLX peak 33.7 → 23.1 GB, heap
+  2.2 → 0.7 GB, page cache +20.5 → +0.1 GB. qwen35-test and cuda-reference-
+  test on the MoE (forced and unforced, both dtypes, cuda required) pass:
+  19 tests, 640 assertions.
+
+**Tests.**
+- The MoE's 1,595 weights are bit-identical to the old load-then-cast
+  (CRC32C) in float32, float16 and bfloat16.
+- A cast at load equals load-then-astype bit for bit on 6 fixtures, read
+  whole and in 32-value chunks, on both backends; also the qwen35 and qwen3
+  loads.
+- A failed read is loud.
+- Planted bugs, each failing: float16 rounded as bfloat16; a chunk's words at
+  the wrong index; the read buffer sliced at the wrong offset; a failed read
+  swallowed; routers loaded in the half float; qwen3 loading bfloat16 for
+  float16.
+- Merged squashed (f23f6f6), after the battery (2438), the loader and model
+  suites on Metal (90 tests), and Qwen3's llama.cpp comparisons (9).
+
+**For the owner:**
+1. **Reads skip the file cache by default;** `-Dgen.gguf.cache=true` turns
+   that off. Is that the right default and name?
+2. **mlx_load_gguf** (files of only F32, F16, I32, Q8_0, Q4_0 and Q4_1) still
+   leaves its file cached (+0.83 GB for Qwen3.5-0.8B-Q8_0), and loads a whole
+   file before any cast. Not taken yet: every file through the host reader on
+   MLX, which gives the same arrays (an existing test checks it).
+3. **float16 on the Mac now loads below float32** (23.1 against 28.4 GB).
+   That was the reason the Mac's MoE default stayed float32.
