@@ -550,6 +550,39 @@ protocol's contract); Batching for llama.cpp's Slots (llama_decode takes
 mixed batches natively); the CUDA kernel (on CUDA the decode rows run
 paged attention's composite).
 
+## 9. The paged mode's follow-ups (genclj-6qb6, genclj-1ovd, 2026-11-08)
+
+**Donated writes are flat.** genclj-1daf's "8 ms a GB of pool written" was
+measured before genclj-c7uf. Every donated step then counted its pools as
+fresh bytes, and a full GC ran every 2 GB of them. On main a donated
+paged-write takes 0.3-0.7 ms into one pool pair of 0.14 to 3 GB, with no
+collections (bench/gen/paged_bench.clj).
+
+**Copies only for a second writer.** Token SMC over an LM forks the
+entry it keeps, and the fork goes on. Every fork's step used to copy its
+partial last block, though the entry never writes past its end.
+gen.llm.paged now records each block's written offsets: a holder appends
+in place when no one has written past its end. Only a second writer
+copies: a resampled duplicate, or the entry itself going on later.
+- Copies per SMC run (16 particles, 32 tokens): 1012 → 44.
+- Qwen3-0.6B on Metal, tokens/s: paged 604 → 680-703 (float32) and
+  713 → 742-758 (float16); continuous 637 → 683-742 and 722 → 809-815.
+- llama.cpp: 924.
+
+Writing the copy inside the step was built and dropped. Its blocks must
+be read in a call of their own: MLX's eval holds an input's buffer until
+its command buffer completes, so a read and a donated write of one pool
+in one call copies the pool. So the in-step form saved one sync: 0.3-1.2
+ms a step at 16 rows when every row copies, and nothing measurable at
+SMC's few copies (two copying rows: 23.4 against 22.8 ms in float32,
+19.1 against 19.2 in float16).
+
+**Qwen3.5 paged.** Its attention layers are paged. Its GatedDeltaNet
+states stay a row each, grouped as the static mode's (a lane in place,
+other steps stacked). On Qwen3.5-0.8B's SMC it is slightly slower than
+the static mode (595 against 645 tokens/s in float32): every step stacks
+the states, which dominate at short contexts.
+
 ## Recommendations for the owner
 
 1. Weights from the GGUF files already here, through MLX's loader, with the

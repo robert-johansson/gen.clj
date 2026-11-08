@@ -96,11 +96,11 @@
      past its end), as an LM's entry and the fork that goes on from it
      share it, and copied only for a second writer (copy-on-write: token
      SMC's duplicated particles).
-   - A copy-on-write is written within the step (or a run's write) that
-     needs it, before its keys and values (qwen3/paged-step's :copy). Its
-     blocks are gathered and evaluated first, a call of their own: a
-     read of the pools' blocks in the call that writes them makes MLX
-     copy each pool, the read still holding it.
+   - A copy-on-write is two calls before the step (or a run's write):
+     the blocks gathered and evaluated, then written, consuming the pools
+     (in one call MLX copies each pool, its read still holding it). In
+     the step itself it was no faster: token SMC copies little
+     (measured on Metal, 2026-11-08; genclj-6qb6).
    - A paged step, run or copy that fails has consumed the pools: every
      branch is lost (:lost-slots), loudly, and the pools are made again.
 
@@ -140,6 +140,7 @@
   (:refer-clojure :exclude [+ - * / < > <= >= ==])
   (:require [clojure.core :as c]
             [gen.array :as array :refer [-]]
+            [gen.array.paged :as gpaged]
             [gen.llm.host :as host]
             [gen.array.gguf :as gguf]
             [gen.llm.models.qwen3 :as qwen3]
@@ -173,14 +174,12 @@
                :offsets #'qwen3/offsets :select-rows #'qwen3/select-rows :concat-rows #'qwen3/concat-rows :grow #'qwen3/grow
                ;; the paged mode's
                :paged-pools #'qwen3/paged-pools :paged-cache #'qwen3/paged-cache :paged-entries #'qwen3/paged-entries
-               :paged-blocks #'qwen3/paged-blocks :paged-write-entries #'qwen3/paged-write-entries
                :compile-paged-step #'qwen3/compile-paged-step :compile-paged-batch-step #'qwen3/compile-paged-batch-step}
         qwen35 {:load #'qwen35/load :static-cache #'qwen35/static-cache :step #'qwen35/step :compile-step #'qwen35/compile-step
                 :offsets #'qwen35/offsets :select-rows #'qwen35/select-rows :concat-rows #'qwen35/concat-rows :grow #'qwen35/grow
                 ;; the paged mode's: the attention layers paged, the
                 ;; GatedDeltaNet layers' states a row each (:paged-states)
                 :paged-pools #'qwen35/paged-pools :paged-cache #'qwen35/paged-cache :paged-entries #'qwen35/paged-entries
-                :paged-blocks #'qwen35/paged-blocks :paged-write-entries #'qwen35/paged-write-entries
                 :compile-paged-step #'qwen35/compile-paged-step :paged-states #'qwen35/paged-states}]
     {"qwen3" qwen3 "qwen35" qwen35 "qwen35moe" qwen35}))
 
@@ -588,29 +587,28 @@
         dsts (set (map second copies))]
     (into copies (map (fn [b] [b b])) (take (c/- want (count copies)) (remove dsts (concat (:free a) (range scratch)))))))
 
-(defn- copy-input
-  "A step's :copy (qwen3/paged-step's) of the block copies [[from to] …]
-   (copy-on-write), a the allocator after them, or nil for none: the
-   copies padded to a power of 2 (padded: a padding copy writes a block
-   whose contents mean nothing), their blocks gathered from the pools and
-   evaluated, a call before the step that writes them. In the call that
-   writes the pools, a read of their blocks makes MLX copy each pool
-   instead of writing it in place, the read still holding it (measured on
-   Metal, 2026-11-07: 14 to 120 ms a copy as the pools grew from 0.6 to
-   3.8 GB)."
-  [{:keys [state gather-fn]} a copies]
+(defn- copy-blocks!
+  "The block copies [[from to] …] made in the pools (copy-on-write), a
+   the allocator after them: in two calls, the blocks read and evaluated
+   first (gather-fn), then written (put-fn, consuming the pools), padded
+   to a power of 2 (padded: a padding copy writes a block whose contents
+   mean nothing). In one call MLX copies each pool instead of writing it
+   in place, its read still holding it (measured on Metal, 2026-11-07: 14
+   to 120 ms a copy as the pools grew from 0.6 to 3.8 GB)."
+  [{:keys [state gather-fn put-fn] :as ctx} a copies]
   (when (seq copies)
-    (let [all (padded a (:scratch @state) copies)]
-      (tally! state :copied-blocks (count copies))
-      {:blocks (doto (gather-fn (:pools @state) (i32 (map first all))) array/eval!)
-       :dst (i32 (map second all))})))
+    (let [all (padded a (:scratch @state) copies)
+          blocks (doto (gather-fn (:pools @state) (i32 (map first all))) array/eval!)
+          pools (donating ctx #(doto (put-fn (:pools @state) blocks (i32 (map second all))) array/eval!))]
+      (vswap! state assoc :pools pools)
+      (tally! state :copied-blocks (count copies)))))
 
 (defn- paged-read-run
   "slots-run's body in the paged mode: slot's sequence (pos positions)
    read as a concatenating cache (its blocks gathered), tokens read after
    it in forwards of n-batch tokens, eagerly; then their keys and values
-   written into the pools at the sequence's new slots, after its copy
-   (copy-on-write), in one call."
+   written into the pools at the sequence's new slots (after its copy,
+   copy-on-write); with recurrent layers, its states a group of one row."
   [{:keys [model state pool n-batch write-fn] :as ctx} slot pos tokens targets]
   (check-paged-position state slot pos "read")
   (let [s (or (entry state slot) paged/empty-sequence)
@@ -634,8 +632,8 @@
             (recur end cache scores)
             (let [[a [s'] [slots] copies] (prepared ctx [s] [n])
                   entries (call state :paged-entries cache pos)
-                  copy (copy-input ctx a copies)
-                  pools (donating ctx #(doto (write-fn (:pools @state) entries (i32 slots) (if copy {:copy copy} {}))
+                  _ (copy-blocks! ctx a copies)
+                  pools (donating ctx #(doto (write-fn (:pools @state) entries (i32 slots))
                                          array/eval!))]
               (when states?
                 ;; the run's recurrent states, a group of one row
@@ -653,9 +651,9 @@
    for a position, then one compiled decode of the rows, padded to a
    power of 2 rows (at least :min-rows), over block tables of a power of
    2 width: the step's shapes, and so its traces, are few. A block a
-   second writer shares is copied first, within the step (copy-on-write:
-   its :copy, copy-input's). A family with recurrent layers (:rows) steps
-   its rows' states too (step-states), its rows in their order."
+   second writer shares is copied first (copy-on-write, copy-blocks!). A
+   family with recurrent layers (:rows) steps its rows' states too
+   (step-states), its rows in their order."
   [{:keys [state min-rows] :as ctx} slots positions tokens]
   (doseq [[slot pos] (map vector slots positions)] (check-paged-position state slot pos "advance"))
   (let [n (count slots)
@@ -679,7 +677,7 @@
         bs (long (:block-size @state))
         seqs (mapv #(or (entry state %) paged/empty-sequence) slots)
         [a seqs' write-slots copies] (prepared ctx seqs (repeat n 1))
-        copy (copy-input ctx a copies)
+        _ (copy-blocks! ctx a copies)
         width (next-pow2 (reduce max 1 (map (comp count :blocks) seqs')))
         ;; padding row i writes slot i of the scratch blocks, and reads it
         pad-row (fn [^long i] (vec (cons (quot i bs) (repeat (dec width) 0))))
@@ -688,7 +686,7 @@
         all-slots (into (mapv first write-slots) (range n r))
         sl (i32 all-slots)
         toks (into (mapv #(vector (tokens %)) (range n)) (repeat (c/- r n) [0]))
-        [logits layers] (donating ctx #(let [out (step-fn (merged (:pools @state) states) pos tables sl toks {:copy copy})]
+        [logits layers] (donating ctx #(let [out (step-fn (merged (:pools @state) states) pos tables sl toks)]
                                          (array/eval! out)
                                          out))
         [pools states'] (split-layers state layers)
@@ -790,7 +788,7 @@
         _ (doseq [i chosen] (check-paged-position state (:slot (reads i)) (:pos (reads i)) "forward"))
         seqs (mapv #(or (entry state (:slot (reads %))) paged/empty-sequence) chosen)
         [a seqs' write-slots copies] (prepared ctx seqs (mapv #(if (= % chunk) c 1) chosen))
-        copy (copy-input ctx a copies)
+        _ (copy-blocks! ctx a copies)
         d (count decode)
         d-rows (long d-rows)
         c (long (or c 0))
@@ -827,7 +825,6 @@
         o (next-pow2 (count out))
         batch (cond-> {:tokens (i32 tokens) :positions (i32 positions) :slots (i32 slots)
                        :out (i32 (into out (repeat (c/- o (count out)) 0)))}
-                copy (assoc :copy copy)
                 (pos? d) (assoc :tables (i32 (into (mapv #(paged/table-row % width 0) dseqs) (map pad-table) (range d d-rows))))
                 chunk (assoc :chunk (i32 [(paged/table-row (peek seqs') (next-pow2 (count (:blocks (peek seqs')))) 0)]))
                 (pos? k) (assoc :targets (i32 (-> (vec (repeat (count lp-rows) 0))
@@ -980,10 +977,21 @@
         step-fn (if continuous?
                   ((:compile-paged-batch-step fam) m {:donate? true})
                   ((:compile-paged-step fam) m {:donate? true}))
-        ;; a copy's blocks read alone, before the step that writes them
-        gather-fn (array/compile (:paged-blocks fam))
-        ;; a run's keys and values written, after its copy
-        write-fn (array/compile (:paged-write-entries fam) {:donate #{0}})
+        ;; copy-blocks in two calls (copy-blocks!), each layer with pools
+        ;; (a Qwen3.5's GatedDeltaNet layers have none: {})
+        gather-fn (array/compile (fn [pools src] (mapv #(if (pools? %) {:k (array/take (:k %) src 0) :v (array/take (:v %) src 0)} {})
+                                                       pools)))
+        put-fn (array/compile (fn [pools blocks dst]
+                                (mapv (fn [{:keys [k v] :as e} b]
+                                        (if (pools? e) {:k (gpaged/put-blocks k (:k b) dst) :v (gpaged/put-blocks v (:v b) dst)} e))
+                                      pools blocks))
+                              {:donate #{0}})
+        ;; a run's keys and values written (the family's paged-entries)
+        write-fn (array/compile (fn [pools entries slots]
+                                  (mapv (fn [{:keys [k v] :as e} [kn vn]]
+                                          (if (pools? e) (zipmap [:k :v] (array/paged-write k v kn vn slots)) e))
+                                        pools entries))
+                                {:donate #{0}})
         info {:engine :gen.array
               :backend (array/backend-name b)
               :n-vocab vocab
@@ -1005,7 +1013,7 @@
                            ;; recurrent layers' states, a row each (Qwen3.5)
                            (:paged-states fam) (assoc :rows (vec (repeat n-slots nil)) :next 0)))
         pool (host/pool "gen.llm array rows-" (host/default-threads))
-        ctx {:model m :state state :pool pool :n-batch n-batch :min-rows min-rows :gather-fn gather-fn}]
+        ctx {:model m :state state :pool pool :n-batch n-batch :min-rows min-rows :gather-fn gather-fn :put-fn put-fn}]
     (if continuous?
       (ContinuousSlots. m b (assoc ctx :batch-fn step-fn) pool (assoc info :batching {:wait wait}) state)
       (PagedSlots. m b (assoc ctx :step-fn step-fn :write-fn write-fn) pool info state))))

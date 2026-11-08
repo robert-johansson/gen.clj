@@ -17,17 +17,19 @@
      rows by capacity (gen.bench.capacities, 256,1024,2048);
    - cow: one paged decode step of 16 rows over the model's pools
      (gen.bench.pool-blocks a layer, 256), m of them (16, 2) copying their
-     last block (copy-on-write) by each form: none (no copy), two calls
-     (the blocks gathered and evaluated, put by a donating call, then the
-     step: 1daf's), the same by put-along-axis (1daf's put, before the
-     fused scatter of gen.backend.mlx.paged/put-blocks), and in the step
-     (the blocks gathered and evaluated, then the step with its :copy).
+     last block (copy-on-write) in two calls (the blocks gathered and
+     evaluated, put by a donating call, then the step), by
+     gen.backend.mlx.paged/put-blocks's scatter and by put-along-axis
+     (1daf's put).
    Measured on the Mac mini M4 (2026-11-08, Qwen3-0.6B-Q8_0, MLX 0.32.4):
    - write: 0.33-0.65 ms into one pair of 0.14 to 3 GB, 1.2-1.9 ms into
      28 pairs, no collections: flat in the pools' size;
    - static: 27.6, 27.9, 29.1 ms at 0.47, 1.9, 3.8 GB;
-   - cow (before the fused put, every row copying, float32): none 21.9
-     ms, two calls 25.7, in the step 27.0.
+   - cow, float32: no copy 22.5 ms; m 16 25.2 (put-along-axis 25.9), m 2
+     22.8 (23.6). float16: 18.5; 21.8 (21.3), 19.2 (19.5). The copy
+     written in the step itself (a :copy option of the step, since
+     dropped) gave 24.9, 23.4, 20.6 and 19.1: no faster at SMC's few
+     copies, and token SMC measured the same either way.
    The model computes in gen.bench.dtype (float32)."
   (:require [clojure.string :as str]
             [gen.array :as array]
@@ -137,7 +139,7 @@
         len (- (* per-row bs) 7)                    ; its last one partial
         nb (max (:pool-blocks settings) (* 2 r per-row))
         step (qwen3/compile-paged-step m {:donate? true})
-        gather (array/compile qwen3/paged-blocks)
+        gather (array/compile (fn [pools ids] (mapv (fn [{:keys [k v]}] {:k (array/take k ids 0) :v (array/take v ids 0)}) pools)))
         put (array/compile (fn [pools blocks dst]
                              (mapv (fn [{:keys [k v]} b] {:k (gpaged/put-blocks k (:k b) dst) :v (gpaged/put-blocks v (:v b) dst)})
                                    pools blocks))
@@ -151,8 +153,8 @@
         positions (i32 (repeat r len))
         slots-at (fn [blocks] (i32 (map #(+ (* (long %) bs) (rem len bs)) blocks)))
         toks (vec (repeat r [7]))
-        run (fn [opts tbl sl]
-              (let [[logits p] (step @pools positions tbl sl toks opts)]
+        run (fn [tbl sl]
+              (let [[logits p] (step @pools positions tbl sl toks)]
                 (array/eval! [logits p])
                 (reset! pools p)))
         ;; the put-along-axis composite, the put before the fused scatter
@@ -168,7 +170,7 @@
     (println "\n### A paged step of" r "rows, m of them copying their last block, by the copy's form\n")
     (println "- pools:" nb "blocks a layer," (:dtype settings))
     (header)
-    (row "none (the rows' own blocks, no copy)" (timed #(run nil own (slots-at src))))
+    (row "none (the rows' own blocks, no copy)" (timed #(run own (slots-at src))))
     (doseq [m [r 2]]
       (let [mixed (fn [xs ys] (into (subvec ys 0 m) (subvec xs m)))
             tbl (tables (mixed src dst))
@@ -179,15 +181,12 @@
              (timed #(let [b (doto (gather @pools from) array/eval!)
                            p (doto (put-composite @pools b to) array/eval!)]
                        (reset! pools p)
-                       (run nil tbl sl))))
+                       (run tbl sl))))
         (row (str "m " m ": two calls (gather; donated put; step)")
              (timed #(let [b (doto (gather @pools from) array/eval!)
                            p (doto (put @pools b to) array/eval!)]
                        (reset! pools p)
-                       (run nil tbl sl))))
-        (row (str "m " m ": in the step (gather; the step's :copy)")
-             (timed #(let [b (doto (gather @pools from) array/eval!)]
-                       (run {:copy {:blocks b :dst to}} tbl sl))))))))
+                       (run tbl sl))))))))
 
 (defn -main [path & _]
   (when-not (= :mlx (array/backend-name array/*backend*))

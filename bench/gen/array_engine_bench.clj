@@ -35,8 +35,12 @@
    390-409 against 318 and 771; float16 decode 601 against 568, SMC 540
    against 619 (two more synchronizations a step, the copy-on-write's
    read and write, cost more there than the static engine's halved
-   copy). A pool of 512 blocks made the paged step 2.5 times as slow:
-   donated writes cost about 8 ms a GB of pool written.
+   copy). (2026-11-08, genclj-6qb6: a block is now copied only for a
+   second writer, 44 copies a run where 1012 were; token SMC 680-703 in
+   float32 and 742-758 in float16, against 604 and 713 before, static
+   345 and 649, llama.cpp 924. The pool's size no longer matters: the
+   "8 ms a GB" was a GC genclj-c7uf removed. Qwen3.5-0.8B: paged 595 and
+   698 against static 645 and 728, llama.cpp 276.)
    Its continuous mode (genclj-b3ow; gen.bench.engines continuous, :wait
    gen.bench.wait) batches concurrent callers' reads, and two more
    sections measure it (gen.bench.sections clients,lone):

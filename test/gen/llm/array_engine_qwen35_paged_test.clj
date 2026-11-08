@@ -20,12 +20,12 @@
    skipped, and a run's states zeroed."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gen.array :as array]
+            [gen.array.paged :as gpaged]
             [gen.llm.array-engine :as ae]
             [gen.llm.branching :as br]
             [gen.llm.branching-contract :as bc]
             [gen.llm.lm :as lm]
             [gen.llm.lm-contract :as lc]
-            [gen.llm.models.common :as common]
             [gen.llm.models.qwen35 :as qwen35]
             [gen.llm.paged :as paged]
             [gen.llm.token :as token]
@@ -164,7 +164,7 @@
    {#'ae/step-states (let [f @#'ae/step-states] (fn [state slots r] (let [[s order lane] (f state slots r)]
                                                                        [s (if lane (vec (rseq order)) order) lane])))}
    "a fork's copy skipped"
-   {#'common/copied (fn [entry _ _] entry)}
+   {#'gpaged/put-blocks (fn [pool _ _] pool)}
    "a run's states zeroed"
    {#'ae/new-states-group! (let [f @#'ae/new-states-group!]
                              (fn [state states n] (if (== 1 (long n)) (f state (mapv #(update-vals % array/zeros-like) states) n) (f state states n))))}})
@@ -183,8 +183,9 @@
             ;; states a row of the step's
             [a seqs pools] (reduce (fn [[a ss pools] [p [_ cache]]]
                                      (let [[a s slots] (paged/prepare a paged/empty-sequence (count p) bs)
-                                           pools (qwen35/paged-write-entries pools (qwen35/paged-entries cache 0)
-                                                                             (array/array slots {:dtype :int32}) nil)]
+                                           sl (array/array slots {:dtype :int32})
+                                           pools (mapv (fn [e [kn vn]] (if (contains? e :k) (zipmap [:k :v] (array/paged-write (:k e) (:v e) kn vn sl)) e))
+                                                       pools (qwen35/paged-entries cache 0))]
                                        [a (conj ss s) pools]))
                                    [(paged/allocator 32 1) [] (qwen35/paged-pools m 32 bs)] (map vector ps dense))
             states (apply mapv (fn [& es] (into {} (map (fn [kk] [kk (array/concatenate (mapv kk es) 0)])) (keys (first es))))
