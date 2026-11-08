@@ -65,6 +65,14 @@
   (and (not (jvm?))
        (= :gpu ((requiring-resolve 'gen.backend.mlx/device) array/*backend*))))
 
+(defn cuda?
+  "Does the backend run on a CUDA GPU (MLX's GPU off macOS)? For the bands
+   measured there."
+  []
+  (and (not (jvm?))
+       (= :gpu ((requiring-resolve 'gen.backend.mlx/device) array/*backend*))
+       (not (.startsWith (System/getProperty "os.name") "Mac"))))
+
 (defn float64?
   "Does the backend have float64 (MLX's GPUs do not)?"
   []
