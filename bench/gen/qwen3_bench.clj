@@ -38,7 +38,9 @@
    - donation: whether a compiled step writes the cache's buffer in place,
      the cache held and consumed (the buffer's address before and after).
    gen.bench.llama-bench=<llama-bench binary> also runs llama-bench on the
-   GGUF (-p prompt -n steps, every layer on the GPU), llama.cpp's ceiling.
+   GGUF (-p prompt -n steps, every layer on the GPU), llama.cpp's ceiling
+   (native/build-llama.sh --bench builds it from the pinned source:
+   native/build/llama/<platform>/bin/llama-bench).
 
    The model computes in gen.bench.dtype (float32, the backend's default
    float; the Q8_0 scales and biases are cast to it at load), and its
