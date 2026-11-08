@@ -17,14 +17,22 @@
    are taken first (against-llama/reference) and its engine closed, then
    the forward's model loaded and compared with them (compare-readings),
    so that a model as large as Qwen3.6-35B-A3B (llama.cpp's 21 GB and the
-   forward's 28 GB) runs on a 64 GB Mac.
+   forward's 28 GB) runs on a 64 GB Mac. Or in two JVMs:
+   -Dgen.bench.readings-out=<file> writes llama.cpp's readings (each
+   distribution's 256 most likely tokens, as EDN) and exits, and
+   -Dgen.bench.readings-in=<file> compares the forward with them, without
+   llama.cpp's engine (a reading's other tokens at -1e30: the statistic
+   reads llama.cpp's top 64, and a token of the forward's top 5 outside
+   its 256 differs from them by more than any tie).
 
    Run on MLX (with native/build-mlx.sh's and native/build-llama.sh's
    libraries, one GPU JVM at a time):
      clojure -J-Dgen.backend=mlx -J-Dgen.llama.lib=<lib> -M:bench -m gen.qwen3-llama-noise Qwen3-0.6B-Q8_0.gguf
      clojure -J-Dgen.backend=mlx -J-Dgen.llama.lib=<lib> -M:bench -m gen.qwen3-llama-noise Qwen3.5-0.8B-Q8_0.gguf"
-  (:require [gen.array :as array]
+  (:require [clojure.edn :as edn]
+            [gen.array :as array]
             [gen.llama-noise :as noise]
+            [gen.llm.branching-contract :refer [top-tokens]]
             [gen.llm.llama :as llama]
             [gen.llm.models.against-llama :as against]))
 
@@ -46,6 +54,43 @@
                          [set-name (mapv #(against/reference e (:tokens %) 8) items)]))]
       (println (format "llama.cpp's readings: %.1f s" (seconds t0)))
       out)))
+
+;; llama.cpp's readings in a file (gen.bench.readings-out, -in): each
+;; distribution its 256 most likely tokens, the rest -1e30 when read back
+(def ^:private kept 256)
+
+(defn- sparse [^floats lp]
+  (let [ts (top-tokens lp kept)]
+    [ts (mapv #(double (aget lp (int %))) ts)]))
+
+(defn- dense ^floats [vocab [ts vs]]
+  (let [a (float-array vocab (float -1e30))]
+    (doseq [[t v] (map vector ts vs)] (aset a (int t) (float v)))
+    a))
+
+(defn- write-readings!
+  "Writes llama.cpp's readings refs ({set-name [readings]}) to file."
+  [file model refs]
+  (spit file (pr-str {:model model
+                      :vocab (alength ^floats (:root (first (val (first refs)))))
+                      :sets (update-vals refs (fn [rs] (mapv (fn [{:keys [tokens root steps]}]
+                                                               {:tokens tokens :root (sparse root)
+                                                                :steps (mapv (fn [[t lp]] [t (sparse lp)]) steps)})
+                                                             rs)))})))
+
+(defn- read-readings
+  "The readings write-readings! wrote to file, of the prompts sets (their
+   tokens checked): {set-name [readings]}."
+  [file sets]
+  (let [{:keys [vocab] :as r} (edn/read-string (slurp file))
+        refs (update-vals (:sets r) (fn [rs] (mapv (fn [{:keys [tokens root steps]}]
+                                                     {:tokens tokens :root (dense vocab root)
+                                                      :steps (mapv (fn [[t s]] [t (dense vocab s)]) steps)})
+                                                   rs)))]
+    (doseq [[set-name items] sets]
+      (when-not (= (mapv :tokens items) (mapv :tokens (get refs set-name)))
+        (throw (ex-info (str "the readings in " file " are not of the " set-name " prompts' tokens") {:file file :set set-name}))))
+    refs))
 
 (defn- against-llama
   "The forward of m against llama.cpp's readings rs of the prompts items
@@ -70,12 +115,13 @@
                        (pr-str (subs text 0 (min 40 (count text)))))))
     (flush)))
 
-(defn -main [model & _]
-  (println "backend" (array/backend-name array/*backend*) "model" model "architecture" (against/architecture model))
-  (let [sets (with-open [v (llama/vocabulary model)] (noise/prompt-sets v))
-        refs (llama-readings model sets)
-        t0 (System/nanoTime)
-        m (against/load-model model)]
+(defn- compare-all
+  "The forward of the model at path against llama.cpp's readings refs
+   ({set-name [readings]}) of the prompts sets, then the planted errors,
+   printed."
+  [path sets refs]
+  (let [t0 (System/nanoTime)
+        m (against/load-model path)]
     (println (format "the forward's model loaded in %.1f s" (seconds t0)))
     (doseq [[set-name items] sets]
       (println (str "\n== the " set-name " prompts (" (count items) ")"))
@@ -88,5 +134,16 @@
                 (println (format "  %-24s min %.2f  median %.2f  max %.2f nats" (name mutation)
                                  (reduce min ds) (nth (sort ds) (quot (count ds) 2)) (reduce max ds)))
                 (flush))))
-        (println "\n(the planted errors are measured on the general prompts: -Dgen.bench.prompts=general or all)")))
+        (println "\n(the planted errors are measured on the general prompts: -Dgen.bench.prompts=general or all)")))))
+
+(defn -main [model & _]
+  (println "backend" (array/backend-name array/*backend*) "model" model "architecture" (against/architecture model))
+  (let [sets (with-open [v (llama/vocabulary model)] (noise/prompt-sets v))
+        in (System/getProperty "gen.bench.readings-in")
+        out (System/getProperty "gen.bench.readings-out")
+        refs (if in (read-readings in sets) (llama-readings model sets))]
+    (if out
+      (do (write-readings! out model refs)
+          (println "llama.cpp's readings written to" out))
+      (compare-all model sets refs))
     (shutdown-agents)))
