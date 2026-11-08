@@ -25,7 +25,17 @@
      loses every branch fails the requests in flight as lost, not as an
      engine bug, and an operation waiting for their branches runs (each
      failed before its fix, genclj-8ni2); a closed engine fails the
-     requests in flight.
+     requests in flight;
+   - the shapes (genclj-i3fp): forwards of decode rows beside several
+     prompts' chunks, bucketed, give the rows and scores of the same
+     forwards with nothing bucketed (gen.llm.array-engine-shapes), and
+     its three planted bugs of the padding fail it (the buckets rounded
+     down, by up to 4.7 nats; a padding row writing a real block's slot,
+     loud on the JVM backend, two rows writing one slot; a row reading
+     its table's padding columns, 68 rows off by up to 6.7 nats); the
+     clients take only shapes compiled when the engine opened (no trace;
+     on MLX no call of qwen3's batch forward), and trace without
+     :precompile?.
    Planted mutations (planted-bugs-fail-the-clients) fail the concurrent
    clients: a decode row given another request's block table (118
    distributions off by up to 0.9 nats on the JVM backend), a retired

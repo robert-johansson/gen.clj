@@ -29,6 +29,9 @@
      scored branches stayed live over emptied slots, the next step was
      given the pools the failed one had consumed, a read left its slot
      ahead of its branch;
+   - a run's shapes (prompts, 16 forks and their copies, subsets of
+     them, an extend, a score) are those compiled when the engine opened
+     (genclj-i3fp): no trace, on MLX no call of qwen3's forwards;
    - misuse is loud.
    Planted mutations fail the contract checks named in
    planted-bugs-fail-the-contract: copy-on-write skipped (a fork's step

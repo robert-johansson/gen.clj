@@ -19,7 +19,12 @@
    - a program calling from one thread gets the same bits, run again or
      on a new engine;
    - decode rows' states read three ways: a lane stepped in place, a
-     group's rows read in place by forks, and rows stacked.
+     group's rows read in place by forks, and rows stacked;
+   - the shapes (genclj-i3fp), as gen.llm.array-engine-continuous-test's:
+     bucketed forwards are those with nothing bucketed, the three planted
+     bugs of the padding failing it (the buckets rounded down throws on
+     the JVM backend, an index past a chunk's rows); the clients take
+     only shapes compiled when the engine opened.
    Planted bugs (planted-bugs-fail-the-clients) fail the concurrent
    clients: a decode row given another row's states, a chunk started
    from zeros where its read had states (a read split across forwards
