@@ -1483,9 +1483,10 @@
      products, a triangular inverse by doubling blocks, then the chunks in
      order; T padded to whole chunks by tokens that leave the state as it
      is); or :auto (the default): a backend's fused kernel where it has
-     one (MLX's Metal: mlx-lm's gated-delta kernel, gen.backend.mlx.nn),
-     else :chunked for T of :chunk-size or more and :loop below. The forms
-     are the same function, within float round-off.
+     one (MLX's Metal: mlx-lm's gated-delta kernel, gen.backend.mlx.nn;
+     MLX's CUDA: its port, for T below :chunk-size), else :chunked for T
+     of :chunk-size or more and :loop below. The forms are the same
+     function, within float round-off.
    - :chunk-size: a power of 2 (64).
    A composite of gen.array's ops (so differentiated, batched and staged
    as they are). Experimental: outside the 1.x promise (DESIGN §9)."
