@@ -796,22 +796,54 @@
         v (array/put-along-axis (:v entry) slots v 2)]
     [(attend cfg w q k v gate mask) {:k k :v v}]))
 
+(defn- picked
+  "The indices [N k] (int32) of the k largest entries of p [N E] along
+   its last axis, largest first, the first of equal entries first (as
+   argmax): k argmaxes, each entry picked masked."
+  [p k]
+  (let [ids (array/arange 0 (peek (array/shape p)) 1 {:dtype :int32})]
+    (loop [p p i 0 idx []]
+      (if (c/== i (long k))
+        (array/concatenate idx -1)
+        (let [j (array/expand-dims (array/astype (array/argmax p {:axis -1}) :int32) -1)]
+          (recur (array/where (array/== ids j) Double/NEGATIVE_INFINITY p) (inc i) (conj idx j)))))))
+
+(defn- ranked
+  "picked's indices by ranks: an entry's rank is the number of entries of
+   its row larger, or equal and before it (argmax's order), counted over
+   [N E E] comparisons; the entry of rank i is the i-th index (one-hot
+   sums). In a few kernels whatever k, where picked takes about four a
+   pick. Ranks are a permutation of each row unless it holds a NaN, whose
+   indices are clamped into range."
+  [p k]
+  (let [e (long (peek (array/shape p)))
+        ids (array/arange 0 e 1 {:dtype :int32})
+        pe (array/expand-dims p -1)
+        pj (array/expand-dims p -2)
+        before (array/< ids (array/expand-dims ids -1))
+        ranks (array/sum (array/astype (array/logical-or (array/> pj pe) (array/logical-and (array/== pj pe) before)) :int32)
+                         {:axis -1})
+        hit (array/== (array/expand-dims ranks -2) (array/expand-dims (array/arange 0 k 1 {:dtype :int32}) -1))]
+    (array/minimum (array/astype (array/sum (array/where hit ids 0) {:axis -1}) :int32) (dec e))))
+
+(def ^:private ranked-limit
+  "The most comparisons (rows × experts²) top-k makes by ranks: 2^24
+   (64 MB of int32 counts, 256 rows of 256 experts); a longer read picks."
+  16777216)
+
 (defn- top-k
   "[indices values] of the k largest entries of p [N E] along its last
    axis, largest first: [N k] each, the indices int32 (the first of equal
    entries first, as argmax). The indices carry no gradient
    (stop-gradient: MLX's native gradients refuse a gather's VJP with
-   respect to its indices), the values p's."
+   respect to its indices), the values p's. By ranks (ranked) up to
+   ranked-limit comparisons, else by picks (picked): the same indices.
+   A decode step's routing is a few kernels a layer by ranks, about 4k by
+   picks, which on MLX's CUDA cost more than the experts' products (genclj-p0ad)."
   [p k]
-  (let [ids (array/arange 0 (peek (array/shape p)) 1 {:dtype :int32})]
-    (loop [p p i 0 idx [] vals []]
-      (if (c/== i (long k))
-        [(array/concatenate idx -1) (array/concatenate vals -1)]
-        (let [j (array/stop-gradient (array/expand-dims (array/astype (array/argmax p {:axis -1}) :int32) -1))]
-          (recur (array/where (array/== ids j) Double/NEGATIVE_INFINITY p)
-                 (inc i)
-                 (conj idx j)
-                 (conj vals (array/take-along-axis p j -1))))))))
+  (let [[n e] (array/shape p)
+        idx (array/stop-gradient (if (c/<= (c/* (long n) (long e) (long e)) (long ranked-limit)) (ranked p k) (picked p k)))]
+    [idx (array/take-along-axis p idx -1)]))
 
 (defn- gathered
   "x's matrices [.. 1 in] times their experts' matrices of the stack w

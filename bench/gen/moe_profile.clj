@@ -123,9 +123,9 @@
             :routing [(fn [probs] (mapv (fn [_] (routing probs k)) es)) [probs]]
             :experts [(fn [x1 idx p]
                         (mapv (fn [{:keys [gate up down]}]
-                                (let [a (* (common/silu (gathered x1 gate idx token)) (gathered x1 up idx token))
+                                (let [a (array/* (common/silu (gathered x1 gate idx token)) (gathered x1 up idx token))
                                       y (array/squeeze (gathered a down idx flat) [2])]
-                                  (array/sum (* y (array/expand-dims p -1)) {:axis 1})))
+                                  (array/sum (array/* y (array/expand-dims p -1)) {:axis 1})))
                               es))
                       [x1 idx p]]
             :gate-up [(fn [x1 idx] (mapv (fn [{:keys [gate up]}] [(gathered x1 gate idx token) (gathered x1 up idx token)]) es)) [x1 idx]]
@@ -134,7 +134,7 @@
             :down-4 [(fn [act idx] (mapv (fn [{:keys [down]}] (chunked act down idx flat 4)) es)) [act idx]]
             :down [(fn [act idx] (mapv (fn [{:keys [down]}] (gathered act down idx flat)) es)) [act idx]]
             :shared [(fn [xs] (mapv (fn [{:keys [shared shared-gate]}]
-                                      (* (common/swiglu shared xs)
+                                      (array/* (common/swiglu shared xs)
                                          (array/sigmoid (common/linear xs (array/reshape shared-gate [1 hidden])))))
                                     es))
                      [xs]]}]
