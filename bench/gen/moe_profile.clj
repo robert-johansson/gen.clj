@@ -16,11 +16,29 @@
    - experts: the gathered gate, up and down products (gather-qmm) and
      the weighted sum, for given experts;
    - gate-up, down: the gathered products alone;
+   - gate-up-4, gate-up-7, down-4: the same in gather-qmm calls of at
+     most 4 or 7 pairs (MLX's CUDA gather_qmm takes its qmv kernel below
+     8 rows, its qmm_sm80 from 8);
    - shared: the shared expert and its gate.
    gen.bench.dtype (float16, the engine bench's). With KPROF_LIB set (the
    path of a kprof library injected by CUDA_INJECTION64_PATH, which
-   exports kprof_mark), each timed loop is marked, so its kernels are
-   counted and named."
+   exports kprof_mark(label, calls): fenrir's kprof2), each timed loop is
+   marked, so its kernels are counted and named.
+   Measured on fenrir's RTX PRO 6000 (2026-11-08, genclj-p0ad;
+   Qwen3.6-35B-A3B Q4_K_M, float16, MLX 0.32.4; ms a step at 1, 8 and 16
+   rows, under kprof). Before, the router's top k by 8 argmaxes: step
+   25.2, 39.4, 52.7, of which encoding (mlx_async_eval) 21.0, 26.5, 30.5;
+   5365 kernels a step at 1 row (3500 of them the top k's, 11 a pick), the
+   GPU busy 14.1, 18.8, 22.9. After, by ranks: step 17.3, 31.4, 44.2,
+   encoding 14.2, 20.6, 25.1, 2545 kernels, the GPU busy 9.4, 15.2, 19.8.
+   The batch-1 step is the host's: about 5 µs of encoding a kernel, more
+   than the GPU's time (MLX_MAX_OPS_PER_BUFFER 1000 changes nothing). The
+   parts after (no kprof), 40 layers: moe 5.45, 9.90, 12.92; experts
+   2.93, 5.84, 9.09 (gate-up 2.29, 4.03, 6.44; gate-up-4 1.40, 7.54,
+   15.31; down 0.46, 1.43, 2.27); routing 1.22, 1.25, 1.35; shared 0.88,
+   2.60, 2.70. The gathers' qmm_sm80 makes ceil(N/128) CTAs a pair: 32
+   for a token's gate (N 512), slow at 1 row (41 µs a call), near the
+   memory's speed at 16 (84 MB in 80 µs)."
   (:require [clojure.string :as str]
             [gen.array :as array]
             [gen.llm.host :as host]

@@ -38,6 +38,17 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Changed (experimental): a Qwen3.5/3.6 mixture of experts picks its
+  router's top k experts by ranks** (genclj-p0ad). `gen.llm.models.qwen35`
+  ranked the 256 experts by k argmaxes, each masking the last pick: about
+  11 kernels a pick, 3500 of a decode step's 5400 on MLX's CUDA, whose
+  host encodes each kernel in about 5 µs. Each expert's rank is now
+  counted over the rows' [N E E] comparisons (the first of equal entries
+  first, as argmax's), in about 10 kernels a layer; reads of more than
+  2^24 comparisons (a prefill chunk of over 256 tokens) still pick. The
+  same indices and values: no draw changes. Qwen3.6-35B-A3B Q4_K_M in
+  float16 on fenrir's RTX PRO 6000, tokens/s: batch-1 decode 47.9 → 79.6,
+  16 rows 488 → 612 (llama.cpp 210 and 982).
 - **Added (experimental): token SMC and completions read the LM's rows
   lent, and an LM forks a step's parents in one call** (genclj-4acj).
   `gen.llm.lm/batch-next-logprobs-lent` gives an LM's rows without
