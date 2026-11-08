@@ -216,7 +216,10 @@
    a lone read's chunk of each length, several prompts' chunks of up to
    64 tokens (continuous), and copy-on-write's copies; its :traces stat
    counts the calls of any other shape (shapes lists them). A pool that
-   grows makes every shape new.
+   grows makes every shape new. Then it gives back the memory its backend
+   keeps for later arrays (array/release-cache!): on MLX the warm calls'
+   buffers would fill most of the buffer cache, leaving the steps' freed
+   buffers too little of it (genclj-v1kg).
 
    Results depend on batch shapes and capacities as llama.cpp's do (float
    round-off: MLX's kernels differ by shape); the same read from the same
@@ -1353,12 +1356,17 @@
                  (for [n (pow2s 1 16)] [:copy n])))))
 
 (defn- precompile!
-  "shapes (precompiled's) compiled, each by one call (warm!): the
-   engine's :shapes then hold them, counting no call (nor :traces).
-   [shapes ms]."
-  [{:keys [state] :as ctx} shapes]
+  "shapes (precompiled's) compiled, each by one call (warm!), on backend
+   b: the engine's :shapes then hold them, counting no call (nor
+   :traces). Then the memory b keeps for later arrays is given back
+   (array/release-cache!): on MLX the warm calls' buffers filled most of
+   its buffer cache (1.9 of 2.1 GB on a 32 GB Mac, Qwen3.5-0.8B), so the
+   steps' freed buffers found it full, were freed and made anew, and
+   token SMC lost 2-3% (genclj-v1kg). [shapes ms]."
+  [{:keys [state] :as ctx} b shapes]
   (let [t0 (System/nanoTime)]
     (run! #(warm! ctx %) shapes)
+    (array/release-cache! b)
     (vswap! state (fn [s] (-> s
                               (update :shapes update-vals (constantly 0))
                               (assoc-in [:stats :traces] 0))))
@@ -1497,7 +1505,7 @@
                      :batch-fn batch-fn :max-chunks max-chunks}
               (not continuous?) (assoc :step-fn step-fn))
         [n ms] (when precompile?
-                 (try (precompile! ctx (precompiled opts (contains? @state :rows) block-size n-slots))
+                 (try (precompile! ctx b (precompiled opts (contains? @state :rows) block-size n-slots))
                       (catch Throwable t
                         (.shutdown ^ExecutorService pool)
                         (throw t))))
@@ -1591,7 +1599,9 @@
                     the namespace's docstring; on Metal 1.2-2.2 s for
                     the 0.6B and 0.8B in the paged mode, 2-4 s in the
                     continuous mode, float32 the longer), so that serving
-                    does not stall on their traces; false for none
+                    does not stall on their traces, then the backend's
+                    cache of freed buffers given back
+                    (array/release-cache!); false for none
      :continuous?   true: concurrent callers' reads batched (continuous
                     batching, over the paged mode; see the namespace's
                     docstring), which serving several clients at once

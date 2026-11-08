@@ -131,7 +131,18 @@
    → 757 (alternated again, float16: main 990, 984, the branch 939, 947,
    without :precompile? 981, 967: the open-time compile costs Qwen3.5's
    SMC about 4%). Open time 0.3-0.5 s → 1.8-2.6 s paged, 2.4-4.4 s
-   continuous (the compile 1.4-3.9 s, float32 the longer)."
+   continuous (the compile 1.4-3.9 s, float32 the longer).
+   MLX's memory (active, cache, peak; live arrays, collections) is
+   printed after each engine's rows, before it opened, once open, after
+   gen.bench.trim (none; clear: MLX's buffer cache cleared by the
+   backend's own function; collect: a collection first) and after the
+   rows (genclj-v1kg, 2026-11-08). The open-time compile's cost was its
+   warm calls' buffers, 1.9 GB of MLX's 2.1 GB cache: Qwen3.5-0.8B token
+   SMC, paged, the median of 4-5 JVMs each (runs 8), float16 964
+   tokens/s without :precompile?, 939 with it, 964 cleared, 977
+   collected; float32 770, 753, 775, 765. With MLX's cache limit at 6
+   GB (gen.mlx.cache-bytes) the cost went too (float16 968-973, float32
+   770-783), and the steps alone then held 2.1 GB of cache."
   (:require [clojure.string :as str]
             [gen.array :as array]
             [gen.gfi :as gfi]
@@ -182,7 +193,18 @@
    ;; the paged engines' :precompile?, when given (genclj-i3fp)
    :precompile? (some-> (System/getProperty "gen.bench.precompile") parse-boolean)
    ;; true: each paged engine's shapes listed after its rows (genclj-i3fp)
-   :shapes? (= "true" (prop "shapes" "false"))})
+   :shapes? (= "true" (prop "shapes" "false"))
+   ;; after each array engine opens (genclj-v1kg): none, clear (MLX's
+   ;; buffer cache cleared, by the backend's own function) or collect (a
+   ;; collection first)
+   :trim (keyword (prop "trim" "none"))})
+
+(defn- mlx-memory
+  "MLX's memory now, in MB, and the backend's live arrays and collections."
+  []
+  (let [{:keys [active cache peak live-arrays collections]} ((requiring-resolve 'gen.backend.mlx.memory/memory))]
+    (format "active %.0f, cache %.0f, peak %.0f MB, %d live, %d collections"
+            (/ (double active) 1e6) (/ (double cache) 1e6) (/ (double peak) 1e6) live-arrays collections)))
 
 (defn- llama [sym] @(requiring-resolve (symbol "gen.llm.llama" (name sym))))
 
@@ -366,12 +388,23 @@
         ;; an engine made, its open time and the traces since printed after
         ;; its rows (genclj-i3fp)
         opened (fn [k make rows]
-                 (let [t0 (System/nanoTime)
+                 (let [before (mlx-memory)
+                       t0 (System/nanoTime)
                        ^java.io.Closeable e (make)
                        ms (/ (- (System/nanoTime) t0) 1e6)
+                       opened (mlx-memory)
+                       _ (when-not (= :llama k)
+                           (case (:trim settings)
+                             :none nil
+                             :clear ((requiring-resolve 'gen.backend.mlx.memory/clear-cache!))
+                             :collect (do ((requiring-resolve 'gen.backend.mlx.memory/collect!))
+                                          ((requiring-resolve 'gen.backend.mlx.memory/clear-cache!)))))
+                       trimmed (mlx-memory)
                        traced @traces]
                    (with-open [e e]
                      (rows e)
+                     (println (format "| memory: before open %s; opened %s; trimmed (%s) %s; after the rows %s | | |"
+                                      before opened (name (:trim settings)) trimmed (mlx-memory)))
                      (stats k e)
                      (when-not (= :llama k)
                        (println (format "| open %.0f ms (%s), %d traces after open | | |" ms

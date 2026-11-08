@@ -691,6 +691,21 @@
     (p/-release! b xs))
   nil)
 
+(defn ^{:api :experimental} release-cache!
+  "Give back the memory backend b keeps for its next arrays, for a runtime
+   that has just made many arrays of shapes it will not make again
+   (gen.llm.array-engine's shapes compiled when it opens): on a backend
+   that caches freed arrays' buffers (MLX, by
+   gen.array.protocols/ICaching) the cache is freed, and later arrays
+   allocate anew; elsewhere nothing. A wrapping backend's (a tape's, a
+   batch tracer's) is the one it wraps. No array changes. Never for
+   semantics code (models, handlers, distributions: rule 3). Returns nil.
+   Experimental: outside the 1.x promise (DESIGN §9)."
+  [b]
+  (cond (instance? gen.array.protocols.ICaching b) (do (p/-release-cache! b) nil)
+        (instance? gen.array.protocols.IWrappingBackend b) (recur (p/-inner b))
+        :else nil))
+
 (defn ^{:api :experimental} device
   "The device backend b computes on: :cpu (the JVM backend, MLX's CPU),
    :metal (MLX's GPU on macOS) or :cuda (MLX's GPU elsewhere), by

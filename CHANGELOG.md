@@ -38,6 +38,22 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Added (experimental): `gen.array/release-cache!`, and the array
+  engine gives back its backend's cache after compiling at open**
+  (genclj-v1kg). `(array/release-cache! b)` gives back the memory backend
+  b keeps for its next arrays: on MLX (by the new optional protocol
+  `gen.array.protocols/ICaching`) its buffer cache is freed, live arrays
+  keeping theirs; on the JVM backend nothing; a wrapping backend's (a
+  tape's, a batch tracer's) is the one it wraps. For runtimes; never in
+  semantics code. gen.llm.array-engine calls it once, after the shapes
+  `:precompile?` compiles when it opens. The warm calls' buffers had
+  filled 1.9 GB of MLX's 2.1 GB cache (a sixteenth of a 32 GB Mac's
+  memory), so the steps' freed buffers found it full and were freed and
+  made anew: Qwen3.5-0.8B's token SMC at 16 particles lost 2-3% on Metal
+  (float16 939 tokens/s against 964 without `:precompile?`; float32 753
+  against 770; 964 and 775 with the cache cleared, and the cost also
+  went with MLX's cache limit raised to 6 GB). No result
+  changes.
 - **Changed (experimental): a mixture of experts' router computes in
   float32 under half floats** (genclj-fxag; **Draws**, a Qwen3.5/3.6
   mixture of experts loaded in float16 or bfloat16, on CUDA and Metal).
