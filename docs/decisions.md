@@ -6041,8 +6041,6 @@ its own position plus one.
 - On the real models in f32, rows are within 7.2e-5 (Qwen3) and 3.5e-5
   (Qwen3.5) of their own forward. array-engine-llama-test's continuous gap
   is 4.1e-5 against a band of 1e-4.
-- Not yet run on CUDA. A run uses the same composite there, but its bands
-  are unchecked.
 
 **Measured on Metal, 8 clients** (5 warm runs, 6 timed; main → branch;
 llama.cpp's tokens/s, p90 and time to first token beside them):
@@ -6062,4 +6060,109 @@ llama.cpp's tokens/s, p90 and time to first token beside them):
   can move by up to 20%.
 
 **Left:** speculative decoding itself (the op reads a draft's tokens, but no
-engine uses it yet); the CUDA run; recompiles on new forward shapes.
+engine uses it yet); recompiles on new forward shapes.
+
+**On CUDA (fenrir, 2026-11-08, after the merge with moe-cuda):** the paged
+and engine suites pass, on the GPU and on MLX's CPU there. Run with the band
+at 0, every comparison sits at least 3.8× inside its band:
+
+| Comparison | CUDA | x86 CPU | Band |
+|---|---:|---:|---:|
+| a run against dense sdpa | 8.3e-7 | 6.6e-7 | 1e-5 |
+| a run against single-query reads (CUDA's kernel) | 2.6e-6 | 6.6e-7 | 1e-5 |
+| Qwen3, several prompts | 4.8e-6 | 3.8e-6 | 2e-5 |
+| Qwen3.5 dense, several prompts | 1.19e-5 | 9.1e-6 | 1.4e-4 / 8e-5 |
+| Qwen3.5 MoE, several prompts | 1.19e-5 | 8.1e-6 | 1.4e-4 / 8e-5 |
+
+### The MoE on CUDA: top-k by ranks
+
+(PROVISIONAL, owner to confirm; genclj-p0ad, 2026-11-08)
+
+**What the profile found.** Qwen3.6-35B-A3B Q4_K_M in float16, the compiled
+paged step on fenrir, ms at 1/8/16 rows. The profilers are
+bench/gen/moe_profile.clj and a CUPTI library built on fenrir
+(~/mlx/gen-clj-tools/kprof2) that names and counts kernels.
+
+| | before | after |
+|---|---|---|
+| step | 25.2 / 39.4 / 52.7 | 17.3 / 31.4 / 44.2 |
+| encode (mlx_async_eval) | 21.0 / 26.5 / 30.5 | 14.2 / 20.6 / 25.1 |
+| kernels a step | 5365 / 5464 / 5464 | 2545 / 2645 / 2645 |
+| GPU busy | 14.1 / 18.8 / 22.9 | 9.4 / 15.2 / 19.8 |
+
+- **The router's top-k was the main cost.** Eight argmaxes, each masking the
+  last pick, cost about 11 kernels a pick: 3,500 of the step's 5,400. MLX's
+  CUDA host spends about 5 µs encoding a kernel, so the batch-1 step was bound
+  by the host. Larger CUDA graphs, or none, change nothing.
+- **Ruled out:** host round trips in routing; copies of the expert stacks
+  (row-contiguous); sorted indices (MLX's sorted kernel on CUDA takes only the
+  non-affine modes); Q6_K in the hot path (only output.weight).
+- **gather_qmm switches kernels at 8 pairs.** With one row a pair, it uses qmv
+  below 8 pairs and qmm_sm80 from 8. Batch 1 has exactly 8, so a gate (N=512)
+  runs on only 32 CTAs: 41 µs a call, 4.9 ms a step, the largest GPU item.
+  At 16 rows it is near memory speed.
+- **float32 is slower:** qmm_sm80 takes half floats only, so float32 falls
+  back to qmm_naive (21.7 / 42.1 / 60.2 ms a step).
+
+**The decision: qwen35's top-k ranks the experts.**
+- Each expert's rank is counted over [N E E] comparisons, ties going to the
+  first index as argmax does, in about 10 kernels a layer.
+- Above 2^24 comparisons (a prefill chunk of more than 256 tokens) it falls
+  back to the picks.
+- The indices and values are identical: no draws change.
+- Not taken:
+  - a gen.array top-k op, which needs an API and conformance work (and MLX's
+    topk does not break ties as argmax does);
+  - top-k on logits, skipping the 256-way softmax, which moves draws;
+  - ranking always, which costs N·E²·4 bytes.
+- Tests: qwen35-test's top-k-by-ranks-is-top-k-by-picks covers probabilities
+  and 3-level ties, k up to E, and the fallback. Planted bugs: ties broken
+  last-first fails 5 checks, `>=` for `>` fails 20, values read at the next
+  index fails 10. On fenrir's CUDA the Qwen3.5 suites and qwen35-llama-test
+  on the real MoE pass (55 tests, 1,594 assertions).
+
+**Measured, tokens/s, float16, the same GGUF:**
+
+| | before | after | llama.cpp |
+|---|---:|---:|---:|
+| batch 1 (compiled static) | 47.9 | 79.6 | 210 (llama-bench tg64: 278) |
+| 16 rows (compiled static) | 488 | 612 | 982 |
+| 16 rows, continuous engine | 314.5 | 377.6 | 1015 |
+| 8 clients, continuous (6 warm runs) | 124.5 | 149.6 | 160.6 |
+| 8-client median read (ms) | 45–47 | 36–38 | 45.6 |
+
+- The batch-1 gap is now 2.6×, the 16-row gap 1.6×.
+- With 8 clients the median read is now faster than llama.cpp's; throughput
+  still trails because of stalls. Mixed forwards retrace per new input shape
+  (200 to 430 ms each on the MoE), still after 6 warm runs. The varying part
+  is probably the block tables' widths, not confirmed.
+
+**Left, the owner's call:**
+- **Batch-1 gathers on qmm_sm80.** Splitting into chunks of 4 or fewer pairs
+  cuts gate/up from 2.29 to 1.40 ms, but is slower at 8 and 16 rows and adds
+  kernels to a host-bound step; not taken. Alternatives: an MLX patch so one
+  row a pair always takes gather_qmv; a CUDA kernel of ours; gate and up
+  stacked at load, which touches LoRA, the checkpoint loader and the planted
+  mutations.
+- **The batch-1 floor is MLX's encoding,** about 2,500 kernels at 5 µs each.
+  Remaining: fewer primitives in the generic Qwen3.5 layers (about 180 copies
+  and 156 aranges a step; collapsing the aranges measured neutral), or
+  upstream MLX work.
+- **Continuous-mode retraces:** pre-trace the mixed signatures at engine
+  start, bucket table widths and row counts, or accept the stalls. prefill
+  (genclj-6qb6) raised the same question.
+- **float16 by default for quantized models on CUDA.** The engine computes
+  in float32 by default there.
+- Not proposed: smaller products in chunks of 7 rows or fewer, which helps
+  only the shared expert at 8 rows (2.70 → 1.75 ms) and hurts the dense Q8_0
+  products.
+
+**Checked on fenrir after the merge** (b4bf4b0, with prefill's runs; the
+lead's verification run, 2026-11-08 ~06:20): every suite passes on MLX's
+CUDA:
+- the paged tests;
+- the six array-engine namespaces;
+- smc, lm, qwen3, qwen35 and qwen35-static;
+- the llama.cpp comparisons on Qwen3-0.6B, Qwen3.5-0.8B and the Qwen3.6 MoE,
+  with none skipped.
+The JVM battery under C2 there passes too (2,418 tests).
