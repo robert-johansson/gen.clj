@@ -23,8 +23,12 @@
      0.05): where values must agree up to rounding, the code says so with
      gen.array/allclose? and `;=> true`.
    - `;=> value ; float64`: the same, checked only where the default float
-     is float64 (the JVM backend; MLX with -Dgen.mlx.dtypes=64). For a
-     sampled value: a key draws other values in float32.
+     is float64 (the JVM backend; MLX with -Dgen.mlx.dtypes=64) and the
+     JVM's transcendental functions round as where the book's values were
+     recorded (reference-math?). For a sampled value: a key draws other
+     values in float32, and a chaotic computation (a NUTS run's
+     adaptation, a network's training) follows the last bits of exp, log,
+     pow, tanh or sin, which HotSpot's intrinsics round by platform.
    - `;; error: message` as a region's first line: one of its forms throws
      an ex-info whose message begins with message: for a macro's error,
      which the compiler wraps, the compiler's message or the macro's own.
@@ -34,8 +38,8 @@
      shows them, without it.
    - `;; figure: path` as a region's first line: its last form returns a
      figure's SVG text (gen.book.svg), which is the file book/path. On the
-     JVM backend the test fails when the file differs (a stale figure);
-     sync writes it.
+     JVM backend the test fails when the file differs (a stale figure),
+     where reference-math? holds; sync writes it.
 
    A statistical claim is a check written in the code (a band from the
    estimator's standard error, `;=> true`), so it holds on every backend.
@@ -53,6 +57,48 @@
             [gen.test-support :as ts]))
 
 (def dir "book")
+
+(defn math-fingerprint
+  "A hash of the bits of Math's exp, log, log10, pow, sin, cos, tan, tanh
+   and cbrt at 1024 fixed arguments each. HotSpot computes them by
+   intrinsics that round the last bit by platform, the same under C2 and
+   Graal: on x86-64 each differs from StrictMath's fdlibm at 2 to 12% of
+   arguments (1 or 2 ulp), on aarch64 only sin and cos (7%), so x86 and
+   aarch64 differ in all of them (measured 2026-11-08, GraalVM 25)."
+  ^long []
+  (let [r (java.util.SplittableRandom. 20261108)
+        fs [(fn [^double u] (Math/exp (- (* 60.0 u) 30.0)))
+            (fn [^double u] (Math/log (* 1e3 u)))
+            (fn [^double u] (Math/log10 (* 1e3 u)))
+            (fn [^double u] (Math/pow (* 1e3 u) 0.37))
+            (fn [^double u] (Math/sin (- (* 20.0 u) 10.0)))
+            (fn [^double u] (Math/cos (- (* 20.0 u) 10.0)))
+            (fn [^double u] (Math/tan (- (* 3.0 u) 1.5)))
+            (fn [^double u] (Math/tanh (- (* 10.0 u) 5.0)))
+            (fn [^double u] (Math/cbrt (- (* 1e3 u) 500.0)))]]
+    (reduce (fn [^long h f]
+              (reduce (fn [^long h _] (unchecked-add (unchecked-multiply 31 h) (Double/doubleToLongBits (f (.nextDouble r)))))
+                      h (range 1024)))
+            17 fs)))
+
+(def ^:private reference-fingerprint
+  "math-fingerprint where the book's `; float64` values and its figures
+   were recorded: HotSpot on aarch64 (macOS, GraalVM 25, C2 or Graal).
+   x86-64's is 1987540229161461079 (fenrir, GraalVM 25, either JIT)."
+  -3821925906793633593)
+
+(def ^:private reference-math
+  (delay (== reference-fingerprint (math-fingerprint))))
+
+(defn reference-math?
+  "Does this JVM round its transcendental functions as where the book's
+   `; float64` values and figures were recorded (math-fingerprint)? Where
+   it does not (x86-64), a chaotic computation follows other bits: a NUTS
+   run adapts another step size, a network trains to other weights, and
+   the book shows other values of the same claims, whose checks (bands)
+   hold everywhere. Those values and the figures go unchecked there."
+  []
+  @reference-math)
 
 (defn source-file
   "The namespace file of a chapter: book/011-getting-started.md's is
@@ -249,7 +295,7 @@
                   (let [v (try (eval form) (catch Throwable e e))]
                     (if (instance? Throwable v)
                       (do (is false (str (pr-str form) " threw: " (ex-message v))) (reduced acc))
-                      (let [checked (remove #(and (:float64? %) (ts/f32?)) expect)]
+                      (let [checked (remove #(and (:float64? %) (or (ts/f32?) (not (reference-math?)))) expect)]
                         (doseq [{x :value} checked]
                           (is (same? (read-back x) (read-back v))
                               (str (pr-str form) "\nexpected " (pr-str x) "\nactual   " (pr-str (read-back v)))))
@@ -277,14 +323,14 @@
               regions))))
 
 (defn check-figures
-  "Each figure (a map from path to SVG text) is SVG, and on the JVM backend
-   the file book/path holds exactly it."
+  "Each figure (a map from path to SVG text) is SVG, and on the JVM backend,
+   where reference-math? holds, the file book/path holds exactly it."
   [figures]
   (doseq [[path svg] figures
           :let [f (io/file dir path)]]
     (testing (str "the figure " path)
       (is (and (string? svg) (str/starts-with? svg "<svg")) "a figure region returns SVG text")
-      (when (ts/jvm?)
+      (when (and (ts/jvm?) (reference-math?))
         (is (and (.exists f) (= svg (slurp f)))
             (str (.getPath f) " is stale: clojure -M:test -m gen.book sync"))))))
 
@@ -318,6 +364,9 @@
    code and checks."
   [chapters]
   (when (runs-here?)
+    (when-not (reference-math?)
+      (println "gen.book: this JVM's transcendental functions round unlike the reference's (reference-math?):"
+               "the `; float64` values and the figures are not checked"))
     (is (seq chapters) "the part has chapters")
     (doseq [chapter chapters]
       (let [{:keys [regions checks]} (run-chapter chapter)]
@@ -607,9 +656,11 @@
     (doseq [[path svg] (:figures (run-regions rs))
             :let [f (io/file dir path)]]
       (when-not (and (.exists f) (= svg (slurp f)))
-        (io/make-parents f)
-        (spit f svg)
-        (println "wrote" (.getPath f))))))
+        (if (reference-math?)
+          (do (io/make-parents f)
+              (spit f svg)
+              (println "wrote" (.getPath f)))
+          (println "not written:" (.getPath f) "differs, and this JVM's math is not the reference's (reference-math?)"))))))
 
 (defn -main
   "sync [chapter …]: write the chapters' includes from their regions, and

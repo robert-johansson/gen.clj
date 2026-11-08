@@ -9,11 +9,18 @@
    Also the costs of the operations, and of the host's part of them: the
    normalization of a row of logits.
 
+   The prompts are a set (-Dgen.bench.prompts): general (the default,
+   prompts), digits (digit-prompts: numbers and arithmetic, GRPO's chat
+   prompts among them) or all (each set's noise printed apart), the first
+   -Dgen.bench.prompt-limit of each.
+
    Run (with native/build-llama.sh's libraries):
      clojure -M:bench -m gen.llama-noise model.gguf          the noise and the costs
-     clojure -M:bench -m gen.llama-noise model.gguf costs    the costs only"
+     clojure -M:bench -m gen.llama-noise model.gguf costs    the costs only
+     clojure -J-Dgen.bench.prompts=all -M:bench -m gen.llama-noise model.gguf"
   (:require [gen.llm.branching :as br]
             [gen.llm.branching-contract :refer [max-diff top-tokens]]
+            [gen.llm.chat :as chat]
             [gen.llm.llama :as llama])
   (:import [gen.llama LlamaRuntime]
            [java.lang.foreign Arena MemorySegment ValueLayout]))
@@ -42,6 +49,46 @@
    "The recipe calls for two cups of flour, one egg, and"
    "Error: undefined is not a function at"])
 
+(defn- product
+  "GRPO's prompt i (gen.llm.grpo-llama-test's): two factors from 12 to 98,
+   drawn from i, asked in Qwen's chat template."
+  [i]
+  (let [r (java.util.Random. (+ 1000 (long i)))
+        a (+ 12 (.nextInt r 87))
+        b (+ 12 (.nextInt r 87))]
+    (chat/render [{:role :user :content (str "What is " a " * " b "? Reply with the number only.")}])))
+
+(def digit-prompts
+  "Prompts of digits and arithmetic, where llama.cpp's CPU and CUDA paths
+   (which quantize the activations to 8 bits) were found furthest from an
+   exact forward (GRPO's run, genclj-fc6u): twelve of GRPO's chat prompts
+   (gen.llm.grpo-llama-test's first held-out two-digit products, their
+   special tokens read as themselves) and eight texts of numbers."
+  (into (mapv product (range 100000 100012))
+        ["12 * 34 = 408\n56 * 78 = 4368\n91 * 23 ="
+         "What is 64 * 43? Step by step: 64 * 40 = 2560, 64 * 3 = 192, so 64 * 43 ="
+         "3.14159265358979323846264338327950288419716939937510"
+         "From 2021 to 2026 the population grew from 10,452,326 to 10,551,707, an increase of"
+         "| year | revenue |\n|------|---------|\n| 2021 | 1,204 |\n| 2022 | 1,377 |\n| 2023 |"
+         "2026-11-08T01:24:06Z latency 37.5 ms, p99 112.0 ms, requests 48213, errors"
+         "0x7f3a, 0x91bc, 0x0042, 0xdead, 0x"
+         "17 + 25 = 42; 42 - 19 = 23; 23 * 4 = 92; 92 / 2 ="]))
+
+(defn prompt-sets
+  "The prompt sets -Dgen.bench.prompts names (general, the default;
+   digits; all): [[name items]], an item {:text :tokens}, the tokens by
+   e's tokenizer (digit-prompts' special tokens read as themselves); the
+   first -Dgen.bench.prompt-limit of each (all by default)."
+  [e]
+  (let [limit (some-> (System/getProperty "gen.bench.prompt-limit") parse-long)
+        some-of (fn [ps] (if limit (take limit ps) ps))
+        general ["general" (mapv (fn [t] {:text t :tokens (llama/tokenize e t)}) (some-of prompts))]
+        digits ["digits" (mapv (fn [t] {:text t :tokens (llama/tokenize e t {:parse-special? true})}) (some-of digit-prompts))]]
+    (case (System/getProperty "gen.bench.prompts" "general")
+      "general" [general]
+      "digits" [digits]
+      "all" [general digits])))
+
 (defn- all-diff ^double [^floats a ^floats b]
   (areduce a j m 0.0 (Math/max m (Math/abs (- (aget a j) (aget b j))))))
 
@@ -54,15 +101,15 @@
 
 (defn- ms [t0] (/ (- (System/nanoTime) t0) 1e6))
 
-(defn- noise [e]
+(defn- noise [e items]
   (let [acc (atom {})
         worst (atom {})
         note! (fn [text k top all]
                 (swap! acc update k (fnil conj []) [top all])
                 (swap! worst update text (fnil max 0.0) top))]
-    (doseq [text prompts
+    (doseq [{:keys [text tokens]} items
             :let [note! (partial note! text)
-                  p (llama/tokenize e text)
+                  p tokens
                   root (br/open e p)
                   lp0 (br/logprobs root)]]
       ;; the same tokens read again while the first read is live (other
@@ -141,5 +188,8 @@
   (with-open [e (llama/engine {:model model :max-branches 16 :n-ctx 4096})]
     (println (llama/system-info))
     (println (dissoc (br/info e) :eog))
-    (when-not (= mode "costs") (noise e))
+    (when-not (= mode "costs")
+      (doseq [[set-name items] (prompt-sets e)]
+        (println (str "\n== the " set-name " prompts (" (count items) ")"))
+        (noise e items)))
     (costs e)))

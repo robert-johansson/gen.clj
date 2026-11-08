@@ -31,8 +31,9 @@
    a Qwen3.5 GGUF given as -J-Dgen.llama.test-model (Qwen3.5-0.8B-Q8_0);
    skipped with a note otherwise, and for another architecture.
 
-   The band: qwen35-llama-test's, per platform (0.035 on Metal, 0.65
-   elsewhere); the opt-in models' 0.05. Measured on Metal (Mac mini M4,
+   The band: qwen35-llama-test's, per platform (against-llama/band: 0.035
+   on Metal, 7.1 elsewhere for Q8_0, from 40 prompts with digits); the
+   opt-in models' 0.05. Measured on Metal (Mac mini M4,
    2026-11-07, Qwen3.5-0.8B-Q8_0, llama.cpp v0.9.0's Metal build), the
    adapter's size (its largest |Δ log p| from the base, our forward) and
    the largest |Δ log p| against llama.cpp:
@@ -70,12 +71,14 @@
   (or (System/getProperty "gen.llama.test-model") (System/getenv "GEN_LLAMA_TEST_MODEL")))
 
 (def ^:private band
-  "qwen35-llama-test's band, per platform."
-  (if (.startsWith (System/getProperty "os.name") "Mac") 0.035 0.65))
+  "qwen35-llama-test's band, per platform (against-llama/band); 0 without
+   a test model (the tests skip)."
+  (if (and model-path (.isFile (java.io.File. ^String model-path))) (against/band model-path) 0.0))
 
 (def ^:private mutation-nats
-  "What a planted convention error must exceed: lora-llama-test's, twice
-   the largest platform's band."
+  "What a planted convention error must exceed: lora-llama-test's, 1.3.
+   Off the Mac most of these errors lie inside the band (llama.cpp's
+   noise there): Metal's band is the check of the conventions."
   1.3)
 
 (defn- llama

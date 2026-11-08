@@ -60,8 +60,9 @@
   (or (System/getProperty "gen.llama.test-model") (System/getenv "GEN_LLAMA_TEST_MODEL")))
 
 (def ^:private band
-  "qwen3-llama-test's band, per platform."
-  (if (.startsWith (System/getProperty "os.name") "Mac") 0.075 0.65))
+  "qwen3-llama-test's band, per platform (against-llama/band); 0 without
+   a test model (the test skips)."
+  (if (and model-path (.isFile (java.io.File. ^String model-path))) (against/band model-path) 0.0))
 
 (defn- llama
   "A function of gen.llm.llama, loaded only when the test runs."

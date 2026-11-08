@@ -38,7 +38,8 @@
    pairs, 0.14 and 0.34 (RoPE covers 64 of a head's 256 dims, in 6 of 24
    layers: a short prompt barely sees it).
    The value-head order the converter tiles is the identity at 0.8B (16
-   key and 16 value heads), and the 0.8B has no experts: the tiny random
+   key and 16 value heads), and the 0.8B has no experts: a trained model
+   checks both off the Mac (Qwen3.6-35B-A3B, below), and the tiny random
    models generate.py --with-vocabulary writes (2 key and 4 value heads;
    a Qwen3.5-MoE of 4 experts, 2 used, and a shared one; the 0.8B's
    tokenizer, as llama.cpp needs one) check both, given as
@@ -48,9 +49,39 @@
    and 157 tokens of vocab-prompts, F32 and Q8_0, dense and MoE (random
    weights: their attention and states are less tame than a trained
    model's); the value heads grouped where the converter tiles them fail
-   it by 7.1 to 11.1 nats."
+   it by 7.1 to 11.1 nats.
+   Off the Mac the band is 7.1 nats, and 12.3 on a model of K-quants
+   (against-llama/band): twice the largest |Δ log p| (rounded up) that
+   the bench measured on fenrir as qwen3-llama-test's (2026-11-08, MLX's
+   forward on CUDA against llama.cpp v0.9.0's CUDA and x86 CPU builds,
+   which quantize the activations to 8 bits; gen.llama-noise's 20 prompts
+   and its 20 of digits, each read whole, as a chunk and through 8 steps):
+   - Qwen3.5-0.8B-Q8_0: 0.88 on the general prompts (CUDA; 0.87 on the
+     CPU build), 3.38 on the digits (CPU 3.53), the largest at greedy
+     steps of the chat prompts' replies; median 0.16 to 0.30; the argmax
+     equal in 195 to 197 of each 200. llama.cpp's own spread on CUDA:
+     0.57 and 2.59. MLX's forward on its CPU gives the same gaps to three
+     digits (the digit prompts): the gap is llama.cpp's.
+   - Qwen3.6-35B-A3B-Q4_K_M (ggml-org's: Q4_K experts, Q8_0 attention and
+     shared expert; 256 experts, 8 used; 16 key and 32 value heads): 2.35
+     on the general prompts, 6.13 on the digits (CUDA; the CPU build 1.87
+     and 5.88), median 0.25 to 0.88; the argmax equal in 196 and 197 of
+     200. llama.cpp's own spread on CUDA is as large, 3.88 and 6.09, and
+     MLX's forward on its CPU gives the CUDA gaps to three digits (the
+     first 3 digit prompts). The largest gaps are a runner-up's behind a
+     top token of p ≈ 1 (llama.cpp -10.9 nats, ours -17.0).
+   There the planted errors measured, the least and the median over the
+   20 general prompts (0.8B on CUDA; the MoE): the conv state's oldest
+   inputs 1.37 and 4.80, 2.34 and 5.92; the conv kernel reversed 8.21
+   and 14.4, 9.73 and 13.8; attn_q's query and gate swapped 13.9 and
+   22.2, 10.3 and 15.9; KV heads tiled 5.62 and 9.72, 2.65 and 4.34; the
+   q/k norms skipped 10.9 and 16.4, 11.2 and 13.1; RoPE's traditional
+   pairs 0.14 and 0.39, 0.19 and 0.66. And on the MoE (against-llama's
+   value-heads-mutations and moe-mutations): the value heads grouped 6.80
+   and 14.2; the experts' gate and up swapped 9.57 and 14.2; the router's
+   top k not renormalized 2.78 and 6.08; the shared expert ungated 7.18
+   and 13.8."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
-            [gen.array :as array]
             [gen.llm.models.against-llama :as against]
             [gen.llm.models.qwen35 :as qwen35]
             [gen.test-support :as ts]))
@@ -59,15 +90,16 @@
   (or (System/getProperty "gen.llama.test-model") (System/getenv "GEN_LLAMA_TEST_MODEL")))
 
 (def ^:private band
-  ;; Per platform, as llama.cpp's own bands are (DESIGN §9): Metal's from
-  ;; the measurement above; elsewhere qwen3-llama-test's (llama.cpp's x86
-  ;; and CUDA Q8_0 paths differ from MLX's forward by 0.27 to 0.32 nats
-  ;; for Qwen3 on fenrir; Qwen3.5's unmeasured there)
-  (if (.startsWith (System/getProperty "os.name") "Mac") 0.035 0.65))
+  ;; Per platform and quantization, from the measurements above
+  ;; (against-llama/band; on Metal, K-quants unmeasured); 0 without a test
+  ;; model (the tests skip)
+  (if (and model-path (.isFile (java.io.File. ^String model-path))) (against/band model-path) 0.0))
 
 (def ^:private mutation-nats
   "What a planted convention error must exceed, on every platform:
-   qwen3-llama-test's, ten times its Metal band."
+   qwen3-llama-test's, ten times its Metal band. Off the Mac most of the
+   errors lie inside the band (llama.cpp's noise there), and Metal's band
+   is the check of the conventions."
   0.75)
 
 (defn- llama
@@ -149,15 +181,6 @@
 (def ^:private vocab-prompts
   [(second prompts) (nth prompts 3) (nth prompts 4)])
 
-(def ^:private value-heads-grouped
-  "The planted error: value head h reading key head h / (value-heads /
-   key-heads), as Hugging Face's checkpoints order them, where the
-   converter tiles them (h mod key-heads)."
-  {#'qwen35/key-heads-tiled (fn [y hv]
-                              (let [[b t hk d] (array/shape y)]
-                                (array/reshape (array/broadcast-to (array/expand-dims y 3) [b t hk (quot hv hk) d])
-                                                   [b t hv d])))})
-
 (deftest unequal-heads-and-experts-are-llama-cpp-s
   ;; opt-in: the models are generated (with Python), not committed, so a
   ;; run without them skips no native suite
@@ -176,9 +199,7 @@
               (is (<= max-diff vocab-band) (str what ": |Δ log p| " max-diff))
               (is argmax? (str what ": the argmax"))
               (is top5? (str what ": the top 5")))
-            (is (< mutation-nats (with-redefs-fn value-heads-grouped
-                                   #(reduce max (map :max-diff (against/compare-prompt e m tokens 1 0)))))
-                "the value heads grouped"))))))))
+            (is (< mutation-nats (against/mutated e m tokens :value-heads-grouped)) "the value heads grouped"))))))))
 
 (deftest log-probabilities-are-llama-cpp-s
   (when-qwen35
@@ -195,5 +216,5 @@
   (when-qwen35
     (let [[e m] (setup)
           tokens ((llama 'tokenize) e (nth prompts 3))]
-      (doseq [mutation (sort (keys against/qwen35-mutations))]
+      (doseq [mutation (sort (keys (against/mutations-of m)))]
         (is (< mutation-nats (against/mutated e m tokens mutation)) (name mutation))))))

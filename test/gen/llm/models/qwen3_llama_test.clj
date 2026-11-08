@@ -40,7 +40,24 @@
    prompts; this test asserts ten times the band on one prompt, where
    they measured 24.3, 18.9 and 2.6): KV heads tiled, 17.3 and 24.6; the
    q/k norms skipped, 11.9 and 18.1; RoPE's traditional pairs, 2.6 and
-   6.6."
+   6.6.
+   Off the Mac the band is 2.4 nats (against-llama/band): twice the
+   largest |Δ log p| (1.19, rounded up) that the bench measured on fenrir
+   (2026-11-08, MLX's forward on CUDA against llama.cpp v0.9.0's CUDA and
+   x86 CPU builds, Qwen3-0.6B-Q8_0) over 40 prompts, gen.llama-noise's 20
+   and its 20 of digits (twelve of GRPO's chat prompts of two-digit
+   products, eight texts of numbers: -Dgen.bench.prompts=all), each read
+   whole, as a chunk and through 8 steps: 400 comparisons a build, median
+   0.17 to 0.41; CUDA's largest 1.05 (1.03 on the digits), the CPU
+   build's 1.19 (a chat template read as text); the argmax equal in 195
+   to 200 of each 200. Both builds quantize the activations to 8 bits for
+   Q8_0's dot products, which Metal's does not, and their own spread
+   differs: on CUDA a batched read against a lone one reaches 0.85
+   (gen.llama-noise), on the CPU nothing (its reads are deterministic,
+   its gap a bias). MLX's forward on its CPU (-Dgen.mlx.device=cpu) gives
+   the same gaps to three digits as on CUDA (the digit prompts): the gap
+   is llama.cpp's. There the planted errors measured at the least 17.4,
+   11.9 and 2.45 nats (CUDA; 2.53 on the CPU build)."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gen.array.gguf :as gguf]
             [gen.llm.models.against-llama :as against]
@@ -51,23 +68,17 @@
   (or (System/getProperty "gen.llama.test-model") (System/getenv "GEN_LLAMA_TEST_MODEL")))
 
 (defn- band
-  ;; Per platform, as llama.cpp's own bands are (DESIGN §9): Metal's from
-  ;; the measurements above (Q8_0's, or a K-quant model's); elsewhere
-  ;; llama.cpp's x86 and CUDA Q8_0 paths differ from MLX's forward by 0.27
-  ;; (CUDA) to 0.32 (CPU) nats at most (fenrir, 2026-11-07, this test's 24
-  ;; comparisons; MLX's forward gave the same on its CPU and on CUDA, so
-  ;; the gap is llama.cpp's), twice the larger rounded up (K-quants not
-  ;; measured there).
+  ;; Per platform and quantization, from the measurements above (off the
+  ;; Mac, K-quants unmeasured)
   []
-  (cond (not (.startsWith (System/getProperty "os.name") "Mac")) 0.65
-        (some #{:q4_k :q5_k :q6_k} (map :type (:tensors (gguf/header model-path)))) 0.47
-        :else 0.075))
+  (against/band model-path))
 
 (def ^:private mutation-nats
   "What a planted convention error must exceed, on every platform: ten
-   times Metal's band, above every platform's noise (and the K-quant
-   band: on the Q4_K_M model the errors measured 15.4, 14.4 and 2.6 nats
-   at the least over the bench's 20 prompts)."
+   times Metal's band (and above the K-quant band: on the Q4_K_M model
+   the errors measured 15.4, 14.4 and 2.6 nats at the least over the
+   bench's 20 prompts). Off the Mac it lies inside llama.cpp's noise, and
+   the errors' margins over the band are the ones measured above."
   0.75)
 
 (defn- llama
