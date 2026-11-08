@@ -38,6 +38,17 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Changed (experimental): a mixture of experts computes in float16 on
+  Metal by default** (the owner's call, 2026-11-08, after genclj-0nxn).
+  `gen.llm.array-engine/engine` given a GGUF file of quantized weights
+  whose architecture has experts, and no `:dtype`, loads it in float16 on
+  MLX's Metal backend, as it does on CUDA. With load-gguf's cast at load
+  it now loads below float32 (Qwen3.6-35B-A3B: 23.1 against 28.4 GB) and
+  runs faster (token SMC about 13%), its NLL float32's. Dense models stay
+  float32 on Metal; MLX's CPU, the JVM backend, a given `:dtype` and a
+  model passed loaded are unchanged. **Draws**: an MoE's draws on Metal
+  change.
+
 - **Added (experimental): `gen.array/load-gguf`'s `:dtype`, a model cast
   as it loads; `qwen3/load` and `qwen35/load` load so** (genclj-0nxn).
   `(array/load-gguf path {:dtype d})`, d a float dtype or a function of a

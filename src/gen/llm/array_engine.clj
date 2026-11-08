@@ -1436,20 +1436,35 @@
   [path]
   (boolean (some #(or (gguf/quantized? %) (= :q6_k %)) (map :type (mapcat :tensors (gguf/headers path))))))
 
+(defn- experts-file?
+  "Is the GGUF model at path a mixture of experts (its architecture's
+   expert_count positive)?"
+  [path]
+  (let [m (:metadata (gguf/header path))]
+    (pos? (long (or (get m (str (get m "general.architecture") ".expert_count")) 0)))))
+
 (defn- default-dtype
-  "Checked opts, with :dtype :float16 where the engine loads a GGUF file of
-   quantized weights on MLX's CUDA (backend b) and no :dtype is given (the
-   owner's call, 2026-11-08: MLX's fast quantized products on CUDA take
-   half floats only, and every lead over llama.cpp there was measured in
-   float16); as given elsewhere. A mixture of experts too (the owner,
-   2026-11-08, after genclj-fxag): in float16 its distance from the
-   float32 forward is its router's flips at near-ties (forced to the same
-   experts, a median of 0.015 nats, the dense models' level), and its NLL
-   is float32's (-0.004 +- 0.002 nats a token over 4,080)."
+  "Checked opts, with :dtype :float16 where no :dtype is given and the
+   engine loads a GGUF file of quantized weights:
+   - on MLX's CUDA (backend b), every such file (the owner's call,
+     2026-11-08: MLX's fast quantized products on CUDA take half floats
+     only, and every lead over llama.cpp there was measured in float16),
+     a mixture of experts included (after genclj-fxag: in float16 its
+     distance from the float32 forward is its router's flips at near-ties,
+     forced to the same experts a median of 0.015 nats, and its NLL is
+     float32's, -0.004 +- 0.002 nats a token over 4,080);
+   - on Metal, a mixture of experts only (the owner, 2026-11-08, after
+     genclj-0nxn): it now loads at a lower peak in float16 than in float32
+     (Qwen3.6-35B-A3B 23.1 against 28.4 GB) and runs faster (token SMC
+     about 13%), its NLL float32's. Dense models stay float32 there, where
+     their bands against llama.cpp were measured.
+   As given elsewhere (MLX's CPU, the JVM backend, a model passed loaded)."
   [{:keys [model dtype] :as opts} b]
-  (if (and (nil? dtype) (string? model) (= :cuda (array/device b)) (quantized-file? model))
-    (assoc opts :dtype :float16)
-    opts))
+  (let [device (when (and (nil? dtype) (string? model)) (array/device b))]
+    (if (and (or (= :cuda device) (and (= :metal device) (experts-file? model)))
+             (quantized-file? model))
+      (assoc opts :dtype :float16)
+      opts)))
 
 (defn- model-backend
   "The backend m's weights live on."

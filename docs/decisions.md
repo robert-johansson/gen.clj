@@ -6812,3 +6812,22 @@ msync(MS_INVALIDATE), no sudo):
    MLX, which gives the same arrays (an existing test checks it).
 3. **float16 on the Mac now loads below float32** (23.1 against 28.4 GB).
    That was the reason the Mac's MoE default stayed float32.
+
+### A mixture of experts in float16 on Metal by default
+
+(The owner, 2026-11-08 evening, after genclj-0nxn: "float16 for the MoE
+only"; not taken for now, the apps-open run on the MacBook)
+
+- `engine`'s default dtype: float16 where no `:dtype` is given and a GGUF
+  file of quantized weights loads on MLX's CUDA (any model) or Metal (a
+  mixture of experts only, its architecture's expert_count positive).
+- Why on Metal: with load-gguf's cast at load the MoE loads below float32
+  (23.1 against 28.4 GB) and runs faster (token SMC about 13%), with
+  float32's NLL. Dense models stay float32 there, where their llama.cpp
+  bands were measured.
+- array-engine-test checks the dense and MoE fixtures on Metal and the CPU,
+  and the engine opened on this backend. A planted bug (the experts check
+  dropped) fails 2 checks. CHANGELOG has a Draws line.
+- The owner declined the apps-open test for now; the result stands for the
+  big apps closed: 11–19 GB available at the engine's peak under the strict
+  guard.

@@ -346,15 +346,28 @@
       (is (nil? (default :cuda {:model "test/fixtures/gguf/qwen3-small-f16.gguf"})) "F16")
       (is (= :float32 (default :cuda {:model (:q8_0 files) :dtype :float32})) "a :dtype given")
       (is (nil? (default :cuda {:model (:q8_0 @models)})) "a model loaded"))
+    (testing "on Metal, a mixture of experts only (the owner's call,
+              2026-11-08; planted: the experts check dropped gives the dense
+              file :float16)"
+      (is (= :float16 (default :metal {:model "test/fixtures/gguf/qwen35moe-tiny-q8_0.gguf"})) "a mixture of experts")
+      (is (nil? (default :metal {:model (:q8_0 files)})) "Qwen3, dense")
+      (is (nil? (default :metal {:model "test/fixtures/gguf/qwen35-tiny-q8_0.gguf"})) "Qwen3.5, dense")
+      (is (nil? (default :metal {:model "test/fixtures/gguf/qwen35moe-tiny-f32.gguf"})) "an unquantized mixture of experts")
+      (is (= :float32 (default :metal {:model "test/fixtures/gguf/qwen35moe-tiny-q8_0.gguf" :dtype :float32})) "a :dtype given"))
     (testing "elsewhere"
-      (doseq [d [:cpu :metal]]
-        (is (nil? (default d {:model (:q8_0 files)})) (name d))))
+      (doseq [d [:cpu]]
+        (is (nil? (default d {:model (:q8_0 files)})) (name d))
+        (is (nil? (default d {:model "test/fixtures/gguf/qwen35moe-tiny-q8_0.gguf"})) (str (name d) ", a mixture of experts"))))
     (testing "the engine's, on this backend"
       (doseq [k [:q8_0 :f32]]
         (with-open [e (ae/engine {:model (files k) :max-branches 2})]
           (is (= (if (and (= k :q8_0) (= :cuda (array/device array/*backend*))) :float16 (ts/float-dtype))
                  (:dtype (:model (br/info e))))
-              (name k)))))))
+              (name k))))
+      (with-open [e (ae/engine {:model "test/fixtures/gguf/qwen35moe-tiny-q8_0.gguf" :max-branches 2})]
+        (is (= (if (#{:cuda :metal} (array/device array/*backend*)) :float16 (ts/float-dtype))
+               (:dtype (:model (br/info e))))
+            "a mixture of experts")))))
 
 ;; ---------------------------------------------------------------------------
 ;; Misuse
