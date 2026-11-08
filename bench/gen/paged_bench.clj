@@ -20,7 +20,17 @@
      last block (copy-on-write) in two calls (the blocks gathered and
      evaluated, put by a donating call, then the step), by
      gen.backend.mlx.paged/put-blocks's scatter and by put-along-axis
-     (1daf's put).
+     (1daf's put);
+   - long (genclj-6qb6): a paged decode step of gen.bench.long-rows rows
+     (1,8), each over one context of gen.bench.contexts positions
+     (4096,16384), by the kernels (v1 while its scores fit in threadgroup
+     memory, tables to 8,192 positions; v2 past them) and by the
+     composite (each row's blocks gathered, sdpa).
+   Measured on the Mac mini M4 (2026-11-08, Qwen3-0.6B-Q8_0, MLX 0.32.4,
+   float32), long: at 2048 positions v1 14.2 ms (1 row) and 45.9 (8
+   rows) against the composite's 52.2 and 341; at 4096 (a table of 8,192
+   positions: v2) 23.3 and 86.5 against 102 and 696; at 16384 v2 78.1 and
+   279 against 351 and 3338.
    Measured on the Mac mini M4 (2026-11-08, Qwen3-0.6B-Q8_0, MLX 0.32.4):
    - write: 0.33-0.65 ms into one pair of 0.14 to 3 GB, 1.2-1.9 ms into
      28 pairs, no collections: flat in the pools' size;
@@ -46,11 +56,13 @@
   {:runs (long-prop "runs" 20)
    :warm (long-prop "warm" 3)
    :dtype (keyword (prop "dtype" "float32"))
-   :sections (set (map keyword (str/split (prop "sections" "write,static,cow") #",")))
+   :sections (set (map keyword (str/split (prop "sections" "write,static,cow,long") #",")))
    :write-gb (mapv parse-double (str/split (prop "write-gb" "0.14,0.5,1,2,3") #","))
    :rows (long-prop "rows" 8)
    :capacities (mapv parse-long (str/split (prop "capacities" "256,1024,2048") #","))
-   :pool-blocks (long-prop "pool-blocks" 256)})
+   :pool-blocks (long-prop "pool-blocks" 256)
+   :contexts (mapv parse-long (str/split (prop "contexts" "4096,16384") #","))
+   :long-rows (mapv parse-long (str/split (prop "long-rows" "1,8") #","))})
 
 (defn- memory [] ((requiring-resolve 'gen.backend.mlx.memory/memory)))
 
@@ -188,6 +200,38 @@
                        (reset! pools p)
                        (run tbl sl))))))))
 
+;; ---------------------------------------------------------------------------
+;; long: decode at long contexts, the kernels against the composite
+;; ---------------------------------------------------------------------------
+
+(defn- next-pow2 ^long [^long n] (loop [p 1] (if (< p n) (recur (* 2 p)) p)))
+
+(defn- long-section [m]
+  (let [bs 16
+        kernel (qwen3/compile-paged-step m {:donate? true})
+        composite (qwen3/compile-paged-step m {:donate? true})]
+    (println "\n### A paged decode step at long contexts: the kernels (v1; past its threadgroup memory v2) against the composite\n")
+    (header)
+    (doseq [len (:contexts settings)
+            r (:long-rows settings)]
+      (let [blocks (vec (range 1 (+ 2 (quot (long len) bs))))   ; the context's and the new position's
+            nb (inc (count blocks))
+            width (next-pow2 (count blocks))
+            pools (atom (let [p (qwen3/paged-pools m nb bs)] (array/eval! p) p))
+            ;; every row reads the same blocks, each writes a slot of its own
+            ;; in the last block (timing: the slots' positions do not matter)
+            tbl (i32 (repeat r (into blocks (repeat (- width (count blocks)) 0))))
+            positions (i32 (repeat r len))
+            sl (i32 (map #(+ (* (long (peek blocks)) bs) (long %)) (range r)))
+            toks (vec (repeat r [7]))
+            run (fn [step]
+                  (let [[logits p] (step @pools positions tbl sl toks)]
+                    (array/eval! [logits p])
+                    (reset! pools p)))]
+        (row (str "context " len ", " r " rows: the kernel (" (if (< (* width bs) 8192) "v1" "v2") ")") (timed #(run kernel)))
+        (row (str "context " len ", " r " rows: the composite (gathered, sdpa)")
+             (with-redefs-fn {#'gpaged/fused-attention (fn [& _] nil)} #(timed (fn [] (run composite)))))))))
+
 (defn -main [path & _]
   (when-not (= :mlx (array/backend-name array/*backend*))
     (throw (ex-info "Run on MLX: -J-Dgen.backend=mlx" {})))
@@ -197,6 +241,7 @@
   (let [m (qwen3/load path {:dtype (:dtype settings)})]
     (when ((:sections settings) :write) (write-section m))
     (when ((:sections settings) :static) (static-section m))
-    (when ((:sections settings) :cow) (cow-section m)))
+    (when ((:sections settings) :cow) (cow-section m))
+    (when ((:sections settings) :long) (long-section m)))
   (println "\nMLX memory:" (pr-str (memory)))
   (shutdown-agents))

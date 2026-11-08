@@ -212,6 +212,41 @@ other values for the same key, from the same distribution.
     llama.cpp (175 against 82 and 92 in float32); a lone caller as
     before.
 
+- **Added (experimental): Qwen3.5 and Qwen3.6 in the continuous mode;
+  v2 paged attention past v1's contexts** (genclj-6qb6, PROVISIONAL).
+  - `gen.llm.array-engine`: `:continuous? true` runs Qwen3.5 and Qwen3.6
+    (it was loud). A forward's decode rows step their GatedDeltaNet
+    states as a paged step does; a prefill chunk runs as one sequence
+    through the GatedDeltaNet layers, from its read's states, beside
+    them. `stats` adds `:lane-forwards`, `:held-forwards` and
+    `:stacked-forwards` for Qwen3.5. Measured on Metal (Qwen3.5-0.8B
+    Q8_0): 8 concurrent completion clients 233 tokens/s in float16 and
+    152 in float32, against 74 and 66 in the paged mode and 69 through
+    llama.cpp; token SMC at 16 particles 885 (float16) and 726
+    (float32), against the paged mode's 826 and 677, the static's 805
+    and 684 and llama.cpp's 282.
+  - `gen.llm.models.qwen35`: `paged-batch-step` and
+    `compile-paged-batch-step` (qwen3's for Qwen3.5: the decode rows'
+    states `{:conv :state}`, the chunk's `{:chunk-conv :chunk-state}`,
+    and `:chunk-len`, past which a chunk's padding rows leave its
+    states as they were). `compile-paged-step`'s function takes
+    an optional `held`, states it reads but never consumes.
+  - The paged mode's Qwen3.5 steps read a group's consecutive rows in
+    place when other branches hold it too (forks: `stats`'
+    `:held-steps`), and stack rows in one copy where they stacked in up
+    to three. Token SMC at 16 particles, Qwen3.5-0.8B: 677 tokens/s
+    in float32 against 595, 826 in float16 against 698. The values read
+    are the same.
+  - A paged or continuous step that consumed a lane's states and whose
+    rows then fail to normalize names those slots lost (`:lost-slots`),
+    where they were left holding consumed states.
+  - `gen.array/paged-attention` on MLX's Metal: past v1's threadgroup
+    memory (tables of about 8,000 positions) kernels-community's v2
+    runs (partitions of 512 positions, then its reduction kernel,
+    ported per THIRD-PARTY-NOTICES), where the composite ran. A decode
+    step of Qwen3-0.6B at 16,384 positions: 78 ms (1 row) and 279 ms
+    (8 rows) against the composite's 351 and 3338.
+
 - **Changed (experimental): the paged mode copies a block only for a
   second writer; Qwen3.5 runs paged** (genclj-6qb6, genclj-1ovd).
   - `gen.llm.paged`: an allocator records each block's written offsets

@@ -14,6 +14,8 @@
       and leaves the others;
    4. on MLX's Metal the kernel (gen.backend.mlx.paged-attention) is the
       composite, in float32, float16 and bfloat16, head sizes 16 to 128;
+      and past v1's threadgroup memory, contexts to 32,768 positions,
+      v2 (partitions of 512, reduced) is the composite;
    5. the pools are values: a write leaves the pools it was given as they
       were;
    6. misuse is loud.
@@ -25,11 +27,14 @@
    a key's groups of x read in the other order (the D/x and x axes
    swapped in the layout, 1); the composite's mask one position short (2);
    on Metal the kernel given each sequence's length one short (4), which
-   shows the kernel ran.
+   shows the kernel ran, and v2's source changed (4): every partition
+   reading the first one's blocks, the partitions' sums not rescaled to
+   the largest score, every partition's output the first's.
    The bands: writes and copies are exact everywhere. Attention on the
    JVM backend (float64) 1e-12; on MLX float32's round-off, and the
    half floats' rounding of the output (below)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
             [gen.array.paged :as paged]
             [gen.random :as random]
@@ -253,6 +258,52 @@
                 (is (< 0.1 (with-redefs-fn {(requiring-resolve 'gen.backend.mlx.paged-attention/paged-attention)
                                             (fn [b q kp vp t l opts] (kernel b q kp vp t (array/maximum (array/- l 1) 0) opts))}
                              #(max-diff (array/paged-attention (:q dn) kp vp tables lens) composite))))))))))))
+
+(def ^:private long-cases
+  "Contexts past v1's threadgroup memory (8,192 positions of float32
+   scores): v2's partitions of 512, one to 64 of them, and lengths at a
+   partition's edges."
+  (for [dtype [:float32 :float16]]
+    {:lens [1 511 512 513 8191 8200 16385 32768 0] :hq 16 :hk 8 :d 128 :bs 16 :dtype dtype :seed 9}))
+
+(def ^:private long-band
+  "max |Δ| between v2 and the composite, by dtype: float32's round-off
+   over 32k positions, and a half float's rounding of each partition's
+   output and of the sum (upstream keeps the partials in the operands'
+   dtype), four times the largest measured on Metal (Mac mini M4,
+   2026-11-08: 3.1e-6 and 1.8e-4; the planted bugs below 0.16 to 0.28)."
+  {:float32 1.3e-5 :float16 8e-4})
+
+(def ^:private v2-mutations
+  "Planted bugs in v2's source (each var's string changed)."
+  {"every partition reads the first one's blocks"
+   ['gen.backend.mlx.paged-attention/body
+    "USE_PARTITIONING ? partition_idx * num_blocks_per_partition : 0" "USE_PARTITIONING ? 0 : 0"]
+   "the partitions' sums not rescaled to the largest score"
+   ['gen.backend.mlx.paged-attention/reduce-body
+    "float rescaled_exp_sum = exp_sums_ptr[i] * exp(l - max_logit);" "float rescaled_exp_sum = exp_sums_ptr[i];"]
+   "every partition's output the first's"
+   ['gen.backend.mlx.paged-attention/reduce-body
+    "acc += float(tmp_out_ptr[j * HEAD_SIZE + i])" "acc += float(tmp_out_ptr[i])"]})
+
+(deftest past-v1-the-partitioned-kernel-is-the-composite
+  (if-not (kernel-runs?)
+    (is true "MLX's Metal only")
+    (doseq [c long-cases]
+      (testing (pr-str (dissoc c :seed))
+        (let [[kp vp tables lens dn] (written c)
+              applies? (requiring-resolve 'gen.backend.mlx.paged-attention/applies?)
+              composite (with-redefs-fn {#'paged/fused-attention (fn [& _] nil)}
+                          #(doto (array/paged-attention (:q dn) kp vp tables lens) array/eval!))
+              gap #(max-diff (array/paged-attention (:q dn) kp vp tables lens) composite)]
+          (is (applies? array/*backend* (:q dn) kp tables) "a kernel takes it")
+          (is (<= (gap) (long-band (:dtype c))))
+          (when (= :float32 (:dtype c))
+            (doseq [[label [sym from to]] v2-mutations
+                    :let [v (requiring-resolve sym)]]
+              (testing (str "planted: " label)
+                (is (some? (str/index-of @v from)) "the mutation applies")
+                (is (< 0.1 (with-redefs-fn {v (str/replace @v from to)} gap)))))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; 5. Values
