@@ -20,7 +20,8 @@
    Planted bugs fail them (with-redefs-fn), by more than 0.1 or loudly
    (measured on the JVM backend, 2026-11-07): a slot's block and offset
    swapped (1: an index past the pool); on MLX the fused write given
-   the values as keys and the keys as values (1);
+   the values as keys and the keys as values (1), and the fused block put
+   its blocks in reverse (3);
    a key's groups of x read in the other order (the D/x and x axes
    swapped in the layout, 1); the composite's mask one position short (2);
    on Metal the kernel given each sequence's length one short (4), which
@@ -206,7 +207,16 @@
     (doseq [i [0 1 2 3]]
       (is (== 0.0 (max-diff (blk out i) (blk pool i))) (str "block " i " left")))
     (is (= (array/shape pool) (array/shape (array/copy-blocks pool (array/array [] {:dtype :int32}) (array/array [] {:dtype :int32}))))
-        "no blocks: the pool")))
+        "no blocks: the pool")
+    (let [copy #(array/copy-blocks pool (array/array [1 4] {:dtype :int32}) (array/array [4 5] {:dtype :int32}))]
+      (is (== 0.0 (max-diff out (with-redefs-fn {#'paged/fused (fn [& _] nil)} copy)))
+          "the composite (put-along-axis) and a backend's fused put alike")
+      (when (= :mlx (ts/backend-name))
+        (let [v (requiring-resolve 'gen.backend.mlx.paged/put-blocks)
+              put @v]
+          (is (< 0.1 (max-diff out (with-redefs-fn {v (fn [b pool blocks dst] (put b pool (array/take blocks (array/array [1 0] {:dtype :int32}) 0) dst))}
+                                     copy)))
+              "planted: MLX's put given its blocks in reverse"))))))
 
 ;; ---------------------------------------------------------------------------
 ;; 4. The kernel (MLX's Metal)
