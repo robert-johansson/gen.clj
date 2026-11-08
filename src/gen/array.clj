@@ -1569,7 +1569,7 @@
      \"blk.0.attn_q.weight\"), its shape outermost first (a matrix
      weight [out in]). F32 and I32 load as float32 and int32 arrays, F16
      and BF16 as float16 and bfloat16 (float32 on a backend without them,
-     the JVM's). Q8_0, Q4_0,
+     the JVM's: the same values). Q8_0, Q4_0,
      Q4_1, Q5_0, Q5_1, Q4_K and Q5_K load as MLX's affine quantization,
      {:wq :scales :biases :bits :group-size}, the arguments and options of
      dequantize and quantized-matmul: groups of 32 (a K-quant's

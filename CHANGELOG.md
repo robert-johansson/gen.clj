@@ -94,11 +94,39 @@ other values for the same key, from the same distribution.
     (the +1 missed moves it 25.6; A_log's sign gives NaN); Qwen/Qwen3-0.6B
     against the F16 GGUF, 4.4e-5, argmax 128 of 128 (weights apart by
     float16's subnormals only, 3e-8).
+
 - **Changed (experimental): `gen.array/load-gguf` loads BF16** (genclj-9pn4,
   PROVISIONAL), as bfloat16 on MLX (by the host reader: MLX's loader is
   not trusted with it) and float32 on the JVM backend, where it was
   `:unsupported`; test/fixtures/gguf/unsupported-bf16.gguf is now
   bf16.gguf, with its values (bf16.edn).
+
+- **Added (experimental): `gen.llm.convert`, models converted between
+  quantizations** (genclj-t007, PROVISIONAL).
+  - `convert!` writes a GGUF file's model as another GGUF file, each
+    tensor at the type its recipe gives: F32, F16, BF16, Q8_0, Q4_0,
+    Q4_1, Q5_0, Q5_1, Q4_K, Q5_K and Q6_K. It runs on the host, a tensor
+    at a time, with no backend.
+  - The types are encoded by llama.cpp's reference quantizers, ported
+    (`gen.array.gguf.quants`). A file is llama-quantize's from the same
+    source, byte for byte: ggml-org's Qwen3-0.6B as Q8_0 (2.2 s on the
+    M4) and Q4_K_M (27 s), and Qwen3.5-0.8B as Q4_K_M and Q8_0.
+  - A recipe is one of llama.cpp's file types (`:q4_k_m`, `:q8_0`, `:bf16`,
+    …, with llama.cpp's per-tensor choices and fallbacks), or rules
+    `[pattern value]` ending in one, as llama-quantize's `--tensor-type`.
+  - `quantize` holds MLX's affine layouts in memory (any of MLX's bits and
+    group sizes, through `gen.array/quantize`), with mlx-lm's recipes
+    (`:mlx-4bit`, `:mlx-mixed-4-6`, …). No GGUF type holds them, and no
+    file does yet.
+  - `plan` shows each tensor's type without writing.
+
+- **Changed (experimental): `gen.array.gguf/write-gguf` writes every type
+  above** (genclj-t007), from `:data` (values, encoded) or `:bytes`
+  (copied), either one given as a function, so a converter holds one
+  tensor at a time. It used to write F32 only. It honors
+  `general.alignment`. `gen.array.gguf/header` also gives `:keys`, the
+  metadata's keys in the file's order, and `gen.array.gguf/host-values`
+  reads any loaded tensor's values as a float[] on the host.
 
 - **Added (experimental): K-quants in `gen.array/load-gguf`** (genclj-kqxr,
   PROVISIONAL): Q4_K, Q5_K and Q6_K, and Q5_0 and Q5_1 (Q4_K_M's

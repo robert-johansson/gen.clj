@@ -29,6 +29,11 @@
        two sub-blocks of different scales share no affine group;
      - BF16 as bfloat16 (float32 on a backend without it), its bits.
      Every other type is a loud error.
+   - Writing (write-gguf): a file of F32, F16, BF16, Q8_0, Q4_0, Q4_1,
+     Q5_0, Q5_1, Q4_K, Q5_K and Q6_K tensors, from their values (encoded
+     by llama.cpp's reference quantizers, gen.array.gguf.quants) or their
+     bytes (copied), for gen.llm.lora's adapters and gen.llm.convert's
+     models.
 
    Dimensions: GGML lists a tensor's innermost first; a shape here is
    gen.array's (outermost first, as MLX reverses them), so a matrix
@@ -36,6 +41,8 @@
    §9). Written in plain Clojure: it requires nothing of gen.array."
   {:api :internal}
   (:require [clojure.string :as str]
+            [gen.array.gguf.quants :as quants]
+            [gen.array.host :as host]
             [gen.array.protocols :as p])
   (:import [java.nio ByteBuffer ByteOrder]
            [java.util Collection]
@@ -179,9 +186,10 @@
 
 (defn header
   "The header of the GGUF file at path: {:path :version :metadata
-   :value-types :tensors}, :metadata a map of keys (strings) to host
+   :value-types :keys :tensors}, :metadata a map of keys (strings) to host
    values, :value-types each key's GGUF value type (a keyword of
-   value-types, or [:array element-type]), :tensors a
+   value-types, or [:array element-type]), :keys the keys in the file's
+   order, :tensors a
    vector of {:name :type :shape :offset :bytes} in the file's order:
    :type a keyword of ggml-types, :shape gen.array's (outermost first),
    :offset the data's absolute position in the file, and :bytes its size
@@ -202,16 +210,17 @@
                   (throw (invalid path (str "GGUF version " version " is not supported (2 and 3 are)") {:version version})))
               n-tensors (count-of path b "tensors")
               n-kv (count-of path b "metadata keys")
-              [metadata types] (loop [i 0 m (transient {}) ts (transient {})]
-                                 (if (< i n-kv)
-                                   (let [k (read-string* path b)
-                                         t (Integer/toUnsignedLong (.getInt b))
-                                         ;; an array's element type follows
-                                         et (when (= 9 t) (Integer/toUnsignedLong (.getInt b (.position b))))
-                                         v (read-value path b t)]
-                                     (recur (inc i) (assoc! m k v)
-                                            (assoc! ts k (if et [:array (value-types et et)] (value-types t t)))))
-                                   [(persistent! m) (persistent! ts)]))
+              [metadata types order] (loop [i 0 m (transient {}) ts (transient {}) ks (transient [])]
+                                       (if (< i n-kv)
+                                         (let [k (read-string* path b)
+                                               t (Integer/toUnsignedLong (.getInt b))
+                                               ;; an array's element type follows
+                                               et (when (= 9 t) (Integer/toUnsignedLong (.getInt b (.position b))))
+                                               v (read-value path b t)]
+                                           (recur (inc i) (assoc! m k v)
+                                                  (assoc! ts k (if et [:array (value-types et et)] (value-types t t)))
+                                                  (conj! ks k)))
+                                         [(persistent! m) (persistent! ts) (persistent! ks)]))
               infos (loop [i 0 out (transient [])]
                       (if (< i n-tensors)
                         (let [nm (read-string* path b)
@@ -234,7 +243,7 @@
                                   (throw (invalid path (str "tensor " name "'s data lies past the end of the file") {:tensor name})))
                                 {:name name :type type :shape shape :offset at :bytes n}))
                             infos)]
-          {:path (str path) :version version :metadata metadata :value-types types :tensors tensors})
+          {:path (str path) :version version :metadata metadata :value-types types :keys order :tensors tensors})
         (catch java.nio.BufferUnderflowException _
           (throw (invalid path "the header is cut short" {})))))))
 
@@ -567,8 +576,8 @@
    on the host into primitive arrays:
    - a plain type, and Q6_K: {:dtype :shape :data}, data a float[]
      (:float32: F32's values, and Q6_K's, d·sc·(q - 32) in float32 as
-     llama.cpp computes them, exactly), a short[] (:float16: F16's bits;
-     :bfloat16: BF16's) or an int[] (:int32);
+     llama.cpp computes them, exactly), a short[] (:float16 and
+     :bfloat16: F16's and BF16's bits) or an int[] (:int32);
    - a quantized type: {:quantized [words scales biases] :shapes [words'
      scales' biases'] :bits}, MLX's affine quantization in groups of 32:
      words an int[] (uint32 bits), scales and biases float[]s.
@@ -607,9 +616,10 @@
                  :q6_k (let [out (float-array n)] (decode! (quot n 256) 210 #(q6-k! b out %1 %2)) out))}))))
 
 (defn- doubles-of
-  "A host array's values as doubles: a word's (an int's bits) as an
-   unsigned integer, a float16's bits as their value."
-  ^doubles [data]
+  "A host array's values as doubles: an int's as an integer, a 16-bit
+   float's bits (dtype's: :float16 or :bfloat16) as their value
+   (gen.array.host/halves->floats)."
+  ^doubles [data dtype]
   (condp instance? data
     float/1 (let [^floats a data out (double-array (alength a))]
               (dotimes [i (alength a)] (aset out i (double (aget a i))))
@@ -617,17 +627,7 @@
     int/1 (let [^ints a data out (double-array (alength a))]
             (dotimes [i (alength a)] (aset out i (double (aget a i))))
             out)
-    short/1 (let [^shorts a data out (double-array (alength a))]
-              (dotimes [i (alength a)] (aset out i (double (Float/float16ToFloat (aget a i)))))
-              out)))
-
-(defn- bfloat16s-of
-  "A bfloat16's bits (a short[]) as their values, doubles."
-  ^doubles [^shorts a]
-  (let [out (double-array (alength a))]
-    (dotimes [i (alength a)]
-      (aset out i (double (Float/intBitsToFloat (bit-shift-left (bit-and (long (aget a i)) 0xffff) 16)))))
-    out))
+    short/1 (doubles-of (host/halves->floats data dtype) :float32)))
 
 (defn- words-of
   "The uint32 words of an int[] (their bits), as doubles."
@@ -644,11 +644,44 @@
    :bits} for a quantized one (MLX's affine layout in groups of 32: words
    uint32 values, scales and biases float32 values, as doubles)."
   [path info]
-  (let [{:keys [quantized data] :as t} (host-tensor path info)]
+  (let [{:keys [quantized data dtype] :as t} (host-tensor path info)]
     (if quantized
       (let [[words scales biases] quantized]
-        (assoc t :quantized [(words-of words) (doubles-of scales) (doubles-of biases)]))
-      (assoc t :data (if (= :bfloat16 (:dtype t)) (bfloat16s-of data) (doubles-of data))))))
+        (assoc t :quantized [(words-of words) (doubles-of scales :float32) (doubles-of biases :float32)]))
+      (assoc t :data (doubles-of data dtype)))))
+
+(defn host-values
+  "The values of the tensor of the file at path described by info
+   (header's), row-major, as a new float[]: a float type's, or a quantized
+   one's dequantized as llama.cpp's dequantize_row_* computes them (each
+   value scale·q + bias in float32, the product exact), so exactly its
+   values. Loud (:unsupported) for an I32 tensor, which holds no floats."
+  ^floats [path {:keys [name type] :as info}]
+  (let [{:keys [dtype data quantized bits]} (host-tensor path info)]
+    (cond
+      quantized
+      (let [[^ints words ^floats scales ^floats biases] quantized
+            bits (long bits)
+            mask (dec (bit-shift-left 1 bits))
+            n (* (alength scales) (long group-size))
+            out (float-array n)]
+        (dotimes [g (alength scales)]
+          (let [w0 (* g bits)
+                s (double (aget scales g))
+                c (double (aget biases g))]
+            (dotimes [t group-size]
+              (let [bit (* t bits)
+                    w (+ w0 (quot bit 32))
+                    lo (Integer/toUnsignedLong (aget words w))
+                    hi (if (< (+ w 1) (+ w0 bits)) (Integer/toUnsignedLong (aget words (+ w 1))) 0)
+                    q (bit-and (unsigned-bit-shift-right (bit-or lo (bit-shift-left hi 32)) (rem bit 32)) mask)]
+                (aset out (+ (* g (long group-size)) t) (unchecked-float (+ (* s (double q)) c)))))))
+        out)
+      (= :float32 dtype) data
+      (#{:float16 :bfloat16} dtype) (host/halves->floats data dtype)
+      :else
+      (throw (ex-info (str "host-values: tensor " name " is " (clojure.core/name type) ", which holds no floats")
+                      {:reason :unsupported :tensor name :type type})))))
 
 ;; ---------------------------------------------------------------------------
 ;; Loading
@@ -680,7 +713,7 @@
      :files (mapv :path hs)}))
 
 ;; ---------------------------------------------------------------------------
-;; Writing (gen.llm.lora's adapters for llama.cpp)
+;; Writing (gen.llm.lora's adapters for llama.cpp, gen.llm.convert's models)
 ;; ---------------------------------------------------------------------------
 
 (def ^:private value-type-ids (into {} (map (fn [[id t]] [t id])) value-types))
@@ -745,44 +778,102 @@
 
 (defn- type-id ^long [t] (long (value-type-ids (if (vector? t) :array t))))
 
-(def ^:private writable
-  "The tensor types write-gguf writes: their GGML ids and bytes a value."
-  {:f32 {:id 0 :bytes 4}})
-
 (defn- padded ^long [^long n ^long align] (* align (quot (+ n (dec align)) align)))
 
-(defn- check-tensor [{:keys [name type shape data]}]
+(defn- writable-bytes
+  "The bytes a tensor {:type :shape} takes in the file."
+  ^long [{:keys [type shape]}]
+  (quants/tensor-bytes type (reduce * 1 shape)))
+
+(defn- check-data
+  "data, tensor t's values: a float[] of its size."
+  ^floats [{:keys [name shape]} data]
   (let [n (reduce * 1 shape)]
-    (when-not (and (string? name) (seq name))
-      (throw (ex-info (str "write-gguf: a tensor's name is a non-empty string, not " (pr-str name)) {:reason :invalid-args :tensor name})))
-    (when-not (writable type)
-      (throw (ex-info (str "write-gguf: tensor " name " is " (pr-str type) ", a type not written (" (vec (keys writable)) " are)")
-                      {:reason :unsupported :tensor name :type type})))
-    (when-not (and (vector? shape) (<= 1 (count shape) 4) (every? pos-int? shape))
-      (throw (ex-info (str "write-gguf: tensor " name "'s shape is 1 to 4 positive sizes, not " (pr-str shape))
-                      {:reason :invalid-args :tensor name :shape shape})))
     (when-not (and (instance? (Class/forName "[F") data) (= (long n) (alength ^floats data)))
       (throw (ex-info (str "write-gguf: tensor " name "'s data is a float[] of its " n " values")
-                      {:reason :invalid-args :tensor name :shape shape})))))
+                      {:reason :invalid-args :tensor name :shape shape})))
+    data))
+
+(defn- check-tensor [{:keys [name type shape data bytes] :as t}]
+  (when-not (and (string? name) (seq name))
+    (throw (ex-info (str "write-gguf: a tensor's name is a non-empty string, not " (pr-str name)) {:reason :invalid-args :tensor name})))
+  (when-not (quants/types type)
+    (throw (ex-info (str "write-gguf: tensor " name " is " (pr-str type) ", a type not written ("
+                         (str/join ", " (map pr-str (sort (keys quants/types)))) " are)")
+                    {:reason :unsupported :tensor name :type type})))
+  (when-not (and (vector? shape) (<= 1 (count shape) 4) (every? pos-int? shape))
+    (throw (ex-info (str "write-gguf: tensor " name "'s shape is 1 to 4 positive sizes, not " (pr-str shape))
+                    {:reason :invalid-args :tensor name :shape shape})))
+  (let [values (long (:values (quants/types type)))]
+    (when-not (zero? (rem (long (peek shape)) values))
+      (throw (ex-info (str "write-gguf: tensor " name "'s innermost axis (" (peek shape) ") is not a multiple of "
+                           (clojure.core/name type) "'s block of " values " values")
+                      {:reason :invalid-args :tensor name :shape shape :type type}))))
+  (when-not (= 1 (count (filter some? [data bytes])))
+    (throw (ex-info (str "write-gguf: tensor " name " has :data (its values) or :bytes (its encoding), one of them")
+                    {:reason :invalid-args :tensor name})))
+  (when (and data (= :i32 type))
+    (throw (ex-info (str "write-gguf: tensor " name " is I32, which is copied (:bytes), not encoded from :data")
+                    {:reason :unsupported :tensor name :type type})))
+  (when (and data (not (fn? data)))
+    (check-data t data))
+  t)
+
+(defn- tensor-buffer
+  "Tensor t's bytes in the file, from :bytes (a byte[] or a ByteBuffer, or
+   a function of no arguments giving one) or from :data (a float[], or a
+   function giving one), encoded as its type (gen.array.gguf.quants)."
+  ^ByteBuffer [{:keys [name type data bytes] :as t}]
+  (if bytes
+    (let [v (if (fn? bytes) (bytes) bytes)
+          ^ByteBuffer b (cond (bytes? v) (ByteBuffer/wrap ^bytes v)
+                              (instance? ByteBuffer v) (.duplicate ^ByteBuffer v)
+                              :else (throw (ex-info (str "write-gguf: tensor " name "'s bytes are a byte[] or a ByteBuffer")
+                                                    {:reason :invalid-args :tensor name})))]
+      (when-not (= (writable-bytes t) (long (.remaining b)))
+        (throw (ex-info (str "write-gguf: tensor " name "'s bytes are " (.remaining b) ", not its " (writable-bytes t))
+                        {:reason :invalid-args :tensor name :bytes (.remaining b) :expected (writable-bytes t)})))
+      b)
+    (let [x (check-data t (if (fn? data) (data) data))]
+      (quants/encode type x))))
+
+(defn- alignment
+  "The data's alignment metadata asks for (general.alignment, a uint32), or
+   32, GGUF's default."
+  ^long [metadata]
+  (if-let [[_ t v] (first (filter #(= "general.alignment" (first %)) metadata))]
+    (do (when-not (and (= :uint32 t) (pos-int? v) (zero? (bit-and (long v) (dec (long v)))) (zero? (rem (long v) 8)))
+          (throw (ex-info (str "write-gguf: general.alignment is a uint32 power of 2 of at least 8, not " (pr-str [t v]))
+                          {:reason :invalid-args :key "general.alignment" :value v})))
+        (long v))
+    32))
 
 (defn write-gguf
   "Writes a GGUF file (version 3) at path, as llama.cpp's gguf-py writes
    one: the header, the metadata entries in their order, the tensors'
-   descriptions, then each tensor's data, every part aligned to 32 bytes.
-   metadata is a sequence of [key value-type value] entries, value-type a
-   keyword of value-types (:string, :float32, :uint32, …) or [:array
-   element-type]; tensors a sequence of {:name :type :shape :data}, :type
-   :f32, :shape gen.array's (outermost first; the file lists GGML's
-   reversed order), :data a float[] of the values, row-major. Loud
-   (:invalid-args) for a value that does not fit its type, a key or a
-   tensor named twice, or data of another size; another tensor type is
+   descriptions, then each tensor's data, every part aligned to 32 bytes
+   (or general.alignment's). metadata is a sequence of [key value-type
+   value] entries, value-type a keyword of value-types (:string,
+   :float32, :uint32, …) or [:array element-type]; tensors a sequence of
+   {:name :type :shape} maps, :shape gen.array's (outermost first; the
+   file lists GGML's reversed order), each with one of
+   - :data, its values, row-major: a float[], or a function of no
+     arguments that gives one when the tensor is written (so a converter
+     holds one tensor at a time); encoded as :type (F32, F16, BF16, Q8_0,
+     Q4_0, Q4_1, Q5_0, Q5_1, Q4_K, Q5_K or Q6_K: a keyword of
+     gen.array.gguf.quants/types) by llama.cpp's reference quantizer
+     (gen.array.gguf.quants);
+   - :bytes, its encoding as :type already: a byte[] or a ByteBuffer, or
+     a function that gives one (a tensor copied from another file).
+   Loud (:invalid-args) for a value that does not fit its type, a key or a
+   tensor named twice, data of another size, or an innermost axis that is
+   not a whole number of the type's blocks; another tensor type is
    :unsupported. The file is written beside path and moved over it once
    complete and forced to the disk, so a reader never sees it half
    written. Returns path."
   [path {:keys [metadata tensors]}]
   (let [metadata (vec metadata)
-        tensors (vec tensors)
-        align 32]
+        tensors (vec tensors)]
     (doseq [[k v] (frequencies (concat (map first metadata) (map :name tensors)))]
       (when (> (long v) 1)
         (throw (ex-info (str "write-gguf: " (pr-str k) " is named more than once") {:reason :invalid-args :name k}))))
@@ -790,7 +881,8 @@
       (when-not (and (vector? e) (= 3 (count e)) (string? (first e)))
         (throw (ex-info (str "write-gguf: a metadata entry is [key value-type value], not " (pr-str e)) {:reason :invalid-args :entry e}))))
     (run! check-tensor tensors)
-    (let [sizes (mapv (fn [{:keys [type shape]}] (* (long (:bytes (writable type))) (long (reduce * 1 shape)))) tensors)
+    (let [align (alignment metadata)
+          sizes (mapv writable-bytes tensors)
           offsets (vec (reductions (fn [^long o ^long n] (+ o (padded n align))) 0 sizes))
           header-size (+ 24
                          (long (reduce + 0 (map (fn [[k t v]] (+ 12 (alength (string-bytes k)) (value-size k t v))) metadata)))
@@ -811,17 +903,22 @@
         (put-string! head name)
         (.putInt head (count shape))
         (doseq [d (reverse shape)] (.putLong head (long d)))
-        (.putInt head (unchecked-int (long (:id (writable type)))))
+        (.putInt head (unchecked-int (long (:id (quants/types type)))))
         (.putLong head (long offset)))
       (.rewind head)
-      (with-open [ch (FileChannel/open tmp (into-array OpenOption [StandardOpenOption/CREATE StandardOpenOption/WRITE
-                                                                   StandardOpenOption/TRUNCATE_EXISTING]))]
-        (while (.hasRemaining head) (.write ch head))
-        (doseq [[{:keys [^floats data]} ^long size] (map vector tensors sizes)]
-          (let [b (doto (ByteBuffer/allocate (padded size align)) (.order ByteOrder/LITTLE_ENDIAN))]
-            (.put (.asFloatBuffer b) data)
-            (while (.hasRemaining b) (.write ch b))))
-        (.force ch true))
+      (try
+        (with-open [ch (FileChannel/open tmp (into-array OpenOption [StandardOpenOption/CREATE StandardOpenOption/WRITE
+                                                                     StandardOpenOption/TRUNCATE_EXISTING]))]
+          (while (.hasRemaining head) (.write ch head))
+          (doseq [[t ^long size] (map vector tensors sizes)]
+            (let [b (tensor-buffer t)
+                  pad (ByteBuffer/allocate (- (padded size align) size))]
+              (while (.hasRemaining b) (.write ch b))
+              (while (.hasRemaining pad) (.write ch pad))))
+          (.force ch true))
+        (catch Throwable e
+          (Files/deleteIfExists tmp)
+          (throw e)))
       (Files/move tmp target (into-array java.nio.file.CopyOption [java.nio.file.StandardCopyOption/REPLACE_EXISTING
                                                                    java.nio.file.StandardCopyOption/ATOMIC_MOVE]))
       (str path))))

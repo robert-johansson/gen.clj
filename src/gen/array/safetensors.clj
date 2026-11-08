@@ -24,6 +24,7 @@
    plain Clojure: it requires nothing of gen.array."
   {:api :internal}
   (:require [clojure.string :as str]
+            [gen.array.host :as host]
             [gen.array.json :as json]
             [gen.array.protocols :as p])
   (:import [java.nio ByteBuffer ByteOrder]
@@ -244,10 +245,10 @@
       (case type
         :f32 (let [a (float-array n)] (.get (.asFloatBuffer b) a) (dotimes [i n] (aset out i (double (aget a i)))))
         :f64 (.get (.asDoubleBuffer b) out)
-        :f16 (let [a (short-array n)] (.get (.asShortBuffer b) a) (dotimes [i n] (aset out i (double (Float/float16ToFloat (aget a i))))))
-        :bf16 (let [a (short-array n)]
-                (.get (.asShortBuffer b) a)
-                (dotimes [i n] (aset out i (double (Float/intBitsToFloat (bit-shift-left (bit-and (long (aget a i)) 0xffff) 16))))))
+        (:f16 :bf16) (let [a (short-array n)
+                           _ (.get (.asShortBuffer b) a)
+                           f (host/halves->floats a dtype)]
+                       (dotimes [i n] (aset out i (double (aget f i)))))
         :i32 (let [a (int-array n)] (.get (.asIntBuffer b) a) (dotimes [i n] (aset out i (double (aget a i)))))
         :u32 (let [a (int-array n)] (.get (.asIntBuffer b) a) (dotimes [i n] (aset out i (double (Integer/toUnsignedLong (aget a i))))))
         :i64 (let [a (long-array n)]

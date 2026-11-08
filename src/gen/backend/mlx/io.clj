@@ -73,7 +73,8 @@
 
 (defn- host-array
   "An array of shape and dtype of the host's data: a float[] (float32), a
-   short[] (float16's bits) or an int[] (int32, or uint32's bits)."
+   short[] (float16's or bfloat16's bits) or an int[] (int32, or uint32's
+   bits)."
   [b data shape dtype]
   (with-open [arena (Arena/ofConfined)]
     (let [seg (condp instance? data
