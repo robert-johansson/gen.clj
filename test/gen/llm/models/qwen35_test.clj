@@ -53,6 +53,7 @@
             [gen.array.nn]
             [gen.llm.models.common :as common]
             [gen.llm.models.qwen35 :as qwen35]
+            [gen.random :as rng]
             [gen.test-support :as ts]))
 
 (def ^:private files
@@ -327,6 +328,32 @@
               g (host ((array/grad (log-p-of f32 [path])) (get-in f32 path)))]
           (is (< 1e-3 (/ (Math/abs (- (get-in g [3 0]) (central-difference f32 path [3 1])))
                          (Math/abs (central-difference f32 path [3 1]))))))))))
+
+(deftest top-k-by-ranks-is-top-k-by-picks
+  ;; the router's top k by ranks (a decode step's) against k argmaxes,
+  ;; index for index: probabilities, and entries of 3 levels (ties in
+  ;; every row: the first of equal entries first), up to k = E. Planted
+  ;; bugs: ties broken last first fails the levels' cases; a rank counting
+  ;; equal entries after it too (>= for >) fails them; values read at the
+  ;; next index fail every case
+  (let [ranked @#'qwen35/ranked
+        picked @#'qwen35/picked
+        top-k @#'qwen35/top-k
+        cases (for [[i [n e k]] (map-indexed vector [[1 4 2] [6 16 8] [5 256 8] [3 9 9] [2 7 1]])
+                    levels? [false true]]
+                (let [u (rng/uniform (rng/key i) [n e])]
+                  [[n e k levels?] (if levels? (array/floor (array/* 3 u)) (array/softmax (array/log u) {:axis -1})) k]))]
+    (doseq [[what p k] cases]
+      (testing (pr-str what)
+        (let [want (picked p k)
+              [idx vals] (top-k p k)]
+          (is (= :int32 (array/dtype (ranked p k)) (array/dtype idx)))
+          (is (= (ts/host want) (ts/host (ranked p k)) (ts/host idx)))
+          (is (= (ts/host (array/take-along-axis p want -1)) (ts/host vals))))))
+    (testing "beyond ranked-limit, top-k picks"
+      (with-redefs [qwen35/ranked-limit 0]
+        (let [[_ p k] (last cases)]
+          (is (= (ts/host (picked p k)) (ts/host (first (top-k p k))))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; 5. MLX against the JVM backend
