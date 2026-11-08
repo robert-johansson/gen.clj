@@ -268,8 +268,12 @@
    computing in dtype: float32 for a half float, else dtype. The router
    picks the top k of its logits: rounded to a half float (an ulp of
    2^-7 at 8), they tie or swap experts whose logits are close, and each
-   such flip changes a layer's output by a whole expert's share
-   (genclj-fxag)."
+   such flip changes a layer's output by a whole expert's share. On
+   Qwen3.6-35B-A3B in float16 (genclj-fxag, bench/gen/moe_routing.clj),
+   given the float32 forward's experts upstream, this halves the layers
+   and positions whose top k differs from it (1.9% to 1.0%); the rest
+   come from the half-float input and cascade through later layers and
+   positions."
   [dtype]
   (if (#{:float16 :bfloat16} dtype) :float32 dtype))
 

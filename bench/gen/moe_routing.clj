@@ -34,6 +34,33 @@
    variants' planted convention errors (against-llama/mutated) on the
    general prompts.
 
+   Measured on fenrir (RTX PRO 6000, MLX 0.32.4, 2026-11-08,
+   Qwen3.6-35B-A3B Q4_K_M, 40 prompts: 1,246 positions, 40 layers; the
+   CPU's readings 1389 s, a variant about 40 s):
+   - f32: 10 top-k sets of 49,840 differ (0.02%), at 4 positions of the
+     two prompts whose gap jumps (0.23 and 0.40 nats), each first at a
+     near-tie (the CPU's log p_8/p_9 4.8e-7, 3.1e-4), the rest after it.
+     Every position with no flip at or before it is within 1.2e-4;
+     f32-forced within 5.4e-4.
+   - f16-old: 14.5% differ (1.2% in layer 0, about 20% from layer 20), at
+     78% of the positions. The gap where no flip came before: median
+     0.011, at most 0.09; at a flip median 0.27, at most 6.07. The
+     readings' (cuda-reference-noise's) medians 0.17-0.21 (general) and
+     0.49-0.58 (digits), at most 2.71 and 6.07.
+   - f16-old-forced: every position within 0.24 (median 0.015), as the
+     dense models' float16; its own router would differ at 1.9%, mostly
+     ties of float16 logits.
+   - f16: 11.6% differ (65% of positions); the readings' medians
+     0.12-0.15 and 0.32-0.36, at most 2.74 and 6.01; f16-forced within
+     0.17 (median 0.015), its own router differing at 1.0%, its readings
+     at most 3.97e-2 and 0.172 (medians 0.013-0.022), the planted errors
+     at least 0.057 (RoPE's traditional pairs; median 0.204), the
+     others 2.25.
+   The flips, not float16's rounding elsewhere, make the gap: forced to
+   the CPU's experts, float16 is as close as a dense model's. A flip at
+   a near-tie moves the hidden state, which flips more experts in later
+   layers and positions.
+
    Run on MLX's CUDA, one GPU JVM at a time (the CPU's model about 31 GB
    resident; then CUDA's):
      clojure -J-Dgen.backend=mlx -J-Dgen.llama.lib=<lib> -M:bench -m gen.moe-routing Qwen3.6-35B-A3B-Q4_K_M.gguf"

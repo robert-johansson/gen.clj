@@ -49,12 +49,20 @@
    - Qwen3.6-35B-A3B Q4_K_M (the MoE: 256 experts, 8 used): float32
      6.20e-5, 0.397 (median 1.1e-5 to 3.1e-5), the band 0.80: 38 of the
      40 prompts within 1.2e-4, two texts of numbers at 0.23 and 0.40, a
-     jump rather than a drift (most likely an expert picked otherwise at
-     a near-tie of the router's top 8, not confirmed). float16 2.71, 6.07
-     (median 0.17 to 0.58), the band 12.2: as far from the float32
-     forward as llama.cpp's CUDA build is (its band 12.3), where the dense
-     models' float16 is 0.02 nats away (median). The argmax equal in 400
-     and 394 of 400, the top 5 in 398 and 347.
+     jump rather than a drift: an expert picked otherwise at a near-tie
+     of the router's top 8 (the CPU's log p_8/p_9 4.8e-7 and 3.1e-4;
+     genclj-fxag, bench/gen/moe_routing.clj). float16 2.71, 6.07 (median
+     0.17 to 0.58) with the router in float16; in float32 since
+     genclj-fxag 2.74, 6.01 (median 0.12 to 0.36), the band 12.2: as far
+     from the float32 forward as llama.cpp's CUDA build is (its band
+     12.3), where the dense models' float16 is 0.02 nats away (median).
+     The argmax equal in 400 and 394 of 400, the top 5 in 398 and 347.
+     Float16 flips the router's top k at 12% of a prompt's layers and
+     positions, each flip moving the hidden state and flipping more.
+     With the CPU's experts forced (against-llama's :forced) float16 is
+     3.97e-2, 0.172 away (median 1.3e-2 to 2.2e-2), the band 0.35: as
+     close as the dense models'. The argmax equal in 399 of 400, the top
+     5 in 398.
 
    The planted convention errors are asserted in float32, where the band
    is tight: they are the same code in both dtypes, and the MoE's float16
@@ -83,6 +91,15 @@
    RoPE pairs 1.68 (the others 5.51 to 25.2); Qwen3.6-35B-A3B's RoPE
    pairs 1.19, outside the band 0.80 on 2 of the 5 prompts (the others
    7.25 to 23.0).
+
+   A mixture of experts' float16 is checked with the CPU's experts forced
+   too (float16-forward-with-the-cpu-s-experts-is-the-cpu-s), where its
+   band is tight and the planted errors are asserted outside it: the
+   router's flips at near-ties are float16's own, and forcing the CPU's
+   experts leaves the rest of the forward to check. The bench's planted
+   errors so (the least and the median over the 20 general prompts):
+   RoPE's traditional pairs 0.057 and 0.204 (at most 0.857); the others
+   2.25 (the conv state's oldest inputs) to 10.8 at least.
 
    The Thor (sm_110, aarch64): unmeasured. The test runs there as it is,
    given MLX's CUDA build for sm_110, llama.cpp's aarch64 library (for

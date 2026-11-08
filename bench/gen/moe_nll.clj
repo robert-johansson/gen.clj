@@ -10,6 +10,13 @@
    spread). The text: the files of gen.bench.texts (default README.md and
    DESIGN.md, read in order and cut to gen.bench.windows windows, 16).
 
+   Measured on fenrir (2026-11-08, Qwen3.6-35B-A3B Q4_K_M, 16 windows of
+   256, 4,080 tokens predicted): float32 2.9683 nats a token; float16
+   -0.0039 ± 0.0020 from it, f16-old -0.0025 ± 0.0014. A token's |Δ| at
+   the median 0.016 (0.019), p90 0.10 (0.11), at most 0.87 (0.86).
+   Float16 predicts as well as float32: its routing flips (bench/gen/
+   moe_routing.clj) move single predictions, not their quality.
+
      clojure -J-Dgen.backend=mlx -J-Dgen.llama.lib=<lib> -M:bench -m gen.moe-nll <qwen35moe GGUF>
 
    One GPU JVM at a time (llama.cpp's library for the tokenizer only)."

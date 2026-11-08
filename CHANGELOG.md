@@ -38,6 +38,21 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Changed (experimental): a mixture of experts' router computes in
+  float32 under half floats** (genclj-fxag; **Draws**, a Qwen3.5/3.6
+  mixture of experts loaded in float16 or bfloat16, on CUDA and Metal).
+  `gen.llm.models.qwen35` loads the router's weights (`ffn_gate_inp`,
+  F32 in llama.cpp's files) in float32, and casts the normed input up
+  for its product, where both were rounded to the model's dtype and the
+  logits widened after. Half-float logits tie or swap experts at
+  near-ties of the router's top k. On Qwen3.6-35B-A3B Q4_K_M on CUDA in
+  float16, against MLX's CPU in float32 (40 prompts, 1,246 positions, 40
+  layers), the top-k sets that differ fall from 14.5% to 11.6% of
+  layers and positions. The median gap in the next-token
+  log-probabilities (over the CPU's 64 most likely tokens) falls from
+  0.17–0.58 to 0.12–0.36 nats, and the largest stays about 6. Unchanged:
+  float32 models (every default but an explicit `:dtype`), dense models,
+  and the JVM backend.
 - **Changed (experimental): the array engine's paged mode is its default**
   (genclj-17it, the owner's call of 2026-11-08). `gen.llm.array-engine/
   engine` opens the paged mode unless given `:paged? false`, which opens

@@ -361,10 +361,10 @@
   ;; and its product is float32's, so that its top k orders experts as
   ;; float32 does, not as logits rounded to a half float's ulp (2^-7 at 8
   ;; in float16). Logits 8 and 8 + 2^-9 are apart in float32 and one
-  ;; value in a half float. Planted bugs (on MLX): router-dtype the
-  ;; model's dtype fails 6 checks (the weights', the logits', the
-  ;; near-tie's, in both half floats); the product in the model's dtype,
-  ;; the logits widened after (the code before genclj-fxag), fails the
+  ;; value in a half float. Planted bugs (MLX's CUDA, 2026-11-08):
+  ;; router-dtype the model's dtype fails 3 checks (its own, the loaded
+  ;; weights' in both half floats); the product in the model's dtype, the
+  ;; logits widened after (the code before genclj-fxag), fails the
   ;; near-tie's 2
   (let [router-dtype @#'qwen35/router-dtype
         router-logits @#'qwen35/router-logits
