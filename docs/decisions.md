@@ -5227,3 +5227,47 @@ genclj-9y6y, 2026-11-08)
   rows), and llama.cpp's own normalization.
 - **A scores-only advance** for consumers needing less than full rows is a
   protocol change: genclj-t46p (the owner's call).
+
+### The sampling path on fenrir after genclj-9y6y (for the owner's NVIDIA decision)
+
+(the lead, 2026-11-08 ~01:30; genclj-9y6y, genclj-ssiv)
+
+**The re-measure.** array-engine-bench, float16, rows read and normalized on
+the host as gen.clj samples, tokens/s, MLX against llama.cpp through
+gen.clj, Graal / C2:
+
+| Model, batch | MLX before | MLX now | llama.cpp |
+|---|---:|---:|---:|
+| 0.6B, b1 | 132 / 148 | 216 / 213 | 445 / 505 |
+| 0.6B, b16 | 337 / 425 | 841 / 864 | 1879 / 2484 |
+| 0.8B, b1 | 143 / 169 | 174 / 182 | 353 / 414 |
+| 0.8B, b16 | 484 / 744 | 602 / 705 | 1570 / 1900 |
+| 8B, b1 | 84 / 76 | 86 / 88 | 140 / 145 |
+| 8B, b16 | 251 / 281 | 475 / 470 | 1135 / 1282 |
+
+- **The gap** on gen.clj's own path fell from 1.4-5.8x to 1.6-2.9x.
+- **The step is still host-bound.** At the 0.6B's 16 rows, Graal: the read
+  takes 4.9 ms, normalization 3.9, the whole step 19, against a device floor
+  of about 5.
+- **Anomaly 2 was not a code change:** at 834313a the floor measures 288-298
+  today. The host-cost merge raised it to 345-357.
+- **The other measured paths:**
+  - On Metal with continuous batching (8 clients), MLX is 3x llama.cpp.
+  - Token SMC on Qwen3.5-0.8B is 2.5x llama.cpp's (698 against 276).
+  - Greedy decode with the chosen token read beats llama.cpp from 16 rows up.
+
+**C2 on x86** (PROVISIONAL, the lead, on the implementing agent's
+recommendation). fenrir's LLM benches and serving run under C2 (the :c2
+alias). Graal, our x86 hosts' default JIT, handicaps host loops: C2 speeds
+llama.cpp's path through gen.clj by 10-35%, and is never worse for MLX's.
+
+**The lead's recommendation to the owner.** Keep MLX on NVIDIA.
+- Its compiled decode and continuous batching are competitive or ahead.
+- gen.clj's per-token sampling path still trails llama.cpp 1.6-2.9x on
+  fenrir.
+- The levers left are host-side:
+  - widening f16 four at a time;
+  - MLX's allocator (genclj-p9sb);
+  - a scores-only advance (genclj-t46p, a protocol change);
+  - device-side normalization, the owner's call under the engine's
+    decision 2.
