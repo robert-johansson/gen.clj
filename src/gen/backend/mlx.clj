@@ -647,6 +647,9 @@
     (doseq [x xs] (transforms/donate! x))
     (MlxRuntime/settleFresh))
 
+  p/IDevice
+  (-device [b] (if (= :cpu (device b)) :cpu (if @mac? :metal :cuda)))
+
   p/INativeGrad
   (-native-grad? [_] (= grad-mode :native))
 

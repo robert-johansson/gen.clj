@@ -691,6 +691,19 @@
     (p/-release! b xs))
   nil)
 
+(defn ^{:api :experimental} device
+  "The device backend b computes on: :cpu (the JVM backend, MLX's CPU),
+   :metal (MLX's GPU on macOS) or :cuda (MLX's GPU elsewhere), by
+   gen.array.protocols/IDevice (a backend without it computes on the
+   CPU); a wrapping backend's (a tape's, a batch tracer's) is the one it
+   wraps. For runtime choices measured per device (gen.llm.array-engine's
+   default dtype), never for semantics code (rule 3). Experimental:
+   outside the 1.x promise (DESIGN §9)."
+  [b]
+  (cond (instance? gen.array.protocols.IDevice b) (p/-device b)
+        (instance? gen.array.protocols.IWrappingBackend b) (recur (p/-inner b))
+        :else :cpu))
+
 ;; ---------------------------------------------------------------------------
 ;; Reductions and scans
 ;; ---------------------------------------------------------------------------

@@ -246,6 +246,14 @@
     "x's values, row-major, as a new float array (each rounded to float32;
      booleans 0 or 1). Forces evaluation."))
 
+(defprotocol ^{:api :experimental} IDevice
+  "A backend that computes on a device other than the host's CPU, or on a
+   device chosen when it is made: gen.array/device. A backend without it
+   (the JVM's) computes on the CPU. Experimental: outside the 1.x promise
+   (DESIGN §9)."
+  (^{:api :experimental} -device [b]
+    "The device b computes on: :cpu, :metal or :cuda."))
+
 (defprotocol ^{:api :experimental} IReleasing
   "A backend whose arrays hold native memory that a runtime may give back
    before the GC finds them unreachable: gen.array/release!. A backend

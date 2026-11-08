@@ -315,6 +315,42 @@
         (is (seq (with-redefs-fn {#'ae/lane? (constantly true)} #(bc/run-check shared-group-check e contract-opts))))))))
 
 ;; ---------------------------------------------------------------------------
+;; The default dtype
+;; ---------------------------------------------------------------------------
+
+(defn- device-backend
+  "A stand-in backend that says it computes on device d: all of a backend
+   the default dtype reads."
+  [d]
+  (reify gen.array.protocols.IDevice (-device [_] d)))
+
+(deftest quantized-files-compute-in-float16-on-cuda
+  ;; the owner's call (2026-11-08): with no :dtype, a file of quantized
+  ;; weights computes in float16 on MLX's CUDA; elsewhere, unquantized, a
+  ;; :dtype given or a model loaded, as before (the backend's default
+  ;; float, or the model's own)
+  (let [default (fn [d opts] (:dtype (#'ae/default-dtype opts (device-backend d))))
+        q4-k-m "test/fixtures/gguf/qwen3-small-q4_k_m.gguf"
+        split "test/fixtures/gguf/qwen3-tiny-q8_0-00001-of-00003.gguf"]
+    (testing "on CUDA"
+      (is (= :float16 (default :cuda {:model (:q8_0 files)})) "Q8_0")
+      (is (= :float16 (default :cuda {:model q4-k-m})) "K-quants")
+      (is (= :float16 (default :cuda {:model split})) "a split's files")
+      (is (nil? (default :cuda {:model (:f32 files)})) "F32")
+      (is (nil? (default :cuda {:model "test/fixtures/gguf/qwen3-small-f16.gguf"})) "F16")
+      (is (= :float32 (default :cuda {:model (:q8_0 files) :dtype :float32})) "a :dtype given")
+      (is (nil? (default :cuda {:model (:q8_0 @models)})) "a model loaded"))
+    (testing "elsewhere"
+      (doseq [d [:cpu :metal]]
+        (is (nil? (default d {:model (:q8_0 files)})) (name d))))
+    (testing "the engine's, on this backend"
+      (doseq [k [:q8_0 :f32]]
+        (with-open [e (ae/engine {:model (files k) :max-branches 2})]
+          (is (= (if (and (= k :q8_0) (= :cuda (array/device array/*backend*))) :float16 (ts/float-dtype))
+                 (:dtype (:model (br/info e))))
+              (name k)))))))
+
+;; ---------------------------------------------------------------------------
 ;; Misuse
 ;; ---------------------------------------------------------------------------
 
