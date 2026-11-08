@@ -632,6 +632,7 @@
 
   p/ILoading
   (-load-gguf [b header] (guarded :load-gguf (io/load-gguf b header)))
+  (-load-safetensors [b header] (guarded :load-safetensors (io/load-safetensors b header)))
 
   p/IOverwriting
   (-put-along-axis [b x indices values axis] (guarded :put-along-axis (put-along-axis b x indices values axis)))

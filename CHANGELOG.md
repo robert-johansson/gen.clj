@@ -40,6 +40,66 @@ other values for the same key, from the same distribution.
 
 ### Changes
 
+- **Added (experimental): `gen.array/load-safetensors`, and Hugging Face
+  checkpoints in `qwen3/load` and `qwen35/load`** (genclj-9pn4,
+  PROVISIONAL).
+  - `(array/load-safetensors path)` reads a .safetensors file, an index
+    (model.safetensors.index.json, every shard it maps) or a checkpoint's
+    directory: `{:metadata :tensors :types :files}`, as `load-gguf`'s.
+    F32, I32, I64, BOOL and U32 load as their dtypes, and F64 on the JVM
+    backend (MLX 0.32.4's loader refuses a file holding F64: loud there);
+    F16 and BF16 as float16 and bfloat16 on MLX, float32 on the JVM backend
+    (the same values). `:select`, a predicate of names, loads only those
+    tensors (the rest are never read).
+    Other dtypes (I8, U8, the float8 types, …), an int64 past 2^53 on the
+    JVM backend, and malformed files (a header that is no JSON object of
+    entries, tensors that leave a gap or overlap, a shard missing or
+    holding other tensors than its index says) are loud. MLX reads by
+    `mlx_load_safetensors`, the JVM backend by a host reader
+    (gen.array.safetensors), with a JSON reader of its own
+    (gen.array.json, internal): no dependency. `ILoading` gains
+    `-load-safetensors`.
+  - `qwen3/load` and `qwen35/load` take a checkpoint (its directory, or
+    its .safetensors file or index) where they take a GGUF file, read as
+    the GGUF llama.cpp's converter writes from it, so a checkpoint and
+    its GGUF give one model: config.json (Qwen3; Qwen3.5 and Qwen3.6's
+    text_config, dense or MoE) as the GGUF's metadata, the tensors renamed,
+    and the converter's transforms done: Qwen3-Next's +1 on the RMSNorm
+    weights (but the gated norm's) in float32, ssm_a = -exp(A_log) in
+    float32, the value heads from grouped to tiled order, the conv kernel
+    squeezed, one matrix an expert stacked. A tied output drops a stored
+    lm_head copy (Qwen3-0.6B's), as transformers does. The vision tower
+    and the MTP block are never read.
+  - MLX's quantized checkpoints (mlx-lm's, mlx-community's): a matrix's
+    uint32 words, scales and biases load as `load-gguf`'s quantized
+    matrices, at config.json's quantization (its bits and group size, and
+    a matrix's own entry). mlx-lm's saved layout (language_model.model.,
+    the conv kernel [C K 1], the +1 already in its norms) is told by its
+    conv kernels. Another quantization (GPTQ, AWQ, mxfp4, …) is loud, as
+    are the experts' fused gate_up_proj and the configurations llama.cpp
+    does not compute (sliding windows, RoPE scaling, …).
+  - Checked: each tiny random checkpoint of test/fixtures/safetensors
+    (generate.py: test/fixtures/gguf's models, the converter undone) gives
+    its GGUF's config, weights and logits exactly on the JVM backend:
+    Qwen3, Qwen3.5 with 2 key heads of 2 value heads each, Qwen3.5-MoE,
+    and their MLX 8-bit checkpoints, one sharded in three. Planted bugs
+    (the +1 missed, A_log's sign, the heads left grouped, mlx-lm's layout
+    read as Hugging Face's, the experts reversed) move the logits 4.7 to
+    9.4 in a logit. On MLX the same within float32's band (MLX's exp
+    rounds ssm_a an ulp apart).
+  - Real checkpoints against their GGUFs in this forward, on Metal in
+    float32 (gen.llm.models.checkpoint-real-test, 4 prompts of 32
+    tokens): Qwen/Qwen3.5-0.8B against ggml-org's BF16 GGUF, every weight
+    equal, max |Δ log p| 2.7e-5 over the GGUF's top 64, argmax 128 of 128
+    (the +1 missed moves it 25.6; A_log's sign gives NaN); Qwen/Qwen3-0.6B
+    against the F16 GGUF, 4.4e-5, argmax 128 of 128 (weights apart by
+    float16's subnormals only, 3e-8).
+- **Changed (experimental): `gen.array/load-gguf` loads BF16** (genclj-9pn4,
+  PROVISIONAL), as bfloat16 on MLX (by the host reader: MLX's loader is
+  not trusted with it) and float32 on the JVM backend, where it was
+  `:unsupported`; test/fixtures/gguf/unsupported-bf16.gguf is now
+  bf16.gguf, with its values (bf16.edn).
+
 - **Added (experimental): K-quants in `gen.array/load-gguf`** (genclj-kqxr,
   PROVISIONAL): Q4_K, Q5_K and Q6_K, and Q5_0 and Q5_1 (Q4_K_M's
   fallbacks for rows not of 256 values), each value the file's exactly
@@ -67,7 +127,8 @@ other values for the same key, from the same distribution.
     comparisons; argmax equal in all), as large as llama.cpp's own spread
     on that file (0.226; 0.052 on Q8_0). Qwen3.5-0.8B as Q4_K_M: 0.414,
     llama.cpp's own 0.460.
-  - Still `:unsupported`: Q2_K, Q3_K, the IQ types, BF16 and the rest.
+  - Still `:unsupported`: Q2_K, Q3_K, the IQ types and the rest (BF16 loads
+    since genclj-9pn4, above).
     `gen.array.protocols/ILoading`'s contract names the new types.
   - Test files: test/fixtures/gguf/kquants.gguf (random blocks) and
     qwen3-small-f16.gguf with its Q4_K_M by llama.cpp's quantizer

@@ -152,6 +152,19 @@
           (is (= [:float32 (conj lead (quot k 32))] ((juxt array/dtype array/shape) biases)) name)))
       (is (= [:float32 [2 512]] ((juxt array/dtype array/shape) (tensors "t.q6_k.weight")))))))
 
+(deftest bf16-loads-its-bits
+  ;; BF16 tensors (bf16.gguf) as their values (gguf-py's reader, bf16.edn),
+  ;; exactly: bfloat16 arrays on MLX (by the host reader: MLX's loader is
+  ;; not trusted with BF16), float32 on the JVM backend, a subnormal and
+  ;; -0 among them
+  (let [{:keys [tensors types]} (array/load-gguf (fixture "bf16.gguf"))
+        reference (edn/read-string (slurp (fixture "bf16.edn")))]
+    (is (= {"t.f32.weight" :f32 "t.bf16.weight" :bf16 "t.bf16.vector" :bf16} types))
+    (doseq [[name expected] reference]
+      (is (= expected (host (tensors name))) name))
+    (is (= (Double/doubleToRawLongBits -0.0) (Double/doubleToRawLongBits (nth (host (tensors "t.bf16.vector")) 1))))
+    (is (= (if (ts/jvm?) :float32 :bfloat16) (array/dtype (tensors "t.bf16.weight"))))))
+
 (deftest loaded-triples-multiply-at-their-own-bits
   ;; quantized-matmul and gather-qmm take each tensor's bits and group
   ;; size (4 and 5 here), as a mixed file's model does: the products of
@@ -194,7 +207,8 @@
     (let [jvm (array/backend-named :jvm)
           raw (fn [t] (if (map? t) (mapv host [(:wq t) (:scales t) (:biases t)]) (host t)))
           load-host (requiring-resolve 'gen.backend.mlx.io/load-host)]
-      (doseq [file ["types.gguf" "qwen3-tiny-q8_0.gguf" "qwen3-tiny-f32.gguf" "kquants.gguf" "qwen3-small-q4_k_m.gguf"]]
+      (doseq [file ["types.gguf" "qwen3-tiny-q8_0.gguf" "qwen3-tiny-f32.gguf" "kquants.gguf" "qwen3-small-q4_k_m.gguf"
+                    "bf16.gguf"]]
         (let [mine (array/load-gguf (fixture file))
               theirs (array/with-backend jvm (array/load-gguf (fixture file)))]
           (is (= (:metadata mine) (:metadata theirs)) file)
@@ -235,7 +249,7 @@
         (is (= :invalid-gguf (:reason (thrown #(array/load-gguf (str d "/m.gguf"))))))))))
 
 (deftest refused-files-are-loud
-  (doseq [[file t] [["unsupported-q3_k.gguf" :q3_k] ["unsupported-bf16.gguf" :bf16]]]
+  (doseq [[file t] [["unsupported-q3_k.gguf" :q3_k]]]
     (is (= {:reason :unsupported :tensor "refused.weight" :type t}
            (select-keys (thrown #(array/load-gguf (fixture file))) [:reason :tensor :type]))
         file))

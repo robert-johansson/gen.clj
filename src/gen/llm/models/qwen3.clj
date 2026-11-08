@@ -1,8 +1,10 @@
 (ns gen.llm.models.qwen3
-  "Qwen3's forward pass over gen.array, from a GGUF file's weights
-   (docs/research/llm-mlx-engine.md §2, P2 of §6):
+  "Qwen3's forward pass over gen.array, from a GGUF file's weights or a
+   Hugging Face checkpoint's (docs/research/llm-mlx-engine.md §2, P2 of
+   §6):
 
-     (load path)                       → a model {:config :weights} from a GGUF file
+     (load path)                       → a model {:config :weights} from a GGUF file,
+                                         or a checkpoint's directory (load's docstring)
      (load path {:dtype :float16})     → … computing in another float dtype
      (model gguf)                      → the same from gen.array/load-gguf's result
      (config metadata)                 → the architecture from a GGUF's metadata
@@ -110,13 +112,16 @@
             [gen.array :as array :refer [+ * <=]]
             [gen.array.paged :as paged]
             [gen.llm.lora :as lora]
-            [gen.llm.models :as models]))
+            [gen.llm.models :as models]
+            [gen.llm.models.checkpoint :as checkpoint]))
 
 (set! *warn-on-reflection* true)
 
 ;; ---------------------------------------------------------------------------
 ;; The configuration, from a GGUF's metadata
 ;; ---------------------------------------------------------------------------
+
+(def ^:private who "qwen3")
 
 (defn- unsupported
   ([message] (unsupported message {}))
@@ -259,11 +264,93 @@
                            {:tensors (vec unread)})))
      {:config (assoc cfg :vocab vocab :dtype dtype) :weights weights})))
 
+;; ---------------------------------------------------------------------------
+;; Hugging Face checkpoints, read as llama.cpp's converter writes their GGUF
+;; ---------------------------------------------------------------------------
+
+(def ^:private hf-names
+  "A block's tensors (Hugging Face's names, after model.layers.i.) by
+   llama.cpp's (after blk.i.)."
+  {"input_layernorm" "attn_norm" "self_attn.q_proj" "attn_q" "self_attn.k_proj" "attn_k" "self_attn.v_proj" "attn_v"
+   "self_attn.o_proj" "attn_output" "self_attn.q_norm" "attn_q_norm" "self_attn.k_norm" "attn_k_norm"
+   "post_attention_layernorm" "ffn_norm" "mlp.gate_proj" "ffn_gate" "mlp.up_proj" "ffn_up" "mlp.down_proj" "ffn_down"})
+
+(defn- gguf-name
+  "llama.cpp's name of a Qwen3 checkpoint's tensor (Qwen3ForCausalLM's
+   names), or the name itself for one it does not have (which model then
+   refuses, naming it)."
+  [name]
+  (or (when-let [[_ i base suffix] (re-matches #"model\.layers\.(\d+)\.(.+)\.(weight|bias)" name)]
+        (when-let [g (hf-names base)] (str "blk." i "." g "." suffix)))
+      ({"model.embed_tokens.weight" "token_embd.weight" "model.norm.weight" "output_norm.weight"
+        "lm_head.weight" "output.weight"} name)
+      name))
+
+(defn- hf-metadata
+  "The metadata llama.cpp's converter writes for a Qwen3 checkpoint's
+   config.json (its Qwen3Model, a TextModel). Loud (:unsupported) for
+   another model_type, an activation but SiLU, sliding windows, and RoPE
+   scaling (which config refuses once it is metadata)."
+  [c]
+  (let [rope (or (get c "rope_parameters") (get c "rope_scaling"))
+        rope-type (when (map? rope) (or (get rope "rope_type") (get rope "type")))
+        theta (or (get c "rope_theta") (when (map? rope) (get rope "rope_theta")))]
+    (when-not (= "qwen3" (get c "model_type"))
+      (throw (unsupported (str "the checkpoint's model_type is " (pr-str (get c "model_type")) ", not qwen3")
+                          {:model-type (get c "model_type")})))
+    (when-not (contains? #{nil "silu"} (get c "hidden_act"))
+      (throw (unsupported (str "the activation " (pr-str (get c "hidden_act")) " (Qwen3's is SiLU)") {:hidden-act (get c "hidden_act")})))
+    (when (get c "use_sliding_window")
+      (throw (unsupported "sliding-window attention" {:sliding-window (get c "sliding_window")})))
+    (cond-> {"general.architecture" "qwen3"
+             "qwen3.context_length" (get c "max_position_embeddings")
+             "qwen3.embedding_length" (get c "hidden_size")
+             "qwen3.block_count" (get c "num_hidden_layers")
+             "qwen3.feed_forward_length" (get c "intermediate_size")
+             "qwen3.attention.head_count" (get c "num_attention_heads")
+             "qwen3.attention.head_count_kv" (get c "num_key_value_heads")
+             "qwen3.attention.layer_norm_rms_epsilon" (checkpoint/float32 (get c "rms_norm_eps"))}
+      (get c "head_dim") (assoc "qwen3.attention.key_length" (get c "head_dim")
+                                "qwen3.attention.value_length" (get c "head_dim"))
+      theta (assoc "qwen3.rope.freq_base" (checkpoint/float32 theta))
+      (not (contains? #{nil "default"} rope-type)) (assoc "qwen3.rope.scaling.type" rope-type))))
+
+(defn- checkpoint-gguf
+  "The GGUF llama.cpp's converter writes from the Qwen3 checkpoint at
+   path (its config.json checked first), as gen.array/load-gguf gives
+   one, {:metadata :tensors :types :files}: config.json as its metadata
+   keys, each tensor under its name (Qwen3's converter changes no tensor;
+   an MLX checkpoint's quantized matrices are quantized ones)."
+  [path]
+  (let [config (checkpoint/config who path)
+        metadata (hf-metadata config)
+        {:keys [tensors types files]} (checkpoint/read who path config (constantly true))
+        renamed (checkpoint/output who (into {} (map (fn [[k v]] [(gguf-name k) v])) tensors)
+                                   (get config "tie_word_embeddings") (get config "vocab_size"))]
+    {:metadata metadata
+     :tensors renamed
+     :types (select-keys (into {} (map (fn [[k v]] [(gguf-name k) v])) types) (keys renamed))
+     :files files}))
+
 (defn load
-  "(model (gen.array/load-gguf path) opts): a Qwen3 GGUF file's model, on
-   *backend*."
+  "A Qwen3 model from path, on *backend*: (model (gen.array/load-gguf
+   path) opts) for a GGUF file; for a Hugging Face checkpoint (its
+   directory, or its .safetensors file or index), its tensors as the GGUF
+   llama.cpp's converter writes from it would give them.
+   - config.json gives the metadata (hidden_size, num_hidden_layers,
+     num_attention_heads, num_key_value_heads, head_dim, intermediate_size,
+     rms_norm_eps, rope_theta, max_position_embeddings);
+   - the tensors are renamed (model.layers.i.self_attn.q_proj.weight is
+     blk.i.attn_q.weight, …), unchanged: Qwen3's converter changes none;
+   - a tied output (tie_word_embeddings) reads the embedding, a stored
+     lm_head copy dropped, as transformers ties it;
+   - MLX's quantized checkpoints (mlx-community's) load their matrices
+     quantized, by config.json's quantization (gen.llm.models.checkpoint).
+   A checkpoint of another model_type, activation, sliding windows or RoPE
+   scaling is loud (:unsupported), and so is a tensor the forward does not
+   read (attention biases among them), as model refuses a GGUF's."
   ([path] (load path nil))
-  ([path opts] (model (array/load-gguf path) opts)))
+  ([path opts] (model (if (checkpoint/checkpoint? path) (checkpoint-gguf path) (array/load-gguf path)) opts)))
 
 ;; ---------------------------------------------------------------------------
 ;; The forward

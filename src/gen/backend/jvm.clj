@@ -12,6 +12,7 @@
   {:api :internal}
   (:require [gen.array.dtype :as dt]
             [gen.array.gguf :as gguf]
+            [gen.array.safetensors :as safetensors]
             [gen.array.host :as host]
             [gen.array.protocols :as p]
             [gen.array.shape :as sh]
@@ -913,8 +914,8 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- load-gguf
-  "p/-load-gguf: float16 tensors as float32 (the backend has no float16;
-   the values are the same)."
+  "p/-load-gguf: float16 and bfloat16 tensors as float32 (the backend has
+   neither; the values are the same)."
   [{:keys [path tensors]}]
   (into {}
         (map (fn [info]
@@ -922,7 +923,17 @@
                  [(:name info)
                   (if quantized
                     (mapv make quantized shapes [:uint32 :float32 :float32])
-                    (make data shape (if (= dtype :float16) :float32 dtype)))])))
+                    (make data shape (if (#{:float16 :bfloat16} dtype) :float32 dtype)))])))
+        tensors))
+
+(defn- load-safetensors
+  "p/-load-safetensors: float16 and bfloat16 tensors as float32 (the
+   backend has neither; the values are the same)."
+  [{:keys [path tensors]}]
+  (into {}
+        (map (fn [info]
+               (let [{:keys [dtype shape data]} (safetensors/read-tensor path info)]
+                 [(:name info) (make data shape (if (#{:float16 :bfloat16} dtype) :float32 dtype))])))
         tensors))
 
 ;; ---------------------------------------------------------------------------
@@ -940,6 +951,7 @@
 
   p/ILoading
   (-load-gguf [_ header] (load-gguf header))
+  (-load-safetensors [_ header] (load-safetensors header))
 
   p/IOverwriting
   (-put-along-axis [_ x indices values axis] (put-along-axis x indices values axis))

@@ -1568,7 +1568,8 @@
    - :tensors: each tensor by its name in the file (llama.cpp's, e.g.
      \"blk.0.attn_q.weight\"), its shape outermost first (a matrix
      weight [out in]). F32 and I32 load as float32 and int32 arrays, F16
-     as float16 (float32 on a backend without it, the JVM's). Q8_0, Q4_0,
+     and BF16 as float16 and bfloat16 (float32 on a backend without them,
+     the JVM's). Q8_0, Q4_0,
      Q4_1, Q5_0, Q5_1, Q4_K and Q5_K load as MLX's affine quantization,
      {:wq :scales :biases :bits :group-size}, the arguments and options of
      dequantize and quantized-matmul: groups of 32 (a K-quant's
@@ -1580,8 +1581,8 @@
    - :files: the paths read: path, or every file of a split model
      (<prefix>-00001-of-0000N.gguf, as llama.cpp's gguf-split writes them;
      path must be the first).
-   Every other tensor type (Q2_K, Q3_K, the IQ types and BF16 among them)
-   is a loud error (:unsupported), as are a file that is no GGUF of
+   Every other tensor type (Q2_K, Q3_K and the IQ types among them) is a
+   loud error (:unsupported), as are a file that is no GGUF of
    version 2 or 3, a split's file missing, and a tensor named twice
    (:invalid-gguf). MLX reads the tensors by its loader (mlx_load_gguf),
    or a file holding a type its loader does not read by gen.array.gguf's
@@ -1591,6 +1592,42 @@
    Experimental: outside the 1.x promise (DESIGN §9)."
   [path]
   ((requiring-resolve 'gen.array.gguf/load-gguf) *backend* path))
+
+(defn ^{:api :experimental} load-safetensors
+  "The tensors of a safetensors file or checkpoint (Hugging Face's
+   format), on *backend*: {:metadata :tensors :types :files}.
+   - path: a .safetensors file; an index (model.safetensors.index.json:
+     every shard its weight map names, beside it); or a checkpoint's
+     directory, read by its index, or else its model.safetensors.
+   - :metadata: the first file's \"__metadata__\" (strings to strings).
+   - :tensors: each tensor by its name in the file (e.g.
+     \"model.layers.0.self_attn.q_proj.weight\"), its shape as the file
+     gives it (a matrix weight [out in]). F32, I32, I64 and BOOL load as
+     float32, int32, int64 and bool arrays, F64 as float64 on the JVM
+     backend (on MLX, whose loader has none, a file holding F64 is loud);
+     F16 and BF16 as
+     float16 and bfloat16 (float32 on a backend without them, the JVM's:
+     the same values); U32 as uint32 (the packed words of MLX's quantized
+     checkpoints, which gen.llm.models' loaders take as quantized
+     matrices with their scales and biases).
+   - :types: each tensor's dtype in the file, a keyword (:f32, :bf16, …).
+   - :files: the paths read.
+   Options: :select, a predicate of tensor names: only those it accepts
+   load (the others are never read; a checkpoint's vision tower, for its
+   language model).
+   A tensor of another dtype (I8, I16, U8, U16, U64, the float8 types,
+   C64), selected, is loud (:unsupported); so is an int64 value past 2^53
+   on the JVM backend, whose doubles do not hold it exactly. A file cut
+   short, a header that is no JSON object of tensor entries, tensors whose
+   bytes do not cover the data exactly, and a shard missing or holding
+   other tensors than the index maps to it are loud (:invalid-safetensors). MLX reads the tensors by its loader
+   (mlx_load_safetensors), the JVM backend by gen.array.safetensors's host
+   reader: the same values. A primitive (gen.array.protocols/ILoading); a
+   backend without it is loud. Experimental: outside the 1.x promise
+   (DESIGN §9)."
+  ([path] (load-safetensors path nil))
+  ([path opts]
+   ((requiring-resolve 'gen.array.safetensors/load-safetensors) *backend* path opts)))
 
 ;; ---------------------------------------------------------------------------
 ;; Validation across particles
