@@ -5569,3 +5569,97 @@ main's widening. main's load-safetensors stays, and so does main's word for
 MLX's own BF16 reading, "unverified": MLX 0.32.4's gguf.cpp has no BF16 case.
 The two BF16 load tests are one, bf16-loads-its-bits, against gguf-py's
 reference and llama.cpp's.
+
+### Continuous batching for Qwen3.5/3.6; paged attention v2
+
+(PROVISIONAL, owner to confirm; genclj-6qb6, 2026-11-08)
+
+**The continuous mode runs Qwen3.5/3.6,** dense and MoE, where it used to
+refuse them.
+- qwen35/paged-batch-step (and compile-paged-batch-step) is qwen3's batched
+  step for the hybrid family. Each decode row is one token of its own
+  sequence. A request's prefill chunk runs as one sequence through the
+  GatedDeltaNet layers, in the same forward as the other requests' decode
+  rows.
+- The chunk's padding rows get beta = 0 and g = 0, so they leave its state
+  unchanged. Its conv state is taken at `:chunk-len`, so chunks still pad to
+  a power of 2 and don't trace once per length.
+- Decode and chunk attention is common/batch-attention, shared with qwen3.
+
+**States stay groups and are read in place, not pooled.** A step reads its
+GatedDeltaNet states (paged and continuous modes) in one of three ways:
+- a lane, a group only the step's slots hold: stepped in place and consumed;
+- a shared group's consecutive rows, the common case with LMs: read in place
+  through a new optional `held` argument of the compiled steps, not consumed;
+- anything else: one copy (a gather, or slices and one concatenate), where
+  there used to be up to three.
+
+Metal, 16 rows, ms per step with GC:
+
+| Option | ms |
+|---|---:|
+| Lane | 6.7 |
+| Shared group in place | 12.5 |
+| One gather | 17.7 |
+| Two groups, padded | 23.9 (42 before) |
+| A state pool | 18–26 |
+
+- A pool can't win: the Metal gated-delta kernel's output can't be written
+  into a pool in place, so a pool needs a write-back copy. In one call MLX
+  sometimes copies the whole pool (32 ms at 8 rows).
+- Not taken: a pool; a C++ primitive that writes in place (route B).
+- **A consumed lane's slots are reported lost** (`:lost-slots`) if its rows
+  then fail to normalize. The paged mode used to leave them holding consumed
+  arrays. Not taken: never consuming lanes, which keeps the slots but costs
+  more GC (6.7 → 12.5 ms).
+- Not taken: unpadded chunks, which trace once per length; separate pools
+  and states arguments in place of `held`.
+
+**Measured, Qwen3.5-0.8B Q8_0 on Metal, tokens/s:**
+
+| | continuous | paged | static | llama.cpp |
+|---|---:|---:|---:|---:|
+| 8 clients, f16 | **233** (p50 21.6 ms) | 74 | 72 | 69 |
+| 8 clients, f32 | **152** (p50 38.7 ms) | 66 | 65 | 69 |
+| SMC, 16 particles, f16 | **885** | 826 | 805 | 282 |
+| SMC, 16 particles, f32 | **726** | 677 | 684 | 281 |
+
+- The paged mode also gained: 744 → 826 (f16) and 627 → 677 (f32).
+- At decode batch 16, f32: continuous 461, static 441, llama.cpp 411.
+- On the real 0.8B with 4 concurrent callers, rows are at most 2.2e-5 nats
+  from the model's own forward.
+- **An open finding:** a forward costs about 35 ms at 8 rows, about the same
+  as at 16 (12 ms at 1). That is a large fixed cost per step, worth profiling.
+
+**Tests.** JVM: 13 namespaces, 119 tests. MLX: 9 namespaces, 79 tests.
+array_engine_qwen35_continuous_test covers:
+- the batched step against the concatenating cache;
+- the Branching, LM and token/SMC contracts on the tiny Qwen3.5 and its MoE;
+- concurrent clients against each running alone;
+- the three ways of reading states.
+
+Five planted bugs fail the clients by 1.5 to 6.3 nats on both backends:
+- a decode row given another row's states;
+- a chunk started from zeros;
+- padding rows writing the state;
+- a chunk run as separate sequences;
+- a freed slot's states kept.
+
+**Paged attention v2 on Metal.**
+- kernels-community's paged_attention_v2_reduce is ported from the same file
+  and commit as v1 (28a49f7). The partition kernel is v1's body with
+  PARTITION_SIZE 512, its maxima and sums as outputs. Rule 10's headers and
+  THIRD-PARTY-NOTICES are extended.
+- The source was the copy the v1 agent downloaded. The lead re-fetched the
+  file from Hugging Face at 28a49f7: byte-identical (51,650 bytes).
+- v2 runs behind the same op past v1's 32 KiB of threadgroup scores. Table
+  widths are padded to powers of 2, so it starts at about 4k-token contexts,
+  where the composite used to run.
+- Against the composite at 1 to 32,768 positions: 3.1e-6 in f32, 1.8e-4 in
+  f16. Three planted source bugs fail it by 0.16 to 0.28.
+- Qwen3-0.6B decode at 16k positions: 78 ms for 1 row and 279 ms for 8 rows,
+  against the composite's 351 and 3,338. At 4k: 23 against 102.
+- Partials stay in the operands' dtype, as upstream keeps them. Not taken:
+  float32 partials, which means editing the ported kernel.
+- docs/array-api.md's paged-attention paragraph now names v2. It describes
+  the backend; the API is unchanged.
