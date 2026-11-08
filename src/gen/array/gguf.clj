@@ -340,7 +340,15 @@
 ;; codes repacked as MLX's affine layout packs them (value j of a row at bits
 ;; [j·b, (j+1)·b) of its words, little-endian), its scale and bias computed
 ;; in float32 as llama.cpp's dequantize_row_* computes them, where each
-;; product is exact
+;; product is exact.
+;; The K-quant decoders below (q4-k!, q5-k!, q6-k!, the 6-bit scales) follow
+;; llama.cpp's dequantize_row_q4_K, _q5_K, _q6_K and get_scale_min_k4:
+;; https://github.com/ggml-org/llama.cpp/blob/cd959bae99ff4bed22bef2604f45241c09bbb8c8/ggml/src/ggml-quants.c
+;; Upstream commit: cd959bae99ff4bed22bef2604f45241c09bbb8c8 (tag v0.9.0)
+;; License: MIT (Copyright (c) 2023-2026 The ggml authors); see gen.clj's
+;; THIRD-PARTY-NOTICES
+;; Changes: written anew in Clojure over a ByteBuffer; codes repacked into
+;; MLX's affine layout, the scale and bias computed as upstream computes them
 ;; ---------------------------------------------------------------------------
 
 (defn- f16 ^double [^ByteBuffer b ^long at]

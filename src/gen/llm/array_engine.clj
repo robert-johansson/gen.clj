@@ -1587,7 +1587,9 @@
                     float, but float16 for a file of quantized weights
                     (Q8_0, Q4_0/1, Q5_0/1, K-quants) on MLX's CUDA
                     (gen.array/device :cuda), whose fast quantized
-                    products take half floats only. A loaded model
+                    products take half floats only, and on Metal for such
+                    a file of a mixture of experts (its expert_count
+                    positive), which loads below float32 there. A loaded model
                     computes in its own dtype (gen.llm.lora, sft and grpo
                     train in float32)
      :max-branches  live branches at most (default 32): memory is the
