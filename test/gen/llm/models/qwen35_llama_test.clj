@@ -50,7 +50,6 @@
    model's); the value heads grouped where the converter tiles them fail
    it by 7.1 to 11.1 nats."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
-            [gen.array :as array]
             [gen.llm.models.against-llama :as against]
             [gen.llm.models.qwen35 :as qwen35]
             [gen.test-support :as ts]))
@@ -149,15 +148,6 @@
 (def ^:private vocab-prompts
   [(second prompts) (nth prompts 3) (nth prompts 4)])
 
-(def ^:private value-heads-grouped
-  "The planted error: value head h reading key head h / (value-heads /
-   key-heads), as Hugging Face's checkpoints order them, where the
-   converter tiles them (h mod key-heads)."
-  {#'qwen35/key-heads-tiled (fn [y hv]
-                              (let [[b t hk d] (array/shape y)]
-                                (array/reshape (array/broadcast-to (array/expand-dims y 3) [b t hk (quot hv hk) d])
-                                                   [b t hv d])))})
-
 (deftest unequal-heads-and-experts-are-llama-cpp-s
   ;; opt-in: the models are generated (with Python), not committed, so a
   ;; run without them skips no native suite
@@ -176,9 +166,7 @@
               (is (<= max-diff vocab-band) (str what ": |Δ log p| " max-diff))
               (is argmax? (str what ": the argmax"))
               (is top5? (str what ": the top 5")))
-            (is (< mutation-nats (with-redefs-fn value-heads-grouped
-                                   #(reduce max (map :max-diff (against/compare-prompt e m tokens 1 0)))))
-                "the value heads grouped"))))))))
+            (is (< mutation-nats (against/mutated e m tokens :value-heads-grouped)) "the value heads grouped"))))))))
 
 (deftest log-probabilities-are-llama-cpp-s
   (when-qwen35
@@ -195,5 +183,5 @@
   (when-qwen35
     (let [[e m] (setup)
           tokens ((llama 'tokenize) e (nth prompts 3))]
-      (doseq [mutation (sort (keys against/qwen35-mutations))]
+      (doseq [mutation (sort (keys (against/mutations-of m)))]
         (is (< mutation-nats (against/mutated e m tokens mutation)) (name mutation))))))

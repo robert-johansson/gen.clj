@@ -508,6 +508,15 @@
                                    (assoc (select-keys w [:bits :group-size]) :lhs-indices lhs :rhs-indices indices))
         :else (array/matmul x (array/transpose (array/take w indices 0) [0 1 3 2]))))
 
+(defn- routing
+  "[indices weights] of the router's probabilities probs [N experts]: the
+   k most likely experts' indices [N k] (top-k's), and their
+   probabilities renormalized to sum 1 (their sum clamped from below at
+   6.1e-5, llama.cpp's)."
+  [probs k]
+  (let [[idx p] (top-k probs k)]
+    [idx (/ p (array/maximum (array/sum p {:axis -1 :keep-dims? true}) 6.103515625e-5))]))
+
 (defn- moe
   "The mixture of experts of the normed x [B T hidden], as llama.cpp's
    build_moe_ffn with qwen35moe's settings (softmax gating, the top k
@@ -520,8 +529,7 @@
         k (long experts-used)
         logits (common/linear xs router)
         probs (array/softmax (if (#{:float16 :bfloat16} dtype) (array/astype logits :float32) logits) {:axis -1})
-        [idx p] (top-k probs k)
-        p (/ p (array/maximum (array/sum p {:axis -1 :keep-dims? true}) 6.103515625e-5))
+        [idx p] (routing probs k)
         p (if (= dtype (array/dtype p)) p (array/astype p dtype))
         x1 (array/reshape xs [n 1 1 hidden])
         token (array/reshape (array/arange 0 n 1 {:dtype :int32}) [n 1])

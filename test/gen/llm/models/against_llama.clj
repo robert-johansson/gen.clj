@@ -26,11 +26,23 @@
    - :conv-oldest: the conv state keeping its oldest inputs, not its
      newest (only a cached read sees it);
    - :conv-reversed: the conv kernel applied newest input first;
-   - :query-gate-swapped: attn_q's query and output gate swapped."
+   - :query-gate-swapped: attn_q's query and output gate swapped;
+   on a model of fewer key heads than value heads (value-heads-mutations):
+   - :value-heads-grouped: value head h reading key head h / (value-heads
+     / key-heads), as Hugging Face's checkpoints order them, where the
+     converter tiles them (h mod key-heads);
+   and on a mixture of experts (moe-mutations):
+   - :experts-gate-up-swapped: the routed experts' gate and up stacks
+     swapped (silu of the up projection, times the gate's);
+   - :router-unnormalized: the top k experts weighted by their router
+     probabilities, not renormalized to sum 1;
+   - :shared-expert-ungated: the shared expert's output not gated by
+     sigmoid(ffn_gate_inp_shexp · x)."
   (:require [gen.array :as array]
             [gen.llm.branching :as br]
             [gen.llm.branching-contract :refer [max-diff top-tokens]]
             [gen.array.gguf :as gguf]
+            [gen.llm.models.common :as common]
             [gen.llm.models.qwen3 :as qwen3]
             [gen.llm.models.qwen35 :as qwen35]))
 
@@ -78,10 +90,40 @@
           :conv-reversed {#'qwen35/causal-conv (fn [padded kernel t] (causal-conv padded (array/slice kernel 1 nil nil -1) t))}
           :query-gate-swapped {#'qwen35/query-and-gate (fn [qg] [(array/slice qg 3 1 2) (array/slice qg 3 0 1)])}}))
 
+(def value-heads-mutations
+  "The planted error of a GatedDeltaNet of fewer key heads than value
+   heads: name to with-redefs-fn's map."
+  {:value-heads-grouped {#'qwen35/key-heads-tiled
+                         (fn [y hv]
+                           (let [[b t hk d] (array/shape y)]
+                             (array/reshape (array/broadcast-to (array/expand-dims y 3) [b t hk (quot hv hk) d])
+                                            [b t hv d])))}})
+
+(def ^:private moe @#'qwen35/moe)
+(def ^:private top-k @#'qwen35/top-k)
+
+(def moe-mutations
+  "The planted errors of Qwen3.5's mixture of experts: name to
+   with-redefs-fn's map."
+  {:experts-gate-up-swapped {#'qwen35/moe (fn [cfg w x] (moe cfg (assoc w :gate (:up w) :up (:gate w)) x))}
+   :router-unnormalized {#'qwen35/routing (fn [probs k] (top-k probs k))}
+   ;; the routed experts' part (no :shared), plus the shared expert's SwiGLU
+   :shared-expert-ungated {#'qwen35/moe (fn [cfg w x]
+                                          (let [s (array/shape x)
+                                                shared (common/swiglu (:shared w) (array/reshape x [-1 (peek s)]))]
+                                            (array/+ (moe cfg (dissoc w :shared) x) (array/reshape shared s))))}})
+
 (defn mutations-of
-  "The planted errors that apply to model m."
+  "The planted errors that apply to model m: qwen3's mutations, or
+   qwen35-mutations with value-heads-mutations where m has fewer key heads
+   than value heads and moe-mutations where it has experts."
   [m]
-  (if (qwen35? m) qwen35-mutations mutations))
+  (if (qwen35? m)
+    (let [{:keys [delta-key-heads delta-value-heads experts]} (:config m)]
+      (cond-> qwen35-mutations
+        (not= delta-key-heads delta-value-heads) (merge value-heads-mutations)
+        experts (merge moe-mutations)))
+    mutations))
 
 (defn- logprobs
   "The log-probabilities of logits' last row (logits [1 T vocab]), a
