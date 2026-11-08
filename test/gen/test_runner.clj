@@ -1,8 +1,8 @@
 (ns gen.test-runner
   "clojure -X:test's entry (genclj-ruh8): cognitect's runner, then a line on
-   the native suites (MLX's binding, llama.cpp's): how many of their tests
-   ran, and how many skipped for a missing library or test model, which
-   pass with no assertions. -Dgen.require-native=mlx,llama (a release
+   the native suites (MLX's binding, llama.cpp's, MLX's CUDA): how many of
+   their tests ran, and how many skipped for a missing library, device or
+   test model, which pass with no assertions. -Dgen.require-native=mlx,llama (a release
    gate's run) fails the run when a suite it names skipped a test or ran
    none:
 

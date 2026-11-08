@@ -20,8 +20,8 @@
    - misreported-normal: a planted bug for negative controls, a normal
      whose density is another's.
    - when-native, native-unavailable!, native-report, native-missing: the
-     native suites' (MLX's binding, llama.cpp's) tests counted as run or
-     skipped, which gen.test-runner prints at a run's end and
+     native suites' (MLX's binding, llama.cpp's, MLX's CUDA) tests counted
+     as run or skipped, which gen.test-runner prints at a run's end and
      -Dgen.require-native turns into a failure."
   (:refer-clojure :exclude [abs])
   (:require [clojure.string :as str]
@@ -286,8 +286,8 @@
   (swap! native (fn [m] (-> m (update-in [suite :skipped] (fnil inc 0)) (update-in [suite :nses] (fnil conj (sorted-set)) ns-name)))))
 
 (defn native-unavailable!
-  "Record why the native suite (:mlx or :llama) cannot run: its library,
-   binding or test model missing."
+  "Record why the native suite (:mlx, :llama or :cuda) cannot run: its
+   library, binding, device or test model missing."
   [suite why]
   (swap! native update-in [suite :why] #(or % why)))
 
@@ -306,7 +306,7 @@
   @native)
 
 (defn required-native
-  "The suites -Dgen.require-native names (comma-separated: mlx, llama)."
+  "The suites -Dgen.require-native names (comma-separated: mlx, llama, cuda)."
   []
   (into #{} (comp (map str/trim) (remove str/blank?) (map keyword))
         (str/split (or (System/getProperty "gen.require-native") "") #",")))
