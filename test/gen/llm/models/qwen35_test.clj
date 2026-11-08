@@ -355,6 +355,36 @@
         (let [[_ p k] (last cases)]
           (is (= (ts/host (picked p k)) (ts/host (first (top-k p k))))))))))
 
+(deftest a-half-float-router-computes-in-float32
+  ;; genclj-fxag: under a half float the router's weights load in float32
+  ;; and its product is float32's, so that its top k orders experts as
+  ;; float32 does, not as logits rounded to a half float's ulp (2^-7 at 8
+  ;; in float16). Logits 8 and 8 + 2^-9 are apart in float32 and one
+  ;; value in a half float. Planted bugs (on MLX): router-dtype the
+  ;; model's dtype fails 6 checks (the weights', the logits', the
+  ;; near-tie's, in both half floats); the product in the model's dtype,
+  ;; the logits widened after (the code before genclj-fxag), fails the
+  ;; near-tie's 2
+  (let [router-dtype @#'qwen35/router-dtype
+        router-logits @#'qwen35/router-logits
+        top-k @#'qwen35/top-k]
+    (is (= :float32 (router-dtype :float16) (router-dtype :bfloat16) (router-dtype :float32)))
+    (is (= :float64 (router-dtype :float64)))
+    (is (= (ts/float-dtype) (array/dtype (get-in @models [:moe-f32 :weights :layers 0 :moe :router])))
+        "a model in the backend's float keeps its router in it")
+    (if (ts/jvm?)
+      (println "qwen35-test: the router under half floats is checked on MLX (the JVM backend has none)")
+      (doseq [half [:float16 :bfloat16]]
+        (testing (name half)
+          (let [layers (get-in (qwen35/load (:moe-f32 files) {:dtype half}) [:weights :layers])
+                xs (array/astype (array/array [[1.0 1.0]]) half)
+                router (array/array [[4.0 4.0] [4.0 (+ 4.0 (Math/pow 2 -9))]] {:dtype :float32})
+                logits (router-logits half router xs)]
+            (is (every? #(= :float32 (array/dtype (get-in % [:moe :router]))) layers) "the router's weights")
+            (is (= half (array/dtype (get-in layers [0 :moe :shared-gate]))) "the rest in the model's dtype")
+            (is (= :float32 (array/dtype logits)) "the logits")
+            (is (= [[1]] (ts/host (first (top-k (array/softmax logits {:axis -1}) 1)))) "the larger logit's expert")))))))
+
 ;; ---------------------------------------------------------------------------
 ;; 5. MLX against the JVM backend
 ;; ---------------------------------------------------------------------------

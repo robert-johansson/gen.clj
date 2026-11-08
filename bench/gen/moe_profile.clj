@@ -136,6 +136,7 @@
         moe @#'qwen35/moe
         routing @#'qwen35/routing
         gathered @#'qwen35/gathered
+        router-logits @#'qwen35/router-logits
         x (array/astype (rng/normal (rng/key 1) [r 1 hidden]) dtype)
         xs (array/reshape x [r hidden])
         x1 (array/reshape xs [r 1 1 hidden])
@@ -149,7 +150,7 @@
         ys (array/astype (rng/normal (rng/key 4) [r (* (long (:delta-value-heads config)) (long (:delta-value-dim config)))]) dtype)
         _ (array/eval! [x probs idx p act ys])
         fs {:moe [(fn [x] (mapv #(moe config % x) es)) [x]]
-            :router [(fn [xs] (mapv #(array/softmax (array/astype (common/linear xs (:router %)) :float32) {:axis -1}) es)) [xs]]
+            :router [(fn [xs] (mapv #(array/softmax (router-logits dtype (:router %) xs) {:axis -1}) es)) [xs]]
             :routing [(fn [probs] (mapv (fn [_] (routing probs k)) es)) [probs]]
             :experts [(fn [x1 idx p]
                         (mapv (fn [{:keys [gate up down]}]
