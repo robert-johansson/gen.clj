@@ -528,10 +528,11 @@
   [ctx srcs r]
   (let [n (count srcs)
         r (long r)
-        gs (distinct (map first srcs))]
-    (if (and (c/== 1 (count gs)) (first gs))
+        ;; groups by id: a group's hash would read its arrays
+        ids (distinct (map #(some-> % first :id) srcs))]
+    (if (and (c/== 1 (count ids)) (first ids))
       (let [rows (mapv second srcs)]
-        (take-rows (:states (first gs)) (into rows (repeat (c/- r n) (first rows)))))
+        (take-rows (:states (ffirst srcs)) (into rows (repeat (c/- r n) (first rows)))))
       ;; runs [group from len], a group nil for zeros, padding last
       (let [runs (-> (reduce (fn [runs [g row]]
                                (let [[pg from len] (peek runs)]
