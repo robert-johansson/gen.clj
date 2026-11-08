@@ -19,7 +19,11 @@
    - gate-up-4, gate-up-7, down-4: the same in gather-qmm calls of at
      most 4 or 7 pairs (MLX's CUDA gather_qmm takes its qmv kernel below
      8 rows, its qmm_sm80 from 8);
-   - shared: the shared expert and its gate.
+   - shared: the shared expert and its gate; shared-rows-7 the shared
+     expert in products of at most 7 rows;
+   - q8, q8-rows-7: the GatedDeltaNet layers' Q8_0 products qkv, z and
+     out, of all rows at once or at most 7 (MLX's CUDA quantized products
+     take qmv below 8 rows).
    gen.bench.dtype (float16, the engine bench's). With KPROF_LIB set (the
    path of a kprof library injected by CUDA_INJECTION64_PATH, which
    exports kprof_mark(label, calls): fenrir's kprof2), each timed loop is
@@ -56,7 +60,7 @@
   {:rows (mapv parse-long (str/split (prop "rows" "1,8,16") #","))
    :dtype (keyword (prop "dtype" "float16"))
    :steps (parse-long (prop "steps" "48"))
-   :parts (set (map keyword (str/split (prop "parts" "moe,router,routing,experts,gate-up,gate-up-4,gate-up-7,down,down-4,shared") #",")))})
+   :parts (set (map keyword (str/split (prop "parts" "moe,router,routing,experts,gate-up,gate-up-4,gate-up-7,down,down-4,shared,shared-rows-7,q8,q8-rows-7") #",")))})
 
 ;; ---------------------------------------------------------------------------
 ;; kprof's marks
@@ -135,7 +139,9 @@
         [idx p] (routing probs k)
         p (array/astype p dtype)
         act (array/astype (rng/normal (rng/key 3) [r k 1 (:expert-ffn config)]) dtype)
-        _ (array/eval! [x probs idx p act])
+        ds (filterv :qkv (:layers weights))
+        ys (array/astype (rng/normal (rng/key 4) [r (* (long (:delta-value-heads config)) (long (:delta-value-dim config)))]) dtype)
+        _ (array/eval! [x probs idx p act ys])
         fs {:moe [(fn [x] (mapv #(moe config % x) es)) [x]]
             :router [(fn [xs] (mapv #(array/softmax (array/astype (common/linear xs (:router %)) :float32) {:axis -1}) es)) [xs]]
             :routing [(fn [probs] (mapv (fn [_] (routing probs k)) es)) [probs]]
@@ -151,6 +157,15 @@
             :gate-up-7 [(fn [x1 idx] (mapv (fn [{:keys [gate up]}] [(chunked x1 gate idx token 7) (chunked x1 up idx token 7)]) es)) [x1 idx]]
             :down-4 [(fn [act idx] (mapv (fn [{:keys [down]}] (chunked act down idx flat 4)) es)) [act idx]]
             :down [(fn [act idx] (mapv (fn [{:keys [down]}] (gathered act down idx flat)) es)) [act idx]]
+            :q8 [(fn [xs ys] (mapv (fn [w] [(common/linear xs (:qkv w)) (common/linear xs (:z w)) (common/linear ys (:out w))]) ds)) [xs ys]]
+            :q8-rows-7 [(fn [xs ys]
+                          (let [by7 (fn [x w] (array/concatenate (mapv #(common/linear (array/slice x 0 % (min r (+ (long %) 7))) w) (range 0 r 7)) 0))]
+                            (mapv (fn [w] [(by7 xs (:qkv w)) (by7 xs (:z w)) (by7 ys (:out w))]) ds)))
+                        [xs ys]]
+            :shared-rows-7 [(fn [xs] (mapv (fn [{:keys [shared]}]
+                                             (array/concatenate (mapv #(common/swiglu shared (array/slice xs 0 % (min r (+ (long %) 7)))) (range 0 r 7)) 0))
+                                           es))
+                            [xs]]
             :shared [(fn [xs] (mapv (fn [{:keys [shared shared-gate]}]
                                       (array/* (common/swiglu shared xs)
                                          (array/sigmoid (common/linear xs (array/reshape shared-gate [1 hidden])))))
