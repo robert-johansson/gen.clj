@@ -38,6 +38,36 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Changed (experimental): MLX's Metal multiplies 5 to 15 rows of
+  float32 by a quantized matrix as 16** (genclj-qu77, PROVISIONAL;
+  **Draws**, float32 models on an M3 or M4). `gen.array/quantized-matmul`
+  of x with 5 to 15 rows (its leading axes together) in float32 runs as
+  16 rows, zero rows after x's, its first rows taken: MLX 0.32.4 takes
+  fewer rows than its qmv batch limit by qmv_wide, which reads the weights
+  again for every 5 rows, and 16 by qmm, which reads them once. Only on
+  Metal GPUs of generations 15 and 16 (M3, M4; not an Ultra), where it
+  was measured: on the M4 a Qwen3.5-0.8B Q8_0 step of 8 rows took 38.0
+  ms and now 28.7 (16 rows: 34.4), Qwen3-0.6B's 30.4 (16 rows: 26.9).
+  float16 is unchanged (qmv_wide was the faster there). Each row's values
+  are those of a 16-row product, summed in another order than
+  qmv_wide's: within float round-off, so a draw at a near-tie may
+  differ.
+- **Added (experimental): `gen.array/release!`, and the array engine
+  releases the recurrent states no branch holds** (genclj-qu77,
+  PROVISIONAL). `(array/release! t)` gives the backend arrays in the tree
+  t back now rather than when the GC finds them: on MLX (by the new
+  protocol `gen.array.protocols/IReleasing`) their buffers return to its
+  cache, and a later read of one is loud (`:donated`, as a donated
+  array's); on the JVM backend nothing. For runtimes that know when a
+  value dies; never in semantics code. gen.llm.array-engine's paged and
+  continuous modes release a group of Qwen3.5/3.6's GatedDeltaNet states
+  once no slot's row is in it: a step reading its rows in place (forks
+  still hold them) makes new states, and with the old groups left to the
+  GC, MLX ran a collection every 7 to 13 steps and allocated new buffers
+  between. On the M4, Qwen3.5-0.8B float16 at 8 rows: 23.1 ms a step,
+  20.2 released (in place: 20.1); at 16 rows 38.7, 32.8. The engine's
+  values are unchanged.
+
 - **Changed (experimental): paged attention runs a kernel on MLX's CUDA**
   (genclj-6qb6, genclj-1daf; **Draws**, the paged and continuous modes
   on CUDA). On MLX's CUDA backend `gen.array/paged-attention` runs vLLM's

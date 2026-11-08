@@ -520,6 +520,36 @@
         (let [xv (normal (+ 3 bits g) [k])]
           (is (within? (array/quantized-matmul xv wq s b opts) (array/matmul xv wt) (product-bound xv wt))))))))
 
+(defn- padded-on-metal?
+  "Does the backend under test multiply m rows of float32 as 16 (MLX's GPU
+   on an M3 or M4: gen.backend.mlx.nn/qmm-rows)?"
+  [m]
+  (and (= :mlx (ts/backend-name))
+       (= :gpu ((requiring-resolve 'gen.backend.mlx.array/device) array/*backend*))
+       (== 16 ((requiring-resolve 'gen.backend.mlx.nn/qmm-rows)
+               ((requiring-resolve 'gen.backend.mlx.nn/metal-architecture)) (ts/float-dtype) m))))
+
+(deftest quantized-matmul-of-any-rows
+  ;; 1 to 17 rows, as a matrix and as a decode step's [R 1 K]: dequantize
+  ;; then matmul, each row its own product. MLX's Metal multiplies 5 to 15
+  ;; rows of float32 on an M3 or M4 as 16, zero rows after them (qmm-rows): its rows
+  ;; are then exactly those of a 16-row product, which shows it ran that
+  ;; way. Planted (2026-11-08, Metal): the product's last rows taken for
+  ;; its first fails the first check; the padding skipped, the third.
+  (let [opts {:group-size 32 :bits 8}
+        [wq s b] (quantized 120 [96 256] opts)
+        wt (array/transpose (array/dequantize wq s b opts))
+        x17 (normal 121 [17 256])
+        y16 (array/quantized-matmul (array/slice x17 0 0 16) wq s b opts)]
+    (doseq [m (range 1 18)]
+      (let [x (array/slice x17 0 0 m)
+            y (array/quantized-matmul x wq s b opts)
+            y3 (array/quantized-matmul (array/reshape x [m 1 256]) wq s b opts)]
+        (is (within? y (array/matmul x wt) (product-bound x wt)) (str m " rows"))
+        (is (= (host y) (host (array/reshape y3 [m 96]))) (str m " rows as [R 1 K]"))
+        (when (padded-on-metal? m)
+          (is (= (host y) (host (array/slice y16 0 0 m))) (str m " rows, those of 16")))))))
+
 (deftest gather-qmm-is-a-gathered-product
   (let [opts {:group-size 32 :bits 4}
         [wq s b] (quantized 70 [4 6 64] opts)

@@ -246,6 +246,16 @@
     "x's values, row-major, as a new float array (each rounded to float32;
      booleans 0 or 1). Forces evaluation."))
 
+(defprotocol ^{:api :experimental} IReleasing
+  "A backend whose arrays hold native memory that a runtime may give back
+   before the GC finds them unreachable: gen.array/release!. A backend
+   without it (the JVM's, whose arrays the GC frees) releases nothing.
+   Experimental: outside the 1.x promise (DESIGN §9)."
+  (^{:api :experimental} -release! [b xs]
+    "Release the arrays xs (b's): their memory goes back to the backend
+     now (a graph still reading one keeps what it reads), and every later
+     read of one is loud, as a donated array's (array/compile's :donate)."))
+
 (defprotocol ICompiling
   "A backend that compiles functions of its arrays (MLX: mlx_compile)."
   (-compile [b f opts]

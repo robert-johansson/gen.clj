@@ -674,6 +674,23 @@
       (p/-eval! b xs)))
   t)
 
+(defn ^{:api :experimental} release!
+  "Release the backend arrays in the tree t now, rather than when the GC
+   finds them unreachable, for a runtime that knows when its values die
+   (gen.llm.array-engine's recurrent states no branch holds any more): on
+   a backend whose arrays hold native memory (MLX, by
+   gen.array.protocols/IReleasing) their buffers go back to its cache for
+   the next arrays, a graph still reading one keeping what it reads, and a
+   later read of one is loud (:donated, as a donated array's); elsewhere
+   nothing. Never for semantics code (models, handlers, distributions:
+   rule 3); never on an array something may still read. Returns nil.
+   Experimental: outside the 1.x promise (DESIGN §9)."
+  [t]
+  (doseq [[b xs] (group-by p/-backend (filter backend-array? (tree-leaves t)))
+          :when (instance? gen.array.protocols.IReleasing b)]
+    (p/-release! b xs))
+  nil)
+
 ;; ---------------------------------------------------------------------------
 ;; Reductions and scans
 ;; ---------------------------------------------------------------------------

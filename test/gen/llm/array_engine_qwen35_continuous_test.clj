@@ -407,6 +407,59 @@
                          (catch Throwable t [(str "threw " (ex-message t))])))))))))
 
 ;; ---------------------------------------------------------------------------
+;; Dropped states released (genclj-qu77)
+;; ---------------------------------------------------------------------------
+
+(defn- watched-releases
+  "(f) with the engine's groups of states watched: {:made :released
+   :read-after}, the groups made and released (their states, by identity)
+   and the reads of a released group's arrays after its release (by a
+   step, given them, or rows taken or sliced from them): each a count."
+  [f]
+  (let [made (java.util.IdentityHashMap.)
+        released (java.util.IdentityHashMap.)
+        dead (java.util.IdentityHashMap.)
+        read-after (atom 0)
+        check! (fn [x] (when (some #(.containsKey dead %) (filter array/backend-array? (array/tree-leaves x)))
+                         (swap! read-after inc)))
+        watch (fn [v] (let [g @v] (fn [& args] (run! check! args) (apply g args))))
+        new-group @#'ae/new-states-group!
+        release @#'array/release!]
+    (with-redefs-fn {#'ae/new-states-group! (fn [state states n] (locking made (.put made states true)) (new-group state states n))
+                     #'array/release! (fn [t]
+                                        (locking made
+                                          (.put released t true)
+                                          (doseq [x (filter array/backend-array? (array/tree-leaves t))] (.put dead x true)))
+                                        (release t))
+                     #'ae/take-rows (watch #'ae/take-rows)
+                     #'ae/slice-rows (let [g @#'ae/slice-rows] (fn [states ^long from ^long to] (check! states) (g states from to)))
+                     #'qwen35/compile-paged-batch-step (wrapped-step (fn [layers batch held] (check! [layers held]) [layers batch held]))
+                     #'qwen35/compile-paged-step (let [c qwen35/compile-paged-step]
+                                                   (fn [m opts]
+                                                     (let [g (c m opts)]
+                                                       (fn [& args] (check! args) (apply g args)))))}
+      f)
+    {:made (count made) :released (count released) :read-after @read-after
+     :unreleased (count (remove #(.containsKey released %) (keys made)))}))
+
+(deftest dropped-states-are-released
+  ;; the paged and continuous modes: every group of GatedDeltaNet states
+  ;; the clients' reads made is released once no slot's row is in it
+  ;; (array/release!: on MLX its buffers go back at once), and none is
+  ;; read after. Planted (2026-11-08, JVM and Metal): a group released
+  ;; while others still hold it fails the second check (and on Metal
+  ;; throws, a donated array read); none released, the third.
+  (doseq [mode [{:continuous? false} {}]]
+    (testing mode
+      (let [w (watched-releases #(with-open [e (engine :dense mode)]
+                                   (let [failures (clients-failures :dense e 3)]
+                                     (is (= [] failures))
+                                     (is (zero? (:live (br/info e)))))))]
+        (is (< 10 (:made w)) (pr-str w))
+        (is (zero? (:read-after w)) (pr-str w))
+        (is (zero? (:unreleased w)) (pr-str w))))))
+
+;; ---------------------------------------------------------------------------
 ;; Misuse
 ;; ---------------------------------------------------------------------------
 

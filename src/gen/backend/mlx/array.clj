@@ -59,8 +59,8 @@
   (consume []))
 
 (defn- donated-error [shape dtype]
-  (ex-info (str "An MLX array (" dtype " " shape ") was donated to a compiled function (array/compile's :donate),"
-                " which consumed it: it holds no value any more")
+  (ex-info (str "An MLX array (" dtype " " shape ") was donated to a compiled function (array/compile's :donate)"
+                " or released (array/release!), which consumed it: it holds no value any more")
            {:reason :donated :shape shape :dtype dtype}))
 
 ;; h is the handle MlxRuntime/adopt frees once the array is unreachable;
