@@ -5975,3 +5975,89 @@ namespaces.
   unmeasured.
 - array-engine-qwen35-test keeps 2e-5. It passed on CUDA and x86, but the
   bench doesn't measure it; it could share the per-platform band.
+
+### Paged multi-token reads: several prompts' chunks in one forward
+
+(PROVISIONAL, owner to confirm; genclj-6qb6, 2026-11-08)
+
+**The op.** gen.array/paged-attention (experimental) now also takes a run of
+T queries per sequence: q [B T Hq D] and lens [B T]. Query t reads the first
+lens[b t] positions of its sequence's blocks; for a causal prefill that is
+its own position plus one.
+- The run's keys are written first (paged-write). Each sequence's blocks are
+  then gathered once and read with one sdpa.
+- The Metal and CUDA kernels stay single-query (rank 3), so a run always
+  takes this composite.
+
+**The engine.**
+- **Continuous mode:** a forward reads K prompts' chunks, with [K MB] tables.
+  - Chunks are taken first come, first served. Each has t rows, the first
+    chunk's power of 2.
+  - K is the largest power of 2 the budget allows, capped by the new
+    `:max-chunks` option (default 16). Chunks are never padded; the rest
+    wait a forward. A chunk's padding rows sit at its last position.
+  - Qwen3.5's GatedDeltaNet runs the K chunks as a batch of K sequences
+    (`:chunk-len [K]`). Several chunks' states are stacked, one copy.
+- **Paged mode:** runs go through the same compiled batch step, in place of
+  the eager read over a concatenating cache. paged-read-run and its separate
+  write are gone.
+- **Per forward:** 8 chunks of 32 tokens take 84.6 ms in one forward against
+  150.7 ms as 8 forwards (Qwen3 f16). Qwen3.5: 111 against 183 ms.
+
+**The decisions:**
+1. **paged-attention extended to rank 4,** lens [B T]. Not taken: a new op;
+   keeping it internal to gen.llm.
+2. **Composite only, by measurement.** bench/gen/prefill_bench.clj times the
+   attention part (writes, gathers, sdpa) at 8 to 10% of a prefill forward
+   for Qwen3-0.6B and 1 to 3% for Qwen3.5-0.8B: the matrix products are the
+   forward. Not taken: porting vLLM's prefill path; T single-query kernel
+   calls, which re-read the context once a query.
+3. **The chunk policy:** K a power of 2 rounded down, t from the oldest read,
+   `:max-chunks` 16. Not taken: padding K up to a power of 2 (wasted rows);
+   any K (more shapes to compile); t from the longest read (fewer split
+   prompts, fewer chunks a forward).
+4. **A behaviour change in the paged mode:** a run spanning several forwards
+   that fails in a later one now loses its slot (`:lost-slots`). Before, the
+   slot was left as it was. Not taken: keeping runs eager; compiling only
+   runs that fit one forward.
+5. **Recompiles on new forward shapes** (50 to 125 ms each, once a shape) are
+   the owner's call: accept them as warm-up, or compile common shapes when
+   the engine opens.
+
+**Tests.**
+- paged_test: a run equals each sequence's dense causal sdpa and the
+  single-query reads (the kernel on Metal); 1e-12 on the JVM, 1e-5 on MLX.
+- The continuous tests: several prompts in one forward equal the model's
+  forward, for Qwen3, Qwen3.5 and the MoE.
+- Planted bugs, all failing:
+  - in the op, the causal mask a position long, and reading the next
+    sequence's blocks (both over 0.1);
+  - in the engine, a chunk's tokens at reversed offsets (0.6 to 4 nats), a
+    chunk reading the next chunk's table (0.6 to 4.4), and chunks run as
+    sequences of their own (4.6);
+  - in the paged mode, a run blind to its last position.
+- On the real models in f32, rows are within 7.2e-5 (Qwen3) and 3.5e-5
+  (Qwen3.5) of their own forward. array-engine-llama-test's continuous gap
+  is 4.1e-5 against a band of 1e-4.
+- Not yet run on CUDA. A run uses the same composite there, but its bands
+  are unchecked.
+
+**Measured on Metal, 8 clients** (5 warm runs, 6 timed; main → branch;
+llama.cpp's tokens/s, p90 and time to first token beside them):
+
+| | tok/s | p90 ms | TTFT p50 (max) ms | admission share | llama.cpp |
+|---|---|---|---|---|---|
+| Qwen3 f16 | 402 → 422 | 16.8 → 14.9 | 215 → 210 (429 → 361) | 27.6 → 23.9% | 99, 80, 312 |
+| Qwen3 f32 | 273 → 287 | 27.9 → 23.7 | 270 → 231 (479 → 428) | 22.0 → 18.5% | 99, 77, 319 |
+| Qwen3.5 f16 | 278 → 285 | 27.8 → 22.0 | 296 → 277 (612 → 596) | 27.0 → 24.0% | 70, 114, 413 |
+| Qwen3.5 f32 | 208 → 217 | 38.8 → 30.6 | 324 → 346 (701 → 676) | 23.5 → 21.1% | 70, 112, 431 |
+
+- Paged-mode token SMC (16 particles), tokens/s: Qwen3 811 → 864 (f16) and
+  691 → 757 (f32); Qwen3.5 887 → 970 (f16) and 706 → 783 (f32).
+- In the paged mode with 8 clients, time to first token at p50 is 22 to 39%
+  lower; throughput moves by ±5%.
+- Each new forward shape compiles once, so with one warm run a single run
+  can move by up to 20%.
+
+**Left:** speculative decoding itself (the op reads a draft's tokens, but no
+engine uses it yet); the CUDA run; recompiles on new forward shapes.
