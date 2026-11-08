@@ -116,3 +116,44 @@ source)
   Modified: yes, as the file's Changes line states (Apache License 2.0,
             section 4(b)): the kernel's signature replaced by
             mlx_fast_metal_kernel's, its body and helpers kept.
+
+src/gen/array/gguf/quants.clj (Clojure: GGML's quantizers)
+  Project:  llama.cpp (https://github.com/ggml-org/llama.cpp), its
+            reference quantizers in ggml (quantize_row_q8_0_ref,
+            _q4_0_ref, _q4_1_ref, _q5_0_ref, _q5_1_ref, _q4_K_ref,
+            _q5_K_ref, _q6_K_ref, make_qkx2_quants, make_qx_quants,
+            nearest_int; ggml-impl.h's ggml_compute_fp32_to_bf16). ggml
+            is developed inside llama.cpp's repository; native/build-
+            llama.sh's checkout is shallow, so the file's history was not
+            read here (the owner's check before a release).
+  Upstream: ggml/src/ggml-quants.c and ggml/src/ggml-impl.h at commit
+            cd959bae99ff4bed22bef2604f45241c09bbb8c8 (tag v0.9.0, the
+            pin of native/build-llama.sh),
+            https://github.com/ggml-org/llama.cpp/blob/cd959bae99ff4bed22bef2604f45241c09bbb8c8/ggml/src/ggml-quants.c
+  License:  MIT. Its notice:
+
+            MIT License
+
+            Copyright (c) 2023-2026 The ggml authors
+
+            Permission is hereby granted, free of charge, to any person
+            obtaining a copy of this software and associated
+            documentation files (the "Software"), to deal in the Software
+            without restriction, including without limitation the rights
+            to use, copy, modify, merge, publish, distribute, sublicense,
+            and/or sell copies of the Software, and to permit persons to
+            whom the Software is furnished to do so, subject to the
+            following conditions:
+
+            The above copyright notice and this permission notice shall
+            be included in all copies or substantial portions of the
+            Software.
+
+            THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+            KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+            WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+            PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+            COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+            LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+            OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+            SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

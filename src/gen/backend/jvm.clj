@@ -913,8 +913,8 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- load-gguf
-  "p/-load-gguf: float16 tensors as float32 (the backend has no float16;
-   the values are the same)."
+  "p/-load-gguf: float16 and bfloat16 tensors as float32 (the backend has
+   neither; the values are the same)."
   [{:keys [path tensors]}]
   (into {}
         (map (fn [info]
@@ -922,7 +922,7 @@
                  [(:name info)
                   (if quantized
                     (mapv make quantized shapes [:uint32 :float32 :float32])
-                    (make data shape (if (= dtype :float16) :float32 dtype)))])))
+                    (make data shape (if (#{:float16 :bfloat16} dtype) :float32 dtype)))])))
         tensors))
 
 ;; ---------------------------------------------------------------------------

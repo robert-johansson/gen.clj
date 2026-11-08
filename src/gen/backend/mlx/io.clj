@@ -16,8 +16,8 @@
    float64 metadata is refused before MLX misreads it (check-metadata).
 
    A file holding a type MLX's loader does not read as gen.array loads it
-   (Q5_0, Q5_1 and the K-quants, which it would turn into float16) is read
-   by gen.array.gguf's host reader instead, every tensor of it: the
+   (BF16, Q5_0, Q5_1 and the K-quants, which it would turn into float16)
+   is read by gen.array.gguf's host reader instead, every tensor of it: the
    quantized ones decoded and repacked on the host as MLX's affine
    quantization (the same words, scales and biases as MLX's loader gives
    for Q8_0, Q4_0 and Q4_1), Q6_K decoded to float32, and the arrays made
@@ -65,7 +65,8 @@
 
 (defn- host-array
   "An array of shape and dtype of the host's data: a float[] (float32), a
-   short[] (float16's bits) or an int[] (int32, or uint32's bits)."
+   short[] (float16's or bfloat16's bits) or an int[] (int32, or uint32's
+   bits)."
   [b data shape dtype]
   (with-open [arena (Arena/ofConfined)]
     (let [seg (condp instance? data

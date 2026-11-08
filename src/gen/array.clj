@@ -1568,7 +1568,8 @@
    - :tensors: each tensor by its name in the file (llama.cpp's, e.g.
      \"blk.0.attn_q.weight\"), its shape outermost first (a matrix
      weight [out in]). F32 and I32 load as float32 and int32 arrays, F16
-     as float16 (float32 on a backend without it, the JVM's). Q8_0, Q4_0,
+     and BF16 as float16 and bfloat16 (float32 on a backend without them,
+     the JVM's: the same values). Q8_0, Q4_0,
      Q4_1, Q5_0, Q5_1, Q4_K and Q5_K load as MLX's affine quantization,
      {:wq :scales :biases :bits :group-size}, the arguments and options of
      dequantize and quantized-matmul: groups of 32 (a K-quant's
@@ -1580,8 +1581,8 @@
    - :files: the paths read: path, or every file of a split model
      (<prefix>-00001-of-0000N.gguf, as llama.cpp's gguf-split writes them;
      path must be the first).
-   Every other tensor type (Q2_K, Q3_K, the IQ types and BF16 among them)
-   is a loud error (:unsupported), as are a file that is no GGUF of
+   Every other tensor type (Q2_K, Q3_K and the IQ types among them) is a
+   loud error (:unsupported), as are a file that is no GGUF of
    version 2 or 3, a split's file missing, and a tensor named twice
    (:invalid-gguf). MLX reads the tensors by its loader (mlx_load_gguf),
    or a file holding a type its loader does not read by gen.array.gguf's

@@ -44,6 +44,7 @@
             [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
             [gen.array.gguf :as gguf]
+            [gen.array.gguf.quants :as quants]
             [gen.random :as random]
             [gen.test-support :as ts])
   (:import [java.nio.file Files]
@@ -70,6 +71,17 @@
 
 (defn- thrown [f]
   (try (f) nil (catch clojure.lang.ExceptionInfo e (ex-data e))))
+
+(defn- file-bytes
+  "The bytes of the tensor info of the file at path."
+  ^bytes [path {:keys [offset bytes]}]
+  (let [out (byte-array bytes)]
+    (with-open [f (java.io.RandomAccessFile. (str path) "r")]
+      (.seek f (long offset))
+      (.readFully f out))
+    out))
+
+(defn- dequantized-or-dense [t] (if (map? t) (dequantized t) t))
 
 (defn- temp-dir []
   (str (Files/createTempDirectory "gguf-test" (make-array FileAttribute 0))))
@@ -235,7 +247,7 @@
         (is (= :invalid-gguf (:reason (thrown #(array/load-gguf (str d "/m.gguf"))))))))))
 
 (deftest refused-files-are-loud
-  (doseq [[file t] [["unsupported-q3_k.gguf" :q3_k] ["unsupported-bf16.gguf" :bf16]]]
+  (doseq [[file t] [["unsupported-q3_k.gguf" :q3_k]]]
     (is (= {:reason :unsupported :tensor "refused.weight" :type t}
            (select-keys (thrown #(array/load-gguf (fixture file))) [:reason :tensor :type]))
         file))
@@ -321,5 +333,56 @@
         (is (= :invalid-args (reason {:metadata [["k" :string "a"] ["k" :string "b"]]})) "a key twice")
         (is (= :invalid-args (reason {:tensors [(first tensors) (first tensors)]})) "a tensor twice")
         (is (= :invalid-args (reason {:tensors [(assoc (first tensors) :shape [4])]})) "data of another size")
-        (is (= :unsupported (reason {:tensors [(assoc (first tensors) :type :f16)]})))
+        (is (= :unsupported (reason {:tensors [(assoc (first tensors) :type :q3_k)]})))
+        (is (= :invalid-args (reason {:tensors [(assoc (second tensors) :type :q8_0)]})) "a row of 2 values in blocks of 32")
+        (is (= :invalid-args (reason {:tensors [(assoc (first tensors) :bytes (byte-array 20))]})) ":data and :bytes")
+        (is (= :invalid-args (reason {:tensors [(-> (first tensors) (dissoc :data) (assoc :bytes (byte-array 19)))]}))
+            "bytes of another size")
+        (is (= :unsupported (reason {:tensors [(assoc (first tensors) :type :i32)]})) "I32 is copied, not encoded")
         (is (not (.exists (io/file d "x.gguf"))) "nothing written")))))
+
+(deftest the-writer-writes-every-type-it-encodes
+  ;; each type, from :data (encoded) and from :bytes (copied), read back
+  ;; by load-gguf as the encoding's values (gen.array.gguf/host-values,
+  ;; which gen.array.gguf-quants-test checks against llama.cpp), and the
+  ;; bytes in the file the encoding's
+  (let [d (temp-dir)
+        x (float-array (map #(* 0.1 (Math/sin (* 0.37 (double %)))) (range 1024)))
+        types (sort (keys (dissoc quants/types :i32)))
+        f (str d "/all.gguf")
+        g (str d "/copied.gguf")]
+    (gguf/write-gguf f {:metadata [["general.architecture" :string "test"]]
+                        :tensors (for [t types] {:name (str "t." (name t) ".weight") :type t :shape [4 256] :data x})})
+    (gguf/write-gguf g {:metadata [["general.architecture" :string "test"]]
+                        :tensors (for [{:keys [name type shape] :as info} (:tensors (gguf/header f))]
+                                   {:name name :type type :shape shape :bytes #(file-bytes f info)})})
+    (let [{tensors :tensors loaded-types :types} (array/load-gguf f)
+          copied (array/load-gguf g)
+          h (gguf/header f)]
+      (is (= (zipmap (map #(str "t." (name %) ".weight") types) types) loaded-types))
+      (doseq [{:keys [name] :as info} (:tensors h)]
+        (is (= (vec (gguf/host-values f info)) (mapv double (array/->floats (dequantized-or-dense (tensors name)))))
+            name)
+        (is (= (vec (gguf/host-values f info)) (mapv double (array/->floats (dequantized-or-dense ((:tensors copied) name)))))
+            (str name ", copied"))
+        (is (java.util.Arrays/equals ^bytes (file-bytes f info) ^bytes (file-bytes g (first (filter #(= name (:name %)) (:tensors (gguf/header g)))))))))))
+
+(deftest bf16-loads-as-its-values
+  ;; qwen3-small-mixed.gguf's ffn_gate is BF16, by llama.cpp's quantizer:
+  ;; each value its bits' (the high half of a float), bfloat16 on MLX,
+  ;; float32 on the JVM backend; the F16 original's within bfloat16's
+  ;; half an ulp
+  (let [f (fixture "qwen3-small-mixed.gguf")
+        info (first (filter #(= "blk.0.ffn_gate.weight" (:name %)) (:tensors (gguf/header f))))
+        ^bytes raw (file-bytes f info)
+        bits (java.nio.ByteBuffer/wrap raw)
+        _ (.order bits java.nio.ByteOrder/LITTLE_ENDIAN)
+        expected (mapv #(double (Float/intBitsToFloat (unchecked-int (bit-shift-left (bit-and (long (.getShort bits (int (* 2 %)))) 0xffff) 16))))
+                       (range (quot (alength raw) 2)))
+        t ((:tensors (array/load-gguf f)) "blk.0.ffn_gate.weight")
+        original ((:tensors (array/load-gguf (fixture "qwen3-small-f16.gguf"))) "blk.0.ffn_gate.weight")]
+    (is (= :bf16 (:type info)))
+    (is (= (if (ts/jvm?) :float32 :bfloat16) (array/dtype t)))
+    (is (= expected (mapv double (array/->floats t))))
+    (is (every? true? (map (fn [a b] (<= (Math/abs (- a (double b))) (* (Math/pow 2 -8) (Math/abs a))))
+                           (mapv double (array/->floats original)) expected)))))

@@ -12,7 +12,8 @@
 ;; with-backend, batched, with-store-of, batched-or, outside-revise,
 ;; with-exact-density, the laws' scaled and vacuous-on-unvisitable,
 ;; special's horner, tape's grads, threefry's add32, rotl32 and unrolled,
-;; dtype's case-table, gguf's put-fives! and sub-blocks!, the MLX backend's
+;; dtype's case-table, gguf's put-fives! and sub-blocks!, gguf.quants' f32
+;; and fma32 and half, the MLX backend's
 ;; guarded and evaluating, and device's with-fallback. deflaws defines its specs from the law set,
 ;; which only evaluation knows: a call of one by name is unresolved.
 {:lint-as {gen.dist.dsl/dist clojure.core/defn
@@ -28,6 +29,7 @@
                        gen.backend.jvm/defreduce hooks.gen.backend.jvm/defreduce
                        gen.backend.jvm/defscan hooks.gen.backend.jvm/defscan
                        gen.array.gguf/each-block hooks.gen.array.gguf/each-block
+                       gen.array.gguf.quants/each hooks.gen.array.gguf/each-block
                        gen.backend.jvm/fold-range hooks.gen.backend.jvm/fold-range
                        gen.backend.jvm/at hooks.gen.backend.jvm/at
                        gen.backend.mlx/export hooks.gen.backend.mlx/export

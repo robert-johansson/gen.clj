@@ -72,10 +72,23 @@ The files:
   ffn_up as Q5_K and attn_k as Q8_0 (its --tensor-type overrides): Q4_K,
   Q5_K, Q6_K (attn_v, ffn_down and the tied embedding, Q4_K_M's), Q8_0
   and F32 in one model.
+- qwen3-small-mixed.gguf: qwen3-small-f16.gguf by llama.cpp's quantizer
+  as Q8_0, with attn_q as Q4_0, attn_k as Q4_1, attn_v as Q5_0,
+  attn_output as Q5_1, ffn_gate as BF16 and ffn_up as F32: the types of
+  32-value blocks, and the float types, as llama.cpp writes them
+  (gen.llm.convert-test's reference, with qwen3-small-q4_k_m.gguf).
+- quants-random.gguf (with --llama-lib): random rows of 256 values of eight
+  kinds (normal, uniform, Laplace, mostly zeros, sub-blocks of scales
+  10^-3 to 10^3 apart, small integers, 64 rows of N(0, 0.05²) rounded to
+  bfloat16, as a model's weights, and float32's subnormals, whose
+  scales' reciprocals overflow) as F32, and each as Q8_0, Q4_0,
+  Q4_1, Q5_0, Q5_1, Q4_K, Q5_K and Q6_K by llama.cpp's reference
+  quantizers (quantize_row_*_ref, by ctypes): gen.array.gguf.quants'
+  reference.
 - float64-metadata.gguf: float64 metadata values (which MLX's loader
   misreads: gen.backend.mlx.io) before a string, and one F32 tensor.
-- unsupported-q3_k.gguf and unsupported-bf16.gguf: a tensor of a type the
-  loader refuses (Q3_K's bytes are random: only its type is read).
+- unsupported-q3_k.gguf: a tensor of a type the loader refuses (Q3_K's
+  bytes are random: only its type is read).
 
 With --with-vocabulary <a Qwen3.5 GGUF> <dir>, it writes instead, into
 dir, tiny random Qwen3.5 and Qwen3.5-MoE models with that GGUF's
@@ -91,6 +104,15 @@ vocabulary: not committed. Their check runs with
 
     ~/code/genmlx/.venv/bin/python -I test/fixtures/gguf/generate.py \
         --with-vocabulary ~/gen-clj-models/Qwen3.5-0.8B-Q8_0.gguf target/qwen35-vocab-models
+
+With --quantize <source> <destination> <ftype> (and --llama-lib), it
+writes instead llama.cpp's quantization of a model, for
+gen.llm.convert-real-test's references: ftype a llama_ftype (7 Q8_0, 15
+Q4_K_M, 17 Q5_K_M, 32 BF16, …), e.g.
+
+    ~/code/genmlx/.venv/bin/python -I test/fixtures/gguf/generate.py \
+        --llama-lib native/build/llama/macos-arm64/lib \
+        --quantize ~/gen-clj-models/ggml-org-2026-10-21/Qwen3-0.6B-f16.gguf target/Qwen3-0.6B-Q4_K_M.gguf 15
 
 Fixed seed: the same files each run (numpy's PCG64). gguf-py's metadata
 module imports yaml for model cards, which this script never reads; it
@@ -110,6 +132,11 @@ if "--with-vocabulary" in ARGS:
     i = ARGS.index("--with-vocabulary")
     VOCABULARY = ARGS[i + 1:i + 3]
     ARGS = ARGS[:i] + ARGS[i + 3:]
+QUANTIZE = None
+if "--quantize" in ARGS:
+    i = ARGS.index("--quantize")
+    QUANTIZE = ARGS[i + 1:i + 4]
+    ARGS = ARGS[:i] + ARGS[i + 4:]
 LLAMA_LIB = None
 if "--llama-lib" in ARGS:
     i = ARGS.index("--llama-lib")
@@ -520,8 +547,68 @@ def write_small(rng):
         # Q4_K_M (LLAMA_FTYPE_MOSTLY_Q4_K_M, 15), ffn_up as Q5_K and attn_k as Q8_0
         llama_quantize(llama_libs()[1], path, os.path.join(HERE, "qwen3-small-q4_k_m.gguf"), 15,
                        [("ffn_up", Q.Q5_K), ("attn_k", Q.Q8_0)])
+        # Q8_0 (LLAMA_FTYPE_MOSTLY_Q8_0, 7), each other type a tensor
+        llama_quantize(llama_libs()[1], path, os.path.join(HERE, "qwen3-small-mixed.gguf"), 7,
+                       [("attn_q", Q.Q4_0), ("attn_k", Q.Q4_1), ("attn_v", Q.Q5_0), ("attn_output", Q.Q5_1),
+                        ("ffn_gate", Q.BF16), ("ffn_up", Q.F32)])
     else:
-        print("  (no --llama-lib: qwen3-small-q4_k_m.gguf not written)")
+        print("  (no --llama-lib: qwen3-small-q4_k_m.gguf and qwen3-small-mixed.gguf not written)")
+
+
+def c_quantize(base, x, qtype):
+    """The bytes of the float32 values x by llama.cpp's own reference
+    quantizer, quantize_row_<type>_ref (ggml-quants.c), as llama-quantize
+    quantizes without an importance matrix."""
+    import ctypes
+    x = np.ascontiguousarray(x, dtype=np.float32).reshape(-1)
+    block, size = gguf.GGML_QUANT_SIZES[qtype]
+    out = np.zeros(x.size // block * size, dtype=np.uint8)
+    f = getattr(base, "quantize_row_" + qtype.name[:-1].lower() + qtype.name[-1] + "_ref")
+    f.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64]
+    f.restype = None
+    f(x.ctypes.data, out.ctypes.data, x.size)
+    return out
+
+
+def bf16_round(x):
+    """x (float32) rounded to bfloat16's precision, to nearest even."""
+    u = np.ascontiguousarray(x, dtype=np.float32).view(np.uint32).astype(np.uint64)
+    return ((((u + 0x7FFF + ((u >> 16) & 1)) >> 16) << 16).astype(np.uint32)).view(np.float32)
+
+
+def write_quants_random(rng):
+    """quants-random.gguf: random rows of 256 values (x.<kind>.weight, F32)
+    and each by llama.cpp's reference quantizers (<type>.<kind>.weight):
+    kinds of values a search's ties and edges come from (normal; uniform;
+    Laplace's heavy tails; mostly zeros; sub-blocks of scales 10^-3 to 10^3
+    apart; small integers, many equal values; weights of bfloat16's
+    precision, as a model's; float32's subnormals, whose scales'
+    reciprocals overflow)."""
+    if not LLAMA_LIB:
+        print("  (no --llama-lib: quants-random.gguf not written)")
+        return
+    base = llama_libs()[0]
+    path = os.path.join(HERE, "quants-random.gguf")
+    w = gguf.GGUFWriter(path, "test")
+    n = (16, 256)
+    kinds = {"normal": rng.normal(0.0, 1.0, size=n),
+             "uniform": rng.uniform(-1.0, 1.0, size=n),
+             "laplace": rng.laplace(0.0, 1.0, size=n),
+             "sparse": rng.normal(0.0, 1.0, size=n) * (rng.uniform(size=n) < 0.1),
+             "scales": rng.normal(0.0, 1.0, size=n) * 10.0 ** rng.integers(-3, 4, size=(16, 8, 1)).repeat(32, -1).reshape(n),
+             "integers": rng.integers(-3, 4, size=n).astype(np.float64),
+             # a model's weights cast from bfloat16 (8 significant bits), whose
+             # equal errors make the searches' ties
+             "bfloat16": bf16_round(rng.normal(0.0, 0.05, size=(64, 256))),
+             # float32's subnormals and least normals: a scale's reciprocal past
+             # float's range, its infinities and NaNs as C converts them
+             "tiny": rng.normal(0.0, 1.0, size=n) * 10.0 ** rng.integers(-44, -36, size=(16, 8, 1)).repeat(32, -1).reshape(n)}
+    for kind, x in kinds.items():
+        x = x.astype(np.float32)
+        w.add_tensor("x.%s.weight" % kind, x)
+        for qtype in [Q.Q8_0, Q.Q4_0, Q.Q4_1, Q.Q5_0, Q.Q5_1, Q.Q4_K, Q.Q5_K, Q.Q6_K]:
+            w.add_tensor("%s.%s.weight" % (qtype.name.lower(), kind), c_quantize(base, x, qtype), raw_dtype=qtype)
+    finish(w, [path])
 
 
 def write_float64():
@@ -536,9 +623,7 @@ def write_float64():
 
 
 def write_unsupported(rng):
-    for name, data, qtype in [("unsupported-q3_k.gguf", rng.integers(0, 256, size=(2, 110), dtype=np.uint8), Q.Q3_K),
-                              ("unsupported-bf16.gguf",
-                               gguf.quants.quantize(rng.normal(size=(2, 32)).astype(np.float32), Q.BF16), Q.BF16)]:
+    for name, data, qtype in [("unsupported-q3_k.gguf", rng.integers(0, 256, size=(2, 110), dtype=np.uint8), Q.Q3_K)]:
         path = os.path.join(HERE, name)
         w = gguf.GGUFWriter(path, "test")
         w.add_tensor("ok.weight", np.ones((2, 32), dtype=np.float32))
@@ -568,6 +653,10 @@ def write_with_vocabulary(source, out_dir):
 
 
 def main():
+    if QUANTIZE:
+        src, dst, ftype = QUANTIZE
+        llama_quantize(llama_libs()[1], src, dst, int(ftype), [])
+        return
     if VOCABULARY:
         write_with_vocabulary(*VOCABULARY)
         return
@@ -581,6 +670,7 @@ def main():
     write_float64()
     write_unsupported(np.random.default_rng(8))
     write_small(np.random.default_rng(20261109))
+    write_quants_random(np.random.default_rng(20261110))
     for moe, stem in [(False, "qwen35"), (True, "qwen35moe")]:
         weights = qwen35_weights(np.random.default_rng(20261108 + moe), moe)
         write_qwen35(stem + "-tiny-f32.gguf", weights, False, moe)
