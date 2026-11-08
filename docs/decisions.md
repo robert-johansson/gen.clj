@@ -6567,3 +6567,85 @@ for the MoE.
    - cast at load;
    - read the GGUF with F_NOCACHE so it doesn't sit in the file cache.
 3. array-engine-bench prints its tables by engine, not by section.
+
+### Qwen3.5's decode step in fewer kernels; gated-delta on CUDA
+
+(The owner's call of 2026-11-08, the open items' item 2, built; the choices
+inside it PROVISIONAL, owner to confirm; genclj-yesw)
+
+**Kernels a compiled batch-1 step,** float16 on fenrir, main → the branch:
+
+| Kind | MoE | 0.8B |
+|---|---:|---:|
+| all | 2574 → 2184 | 746 → 632 |
+| fused elementwise | 856 → 706 | 234 → 162 |
+| copies and casts | 380 → 280 | 90 → 84 |
+| aranges | 160 → 80 | — |
+| products | 572 → 512 | 224 → 188 |
+| rms-norm and rope | 211 → 181 | 127 → 109 |
+| custom kernels | 10 → 40 | 6 → 24 |
+
+**The changes:**
+1. **gen.backend.mlx.gated-delta-cuda:** mlx-lm's Metal kernel translated to
+   CUDA (MIT; rule 10's header and THIRD-PARTY-NOTICES). It runs on CUDA for
+   reads shorter than `:chunk-size` (64); longer reads keep the chunked
+   composite. It had run the composite's token loop, about 8 kernels a layer.
+   Draws move on CUDA only.
+2. **qwen35, the same values in fewer kernels:**
+   - q and k normed in one rms-norm, then scaled and cast in one chain;
+   - the key heads tiled by one broadcast copy;
+   - the attention gate read in place;
+   - the MoE's aranges shared.
+   A GatedDeltaNet layer went from 32 to 22 kernels on the MoE.
+- Tried and reverted: fusing the MoE's residual sum, which split the shared
+  gate's sigmoid at MLX's fusion depth (11) and cost 2 kernels a layer.
+- Tests: qwen35-test's fewer-kernels-are-the-old-forms checks each new form
+  value for value against the old. Planted bugs: tiling grouped (6 checks),
+  q and k swapped (2), the gate without its sigmoid (2). gated-delta-test
+  checks the kernel against the loop in float32 and float16; a q/k swap fails
+  it on CUDA and on Metal.
+
+**Measured on fenrir, float16, tokens/s,** main → the branch (alternated;
+runs spread about ±6%):
+
+| | main | branch | llama.cpp |
+|---|---:|---:|---:|
+| MoE batch 1, continuous | 49–53 | 56–59 | 139 |
+| MoE batch 1, paged | 52–59 | 54–62 | |
+| MoE batch 1, static | 40 | 48–51 | |
+| MoE, 8 continuous clients | 165–166 | 183 | 162 |
+| 0.8B batch 1, paged | 136–156 | 155–161 | 255 |
+| 0.8B batch 1, continuous | 117–124 | 134–151 | |
+| 0.8B batch 1, static | 82–84 | 133–136 | |
+
+- The MoE's static time to first token: 478 → 243 ms, since short prefill
+  chunks now take the kernel.
+- Metal: within noise of main (fewerops's round on the Mac).
+- llama.cpp is still about 2.4× faster at batch 1. A simple kernel costs
+  about 2.4 µs to encode.
+
+**The choices and the levers left, for the owner:**
+1. **The kernel only for reads under 64 tokens.** Not taken: all reads
+   (longer prefill unmeasured); the composite on CUDA.
+2. **gen.array/gated-delta with fewer key heads** and a tiling option would
+   save the MoE's last 2 copies a layer (−60 kernels a step). Not taken yet:
+   it is a gen.array change.
+3. **Native sigmoid, softplus and softmax on MLX** through gen.array: −179
+   and −120 kernels a step measured as a what-if, about −0.6 ms. It changes
+   values for every MLX user. Alternatives: a short SiLU in qwen35 only, or
+   leave it.
+4. **A fused MoE routing op** (softmax, top-k and renormalization in one CUDA
+   kernel): the largest lever left, about −14 kernels a layer, about 25% of
+   the step. It needs a gen.array op.
+5. **Stacked projections at load** (qkv+z+α+β, q/k/v, gate+up): about −190
+   kernels a step, and faster batch-1 gathers. It touches LoRA, the
+   checkpoint loader and the planted mutations.
+6. **Splitting the convolution from its SiLU by a reshape:** −30 kernels,
+   but it depends on MLX's fuser; not taken.
+7. **A CUDA failure at main** (genclj-6fik): array-engine-test's
+   quantized-files-compute-in-float16-on-cuda errors on fenrir with
+   `cudaLaunchKernelExC invalid argument` in the Qwen3 tiny fixture's float16
+   paged step.
+8. **For upstream (the owner's call):** MLX's CUDA custom kernels hash their
+   whole source at every launch, and the paged-attention kernel's source is
+   large.
