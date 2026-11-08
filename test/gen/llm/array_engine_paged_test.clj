@@ -414,6 +414,13 @@
     (is (= :invalid-option (reason #(ae/engine (merge paged-opts {:model (:f32 files) :block-size 12})))))
     (is (= :invalid-option (reason #(ae/engine (merge paged-opts {:model (:f32 files) :paged? 1})))))
     (is (= :invalid-option (reason #(ae/engine (merge paged-opts {:model (:f32 files) :precompile? 1})))))
+    (testing "an option the chosen mode does not read"
+      (let [unread #(ts/thrown-data (ae/engine (merge {:model (:f32 files)} %)))]
+        (is (= {:reason :invalid-option :mode :paged :unread [:block]} (unread {:block 32})))
+        (is (= {:reason :invalid-option :mode :paged :unread [:max-chunks :wait]} (unread {:wait 0.5 :max-chunks 4})))
+        (is (= {:reason :invalid-option :mode :static :unread [:min-rows :pool-blocks]}
+               (unread {:paged? false :pool-blocks 8 :min-rows 2})))
+        (is (= {:reason :invalid-option :mode :continuous :unread [:block]} (unread {:continuous? true :block 32})))))
     (with-open [e (ae/engine {:model (:f32 @models) :paged? false})]
       (is (= :not-paged (reason #(ae/blocks e))))
       (is (= :not-paged (reason #(ae/shapes e)))))))

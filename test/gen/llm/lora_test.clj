@@ -425,7 +425,7 @@
   (doseq [[k m] @models
           :let [adapted (lora/adapt m (with-b (adapter k) 0.3 (rng/key 3)))
                 prompt [95 51 72 69 0 67 65 80 73 84 65 76 0 73 83]]]
-    (with-open [e (ae/engine {:model adapted :max-branches 8 :block 16 :n-batch 8})]
+    (with-open [e (ae/engine {:model adapted :max-branches 8 :n-batch 8})]
       (let [b (br/open e prompt)
             [s] (br/advance [(br/fork b)] [42])]
         (is (<= (bc/max-diff (forward-row adapted prompt) (br/logprobs b) 128) engine-band) (str (name k) ": a read"))

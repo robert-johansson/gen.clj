@@ -1381,6 +1381,17 @@
    :continuous? boolean? :wait #(and (number? %) (c/<= 0.0 (double %) 10.0)) :max-chunks pos-int?
    :precompile? boolean?})
 
+(def ^:private mode-options
+  "The options only some modes read, by mode: one given to a mode that
+   does not read it is loud (rule 6), as an unknown one is."
+  {:static #{:block}
+   :paged #{:block-size :pool-blocks :min-rows :precompile?}
+   :continuous #{:block-size :pool-blocks :min-rows :precompile? :wait :max-chunks}})
+
+(def ^:private mode-only
+  "Every option some mode does not read."
+  (into [] (sort (distinct (mapcat val mode-options)))))
+
 (defn- check-options
   "opts with their defaults, checked: a loud error for an unknown, missing
    or bad one."
@@ -1390,7 +1401,8 @@
   (when-let [ks (seq (remove option-checks (keys opts)))]
     (throw (ex-info (str "array-engine/engine: unknown options " (vec ks) "; it takes " (vec (sort (keys option-checks))))
                     {:reason :invalid-option :unknown (vec ks)})))
-  (let [{:keys [model] :as opts} (merge defaults opts)]
+  (let [given opts
+        {:keys [model] :as opts} (merge defaults opts)]
     (doseq [[k ok?] option-checks
             :when (and (or (= k :model) (contains? opts k)) (not (ok? (get opts k))))]
       (throw (if (= k :model)
@@ -1403,6 +1415,11 @@
     (when (and (:continuous? opts) (not (:paged? opts)))
       (throw (ex-info "array-engine/engine: :continuous? batches over the paged mode, which :paged? false turns off"
                       {:reason :invalid-option :continuous? true :paged? false})))
+    (let [mode (cond (not (:paged? opts)) :static (:continuous? opts) :continuous :else :paged)
+          unread (filter (fn [k] (and (contains? given k) (not (contains? (mode-options mode) k)))) mode-only)]
+      (when (seq unread)
+        (throw (ex-info (str "array-engine/engine: the " (name mode) " mode does not read " (vec unread))
+                        {:reason :invalid-option :mode mode :unread (vec unread)}))))
     opts))
 
 (defn- model-backend
@@ -1559,7 +1576,9 @@
        :max-chunks  the most longer reads (prompts) a forward reads a
                     chunk of (default 16; 1 reads one at a time), within
                     :n-batch
-   :continuous? with :paged? false is an error."
+   :continuous? with :paged? false is an error, and so is an option the
+   chosen mode does not read (:block in the paged mode, :wait in the
+   static one)."
   ^java.io.Closeable [opts]
   (let [opts (check-options opts)
         b array/*backend*]

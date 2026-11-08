@@ -48,7 +48,12 @@ other values for the same key, from the same distribution.
   a time (8 clients, Q8_0 in float16: Qwen3.5-0.8B on Metal 74 tokens/s
   paged, 233 continuous, llama.cpp 69; Qwen3-0.6B on CUDA 219 paged, 555
   continuous, llama.cpp 503). `ae/groups` is the static mode's, so it is
-  loud on a default engine; `:block` is the static mode's option.
+  loud on a default engine. An option the chosen mode does not read is
+  loud (`:invalid-option`, with `:mode` and `:unread`): `:block` in the
+  paged and continuous modes; `:block-size`, `:pool-blocks`, `:min-rows`
+  and `:precompile?` in the static one; `:wait` and `:max-chunks` outside
+  the continuous one. A caller that passed `:block` relying on the old
+  static default now gets the error and chooses a mode.
   **Draws**: an engine opened without `:paged?` gives the paged mode's
   rows, which equal the static mode's within the engine's band (float
   round-off: its kernels differ by shape), not bit for bit, so draws at

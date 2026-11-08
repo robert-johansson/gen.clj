@@ -91,9 +91,13 @@
   {:continuous? true :block-size 8 :pool-blocks 16 :n-batch 8})
 
 (defn- engine
-  "A new continuous engine of model k (close it)."
+  "A new continuous engine of model k (close it); more's :paged? false a
+   static one, without the paged mode's options (an option a mode does
+   not read is loud)."
   (^java.io.Closeable [k] (engine k {}))
-  (^java.io.Closeable [k more] (ae/engine (merge continuous-opts {:model (@models k) :max-branches 64} more))))
+  (^java.io.Closeable [k more]
+   (ae/engine (merge (cond-> continuous-opts (false? (:paged? more)) (dissoc :block-size :pool-blocks))
+                     {:model (@models k) :max-branches 64} more))))
 
 (def ^:private shared (atom {}))
 
