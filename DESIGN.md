@@ -315,7 +315,7 @@ LLM generative functions   token GF · grammar middleware · token SMC · struct
 LM protocol                vocab/encode/decode · next-logprobs · batch-next-logprobs · score   (genlm-shaped,
                            content-addressed, with a token-prefix trie; batching explicit)
 Branching protocol         open · fork · advance · extend · score · resample · dispose!
-engines                    llama.cpp (llama.h via our own filtered jextract FFM)  |  MLX-native forwards (later)
+engines                    llama.cpp (llama.h via our own filtered jextract FFM)  |  MLX-native forwards (1.3.0)
 ```
 
 - **Engine 1: llama.cpp.**
@@ -332,7 +332,9 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
 - **Engine 2: MLX-native.** Port GenMLX's own Qwen3/Qwen3.5 forward passes over
   the M1 membrane. That gives numeric parity with GenMLX, device-resident
   logits, immutable caches (forks are free, no sequence cap) and gradients for
-  LoRA/SFT/GRPO.
+  LoRA/SFT/GRPO. Built in 1.3.0 as `gen.llm.array-engine` over gen.array's
+  LLM operations (`docs/research/llm-mlx-engine.md`; its conventions in §9,
+  "Language models").
 - **Tokenizers.** llama.cpp uses the vocabulary embedded in the GGUF
   (`llama_token_to_piece` gives raw bytes). The MLX path uses
   `ai.djl.huggingface:tokenizers`. Chat templates come from the GGUF or Jinjava.

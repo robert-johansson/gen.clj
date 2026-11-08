@@ -11,7 +11,7 @@ Generative Function Interface (GFI): `simulate`, `generate`, `update`,
 `regenerate`, `assess`, `propose` and `project`, each a pure function of its
 arguments and an explicit random key.
 
-**Status: 1.2.1** (2026-11-06). The core runs on the JVM, CPU-only, with
+**Status: 1.3.0** (2026-11-08). The core runs on the JVM, CPU-only, with
 nothing but a JDK: a pure-Clojure array backend with reverse-mode autodiff.
 An MLX backend runs the same code on Apple's GPU (Metal), on MLX's CPU
 backend and on CUDA: the test battery passes on Metal, on MLX's CPU and on
@@ -23,7 +23,11 @@ Gen.jl's own test suite passes. Local LLMs run as generative functions
 through llama.cpp (experimental), with GenLM's tools for controlled
 generation: potentials and their combinators, token SMC with a critic and
 adaptive weighted rejection sampling, grammars as regular expressions,
-instaparse grammars and context-free grammars. The book, `book/`, teaches it with code
+instaparse grammars and context-free grammars. 1.3.0 adds an engine of
+gen.clj's own over gen.array (experimental): Qwen3 and Qwen3.5/3.6, dense
+and mixtures of experts, from GGUF and safetensors files, with paged
+attention and continuous batching on Metal and CUDA, and LoRA adapters
+trained by SFT and GRPO. The book, `book/`, teaches it with code
 that runs; its appendix *Coming from Gen.jl* (`book/061-from-genjl.md`)
 maps Gen.jl's names and conventions to gen.clj's. Through 1.x the stable
 namespaces keep their names, arities, result keys and documented semantics
@@ -32,7 +36,7 @@ namespaces keep their names, arities, result keys and documented semantics
 
 gen.clj is a git dependency, a release by its tag:
 `{gen.clj/gen.clj {:git/url "https://github.com/robert-johansson/gen.clj"
-:git/tag "v1.2.1" :git/sha "…"}}`.
+:git/tag "v1.3.0" :git/sha "…"}}`.
 
 ## A model and two kinds of inference
 
@@ -165,9 +169,9 @@ gen.clj from the same checkout:
 
 ```clojure
 {:deps {gen.clj/gen.clj {:git/url "https://github.com/robert-johansson/gen.clj"
-                         :git/tag "v1.2.1" :git/sha "…"}
+                         :git/tag "v1.3.0" :git/sha "…"}
         gen.clj/device  {:git/url "https://github.com/robert-johansson/gen.clj"
-                         :git/tag "v1.2.1" :git/sha "…" :deps/root "ext/device"}}}
+                         :git/tag "v1.3.0" :git/sha "…" :deps/root "ext/device"}}}
 ```
 
 | Module | `:deps/root` | What it adds | Its dependencies |
@@ -218,6 +222,13 @@ forks, advances, scores and resamples its branches
 ```
 clojure -J-Dgen.llama.test-model=Qwen3-0.6B-Q8_0.gguf -X:test :nses '[gen.llm.llama-test]'
 ```
+
+`gen.llm.array-engine/engine` (1.3.0) is the same protocol over gen.array,
+on the MLX backend: a Qwen3 or Qwen3.5/3.6 GGUF file, its tokenizer
+llama.cpp's vocabulary of the same file (`gen.llm.llama/vocabulary`). Its
+design is `docs/research/llm-mlx-engine.md`, its speed against llama.cpp
+`docs/benchmarks.md`; `gen.llm.lora`, `sft` and `grpo` train adapters for
+it and for llama.cpp.
 
 ## License
 

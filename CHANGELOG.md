@@ -38,22 +38,164 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
-- **Changed (experimental): load-gguf on MLX leaves the file cache as it
-  found it for every file** (gen.backend.mlx.io; genclj-vn28). A file of
-  only F32, F16, I32, Q8_0, Q4_0 and Q4_1 still loads by MLX's loader
-  (mlx_load_gguf), which reads through the file cache; the pages its load
-  brought in are now evicted after it (msync `MS_INVALIDATE` on macOS,
-  `posix_fadvise` `DONTNEED` on Linux), those cached before kept, so it
-  no longer leaves the model cached (+0.64 GB for Qwen3-0.6B-Q8_0, +0.83
-  GB for Qwen3.5-0.8B-Q8_0, +8.7 GB for Qwen3-8B-Q8_0). The arrays are
-  unchanged. Load time, cold: 2 to 5% more (the M4: Qwen3-0.6B 1.18 to
-  1.20 s, Qwen3.5-0.8B 1.40 to 1.47 s; fenrir's CUDA: Qwen3-8B 3.36 to
-  3.45 s). `-Dgen.gguf.cache=true` keeps the pages, as it keeps the host
-  reader's; a failed eviction call is loud (`:io`). Not taken: every file
-  through the host reader on MLX (the owner's rule, 2026-11-08), which
-  loads faster on the M4 (0.81 against 1.18 s, Qwen3-0.6B) but about
-  twice as slowly on fenrir's CUDA (7.5 against 3.4 s, Qwen3-8B).
+## [1.3.0] - 2026-11-08
 
+The MLX engine and training (DESIGN §9; docs/decisions.md, "1.3.0's scope
+narrowed"; genclj-lv7t): a language-model engine of gen.clj's own over
+gen.array. Qwen3 and Qwen3.5/3.6, dense and mixtures of experts
+(`gen.llm.models.qwen3`, `.qwen35`), from GGUF files (the K-quants
+included) and Hugging Face safetensors checkpoints, and converted between
+quantizations (`gen.llm.convert`); `gen.llm.array-engine`, a Branching
+engine with paged attention (kernels ported from kernels-community on
+Metal and from vLLM on CUDA, launched through MLX, no C++ of gen.clj's)
+and continuous batching; LoRA adapters trained by supervised fine-tuning
+and GRPO (`gen.llm.lora`, `.sft`, `.grpo`), which llama.cpp serves too.
+The LM, token and SMC layers run over it unchanged. The LLM layers and
+gen.array's new LLM operations are experimental. The rest of mlx-node
+parity (other families, the modalities, the server and the CLI) waits
+under genclj-k3b1, and 1.3.0's follow-ups under genclj-sgue (1.3.x).
+docs/benchmarks.md, "Language models (1.3.0)", has its speed against
+llama.cpp on the same files.
+
+Read first, the **Breaking** change, in the stable API: the inference,
+learning and gradient functions refuse an option key they do not read
+(`:unknown-options`, its data naming the keys each takes), where they ran
+on their defaults, silently. It breaks correct code that shares one
+options map between functions that read different keys (`nuts/adapt`
+refuses sample's `:samples`): give each function its own keys,
+`(select-keys opts (:accepted (ex-data e)))`. 1.2.1 left it for this
+release (DESIGN §9, 1.2.1's owner calls, item 6).
+
+For code that does not use the LLM layers, two more changes: **Draws** of
+a batched particle outside its support (gen.batched, on a concrete
+backend: such a particle runs its scalar operation alone, from its own
+key, where its batched trace kept and weighed choices its scalar trace
+stops short of), and uint32 arrays on the JVM backend.
+
+The LLM layers' defaults that change **Draws**, each within float
+round-off or the engine's band, so that a draw at a near-tie may differ:
+the array engine opens the paged mode (the continuous mode stays opt-in,
+and serving several clients at once needs it); its shapes are bucketed and
+the common ones compiled when it opens; a quantized GGUF file computes in
+float16 on MLX's CUDA, and a mixture of experts in float16 on Metal too,
+its router in float32; paged attention and gated delta run ported kernels
+on CUDA; float32 products of 5 to 15 rows by a quantized matrix run as 16
+rows on an M3 or M4; llama.cpp's recurrent and hybrid models split their
+steps on Metal again (v0.9.0 had renamed its Metal buffers). An option the
+engine's mode does not read is loud (`:invalid-option`).
+
+The owner's calls (docs/decisions.md, 1.3.0): the scope narrowed to the
+foundation, weights and quantization, the two Qwen families, the engine
+with paged attention and continuous batching, and training (Qwen3.5/3.6's
+too); the engine's design (its seven recommendations); kernels ported from
+where they originated (THIRD-PARTY-NOTICES), everything around them
+gen.clj's, launched through MLX with no C++ of ours (route A); the paged
+mode the default, the continuous mode opt-in, shapes bucketed and compiled
+at open; float16 by default for quantized models on CUDA, MLX kept as the
+NVIDIA engine, a model's forward there checked against MLX's CPU forward;
+float16 for a mixture of experts on Metal; `gen.array/release!` and the
+M3/M4 row padding; the CUDA runtime's prefetch of a large read; GGUF reads
+past the file cache by default (`-Dgen.gguf.cache=true` keeps them), and
+mlx_load_gguf kept for the types it reads, its file cache evicted. The
+calls inside the work are PROVISIONAL, for the owner to confirm, each with
+its alternatives in docs/decisions.md: among them the option keys' error,
+vLLM's kernel ported with five tiers of shared memory, the continuous
+mode's chunks (K a power of 2, `:max-chunks` 16), top-k by ranks, the
+bands per platform, `gen.array/release-cache!` after the open-time
+compile, gated delta's CUDA kernel for reads under 64 tokens, llama.cpp's
+experts recorded for the forced checks, and load-gguf's cast at load.
+
+No native library changes: MLX 0.32.4 with mlx-c v0.8.0 and llama.cpp
+v0.9.0, as in 1.2.1. The Java binding gains methods (MlxRuntime,
+LlamaRuntime, llama.h's adapter functions and five of ggml's): compile it
+again with `clojure -T:build java`. `native/build-llama.sh --bench` also
+builds llama-bench, the ceiling in docs/benchmarks.md.
+
+Checked before the tag: CHECKED
+
+### Known issues
+
+- **MLX clamps an out-of-range array index** in a gather by default, where
+  the JVM backend throws (docs/array-api.md §13): `-Dgen.mlx.check-gathers=true`
+  checks each gather's indices, at an evaluation per gather.
+- **The book on MLX:** some chapters of Parts II-V do host math on results
+  and fail on the MLX backend (genclj-ac70). The book's gate is the JVM
+  backend, where every chapter passes.
+- **Context-free masks** are exact for the text's bytes, not its tokens: a
+  vocabulary without a byte the language needs can reach a prefix that no
+  token sequence completes (byte-level BPE vocabularies have every byte).
+- **The CUDA C lowering is parked** (gen.device.cuda; genclj-z1gj): no
+  consumer yet, so `:device` lowers to `:jvm` and `:metal`, and its tests
+  that need a CUDA device skip by name (`-Dgen.cuda.parked=false` runs
+  them).
+- **llama.cpp v0.9.0 brings no gain to many branches** (genclj-ajse):
+  measured against v0.7.0, it ties up to 8 branches and is 5-16% slower at
+  4 to 16 after a long prompt; gen.llm.cache re-reads a prompt that no
+  live branch holds (genclj-av33).
+- **On NVIDIA, llama.cpp is faster at batch 1 and in token SMC:** MLX's
+  CUDA host encodes a kernel in 2.4 to 5 µs, and a batch-1 step is bound
+  by it (the MoE 56-59 tokens/s against 139; token SMC on Qwen3-0.6B 1462
+  against 2552). With several continuous clients it leads on both
+  machines (docs/benchmarks.md); the levers left are genclj-sgue's.
+- **Concurrent callers in the continuous mode** get results that depend on
+  how their reads were gathered, within the engine's band, not bit for
+  bit; hence it stays opt-in.
+- **Off the Mac, llama.cpp is a loose reference:** its CUDA and x86 CPU
+  builds round activations to 8 bits, so the bands against it there are
+  2.4 to 12.3 nats and hold most planted convention errors. The Mac's
+  bands and the NVIDIA reference test (gen.llm.models.cuda-reference-test,
+  against MLX's CPU forward in float32) check the conventions. The Thor's
+  CUDA (sm_110) and aarch64 Linux CPUs take these bands unmeasured.
+- **The Qwen3.6 MoE on a Mac** takes 23.1 GB in MLX in float16 (28.4 in
+  float32): it was run on a 64 GB MacBook, with the big apps closed.
+- **mlx_load_gguf's eviction on macOS** also drops pages another process
+  has mapped that were not cached before the load (llama.cpp's mmap of the
+  same file, say); they are read back from disk when needed.
+
+### Changes
+
+- **Breaking: the inference, learning and gradient functions refuse an
+  option key they do not read** (gen.inference.mcmc, .nuts, .kernel,
+  .particle-filter, .importance, .vi, .mh, .enumerative, .transform,
+  .diagnostics, gen.learning, gen.gradients; genclj-vux3, genclj-yrb6;
+  DESIGN §9, 1.2.1's owner calls, item 6). They ignored it and ran on
+  their defaults, silently: `(mcmc/hmc t s {:steps 50 :epsilon 0.3})` ran
+  at :L 10 and :eps 0.1, `kernel/run`'s `{:burnin 50}` burned nothing,
+  `nuts/sample`'s `{:adapt-delta 0.95}` kept 0.8, `(learn/adam
+  {:learning-rate 0.1})` stepped at 0.001, `diagnostics/summary`'s
+  `{:quantiles …}` gave the default quantiles. Each now throws an
+  `ex-info`, `:reason :unknown-options`, its data naming the function
+  (`:fn`), the keys refused (`:unknown`) and the keys it takes
+  (`:accepted`), and an options map that is not a map
+  (`:invalid-options`). The functions: mcmc's hmc, mala, nuts,
+  map-optimize and their -particles forms; kernel's kernel, hmc, mala,
+  nuts and map-optimize (when the kernel is made) and run; nuts' adapt
+  and sample; mh's move; importance's importance-sampling,
+  importance-resampling, estimate and weighted-sample; the particle
+  filter's initialize, step, resample, resize, maybe-resample, replicate,
+  dereplicate, coalesce, introduce and reweighting; vi's black-box-vi,
+  black-box-vimco, elbo-gradient and vimco-gradient; enumerative's
+  choice-vol-grid (its trailing map), enumerative-inference and
+  with-exact-proposal; the translators' maps (translator,
+  deterministic-translator, extending-translator, updating-translator)
+  and involution's options; diagnostics' summary; gen.learning's
+  optimizers (sgd, gradient-descent, momentum, rmsprop, adagrad, adam,
+  adamw, clip-norm) and train; gen.gradients' choice-gradients.
+  kernel/kernel and tf/run refused unknown keys already, and now say so
+  in the same form (tf/run's data was `{:options …}`); a deterministic
+  translator's `:q-forward` and `:q-backward` keep their own error. This
+  breaks correct code that shares one options map between functions that
+  read different keys: `nuts/adapt` refuses sample's `:samples` and
+  `:keep`, `kernel/run` refuses nuts' `:warmup`, `pf/step` refuses
+  initialize's `:batched?`, `pf/resample` maybe-resample's
+  `:ess-threshold`, `updating-translator` translator's `:p-new`. Give each
+  function its own keys, `(select-keys opts (:accepted (ex-data e)))`. A
+  qualified key is refused as any other. The API snapshot records `:as
+  opts` added to the arglists of weighted-sample, resample, replicate,
+  dereplicate, coalesce, vimco-gradient, summary, enumerative-inference,
+  with-exact-proposal, translator, extending-translator,
+  updating-translator, involution, train and the eight optimizers (their
+  arities are unchanged).
 - **Changed (experimental): a mixture of experts computes in float16 on
   Metal by default** (the owner's call, 2026-11-08, after genclj-0nxn).
   `gen.llm.array-engine/engine` given a GGUF file of quantized weights
@@ -64,99 +206,6 @@ other values for the same key, from the same distribution.
   float32 on Metal; MLX's CPU, the JVM backend, a given `:dtype` and a
   model passed loaded are unchanged. **Draws**: an MoE's draws on Metal
   change.
-
-- **Added (experimental): `gen.array/load-gguf`'s `:dtype`, a model cast
-  as it loads; `qwen3/load` and `qwen35/load` load so** (genclj-0nxn).
-  `(array/load-gguf path {:dtype d})`, d a float dtype or a function of a
-  tensor's name giving one (or nil), makes each float tensor (and a
-  quantized tensor's scales and biases) in its dtype as it loads: on MLX
-  the host reader converts as it reads (rounded to nearest even, as
-  astype rounds), else a tensor is cast and evaluated at a time, its
-  source released. The arrays are `(astype x d)` of the plain load's,
-  bit for bit (checked tensor by tensor on the fixtures, both backends,
-  and on Qwen3.6-35B-A3B on MLX in float32, float16 and bfloat16).
-  `qwen35/load` and `qwen3/load` pass the model's dtype (the router
-  float32 under a half float), so a float16 model no longer loads whole
-  in float32 first: Qwen3.6-35B-A3B in float16 peaks at 23.1 GB in MLX on
-  Metal, where it peaked at 33.7. A `:dtype` that is no float dtype is
-  loud (`:invalid-args`).
-
-- **Changed (experimental): GGUF tensors read by the host reader past the
-  file cache, a chunk at a time** (gen.array.gguf; genclj-0nxn). The
-  reader the JVM backend loads with, and MLX's for the K-quants, BF16 and
-  Q5_0/Q5_1, opens the file with `ExtendedOpenOption/DIRECT` (F_NOCACHE on
-  macOS, O_DIRECT on Linux), so loading a model leaves none of its file
-  cached (on the MacBook, today's load left the MoE's 20 GB cached, and
-  macOS compressed the model rather than drop them). It reads and decodes
-  2^24 values at a time into reused buffers, and MLX's arrays are made a
-  tensor at a time from native memory, so the load's heap stays under
-  0.4 GB whatever the model (it was 2.4 to 3.0 GB on the MoE). A failed
-  read is loud (`:io`, naming the file); `-Dgen.gguf.cache=true` reads
-  through the cache (a file system that refuses direct reads).
-  `gguf/host-tensor` and `read-tensor` take a reader (`gguf/reader`) or
-  a path. MLX's own loader (files of F32, F16, I32, Q8_0, Q4_0 and Q4_1
-  only) is unchanged.
-
-- **Fixed (experimental): llama.cpp's recurrent and hybrid models split
-  their steps on Metal again by default** (gen.llm.llama; found by
-  genclj-ansx). The default (gen.llama.split-recurrent unset: split only
-  on Metal, DESIGN §9) looked for llama.cpp's Metal buffers by the name
-  "Metal…", which v0.9.0 renamed "MTL0…", so since the v0.9.0 pin a
-  Qwen3.5 engine on Metal stepped unsplit. Both names are recognized.
-  **Draws**: a split step replays the recurrent states, so a recurrent
-  model's next-token values on Metal move within llama.cpp's own band.
-
-- **Added (experimental): llama.cpp's intermediate tensors recorded, for
-  checks: `gen.llm.llama`'s `:record`, `recorded` and `experts`**
-  (genclj-ansx). An engine opened with `:record #{"ffn_moe_topk"}` passes
-  llama.cpp an eval callback (`cb_eval`) that copies the tensors llama.cpp
-  names `<base>-<layer>` to the host at each decode (F32 or I32, 2-D);
-  `(llama/recorded e)` returns the decodes since the last call
-  (`{:slot :positions :tensors {base {layer {position row}}}}`) and
-  `(llama/experts decodes)` the experts each layer of a mixture of experts
-  picked, `{slot {position [indices by layer]}}` (nil where a layer
-  computed no row: llama.cpp's last layer computes only the positions
-  whose logits are read). Off by default, and without it nothing changes:
-  no callback, the same context. With it the context computes its graphs
-  in pieces (slower; llama.cpp's readings moved by at most 2.2e-4 nats on
-  the tiny MoE), a step advances one branch (several are refused,
-  `:unsupported`), and a decode that records no tensor of a base named,
-  or a layer short, is a loud error, undone (`:not-recorded`). The
-  binding gains ggml's `ggml_nelements`, `ggml_nbytes`,
-  `ggml_element_size`, `ggml_get_name` and `ggml_backend_tensor_get`
-  (native/jextract-llama.sh's list; written in jextract's form).
-  gen.llm.models.against-llama's readings of a recording engine carry
-  llama.cpp's experts, which compare-readings' `:forced` forces on the
-  forward: on Qwen3.6-35B-A3B Q4_K_M on Metal (the MacBook M2 Max) the gap
-  falls from 0.97 to 6.4e-3 nats on the general prompts and from 5.97 to
-  8.0e-2 on the digits, its forced band 0.16 (`against/forced-band`,
-  where the unforced is 11.7); on CUDA (fenrir) from 2.19 to 0.45 and
-  from 6.24 to 1.91, its forced band 3.9 (unforced 12.3).
-  qwen35-llama-test and the noise bench compare both ways on a mixture of
-  experts.
-
-- **Added (experimental): `gen.array/release-cache!`, and the array
-  engine gives back its backend's cache after compiling at open**
-  (genclj-v1kg). `(array/release-cache! b)` gives back the memory backend
-  b keeps for its next arrays: on MLX (by the new optional protocol
-  `gen.array.protocols/ICaching`) its buffer cache is freed, live arrays
-  keeping theirs; on the JVM backend nothing; a wrapping backend's (a
-  tape's, a batch tracer's) is the one it wraps. For runtimes; never in
-  semantics code. gen.llm.array-engine calls it once, after the shapes
-  `:precompile?` compiles when it opens. The warm calls' buffers had
-  filled 1.9 GB of MLX's 2.1 GB cache (a sixteenth of a 32 GB Mac's
-  memory), so the steps' freed buffers found it full and were freed and
-  made anew: Qwen3.5-0.8B's token SMC at 16 particles lost 2-3% on Metal
-  (float16 939 tokens/s against 964 without `:precompile?`; float32 753
-  against 770; 964 and 775 with the cache cleared, and the cost also
-  went with MLX's cache limit raised to 6 GB). Against main, alternated
-  (three JVMs each, tokens/s): Qwen3.5-0.8B token SMC float16 933-941 →
-  954-971, float32 705-758 → 772-778; 8 continuous clients unchanged
-  (float16 290-295 → 292-296, float32 217-218 → 217-219); Qwen3-0.6B,
-  whose steps use under 0.7 GB of the cache, unchanged within 1-2%
-  (SMC float16 847-856 → 838-853, float32 747-753 → 738-752; 8 clients
-  400-428 → 404-422, 272-277 → 272-279). Open times unchanged. No result
-  changes.
 - **Changed (experimental): gen.array/gated-delta has a CUDA kernel, and
   Qwen3.5/3.6's decode step makes fewer kernels** (genclj-yesw; **Draws**,
   gated-delta's reads shorter than its chunk on MLX's CUDA backend, and so
@@ -185,7 +234,6 @@ other values for the same key, from the same distribution.
   (llama.cpp: 139 and 162). Unchanged: the values off CUDA
   (Metal, MLX's CPU, the JVM backend), reads of 64 tokens or more, and
   Metal's speed (Qwen3.5-0.8B, float32, within noise).
-
 - **Changed (experimental): a mixture of experts' router computes in
   float32 under half floats** (genclj-fxag; **Draws**, a Qwen3.5/3.6
   mixture of experts loaded in float16 or bfloat16, on CUDA and Metal).
@@ -263,6 +311,334 @@ other values for the same key, from the same distribution.
   mode, after 6 untimed runs: Qwen3-0.6B 718 (llama.cpp 504; 251 after
   one, its forwards still tracing new shapes), the MoE 135 (llama.cpp
   162).
+- **Changed (experimental): MLX's Metal multiplies 5 to 15 rows of
+  float32 by a quantized matrix as 16** (genclj-qu77, PROVISIONAL;
+  **Draws**, float32 models on an M3 or M4). `gen.array/quantized-matmul`
+  of x with 5 to 15 rows (its leading axes together) in float32 runs as
+  16 rows, zero rows after x's, its first rows taken: MLX 0.32.4 takes
+  fewer rows than its qmv batch limit by qmv_wide, which reads the weights
+  again for every 5 rows, and 16 by qmm, which reads them once. Only on
+  Metal GPUs of generations 15 and 16 (M3, M4; not an Ultra), where it
+  was measured: on the M4 a Qwen3.5-0.8B Q8_0 step of 8 rows took 38.0
+  ms and now 28.7 (16 rows: 34.4), Qwen3-0.6B's 30.4 (16 rows: 26.9).
+  float16 is unchanged (qmv_wide was the faster there). Each row's values
+  are those of a 16-row product, summed in another order than
+  qmv_wide's: within float round-off, so a draw at a near-tie may
+  differ.
+- **Changed (experimental): paged attention runs a kernel on MLX's CUDA**
+  (genclj-6qb6, genclj-1daf; **Draws**, the paged and continuous modes
+  on CUDA). On MLX's CUDA backend `gen.array/paged-attention` runs vLLM's
+  paged attention kernel (v1, from vLLM's last commit that has it,
+  ported per THIRD-PARTY-NOTICES, Apache-2.0) through
+  mlx_fast_cuda_kernel, where it ran the composite: float32, float16 and
+  bfloat16 (compute capability 8.0 and up), blocks of 8, 16 or 32
+  positions, head sizes up to 256, tables of up to 16,000 positions (the
+  composite past them). Its values are the composite's within float
+  round-off (float32 2.9e-6, the half floats an output ulp), so a draw at
+  a near-tie may differ. NVRTC compiles each variant (a dtype, head size,
+  block size and size of shared memory) at its first launch in a
+  process, in under a second. Measured on fenrir's RTX PRO 6000
+  (Qwen3-0.6B Q8_0, float16, against the composite): token SMC at 16
+  particles 1158 tokens/s paged (999) and 1202 continuous (989); 8
+  concurrent clients 219 paged (181) and 555 continuous (431), where
+  llama.cpp's CUDA build gives 503.
+- **Changed (experimental): load-gguf on MLX leaves the file cache as it
+  found it for every file** (gen.backend.mlx.io; genclj-vn28). A file of
+  only F32, F16, I32, Q8_0, Q4_0 and Q4_1 still loads by MLX's loader
+  (mlx_load_gguf), which reads through the file cache; the pages its load
+  brought in are now evicted after it (msync `MS_INVALIDATE` on macOS,
+  `posix_fadvise` `DONTNEED` on Linux), those cached before kept, so it
+  no longer leaves the model cached (+0.64 GB for Qwen3-0.6B-Q8_0, +0.83
+  GB for Qwen3.5-0.8B-Q8_0, +8.7 GB for Qwen3-8B-Q8_0). The arrays are
+  unchanged. Load time, cold: 2 to 5% more (the M4: Qwen3-0.6B 1.18 to
+  1.20 s, Qwen3.5-0.8B 1.40 to 1.47 s; fenrir's CUDA: Qwen3-8B 3.36 to
+  3.45 s). `-Dgen.gguf.cache=true` keeps the pages, as it keeps the host
+  reader's; a failed eviction call is loud (`:io`). Not taken: every file
+  through the host reader on MLX (the owner's rule, 2026-11-08), which
+  loads faster on the M4 (0.81 against 1.18 s, Qwen3-0.6B) but about
+  twice as slowly on fenrir's CUDA (7.5 against 3.4 s, Qwen3-8B).
+- **Changed (experimental): GGUF tensors read by the host reader past the
+  file cache, a chunk at a time** (gen.array.gguf; genclj-0nxn). The
+  reader the JVM backend loads with, and MLX's for the K-quants, BF16 and
+  Q5_0/Q5_1, opens the file with `ExtendedOpenOption/DIRECT` (F_NOCACHE on
+  macOS, O_DIRECT on Linux), so loading a model leaves none of its file
+  cached (on the MacBook, today's load left the MoE's 20 GB cached, and
+  macOS compressed the model rather than drop them). It reads and decodes
+  2^24 values at a time into reused buffers, and MLX's arrays are made a
+  tensor at a time from native memory, so the load's heap stays under
+  0.4 GB whatever the model (it was 2.4 to 3.0 GB on the MoE). A failed
+  read is loud (`:io`, naming the file); `-Dgen.gguf.cache=true` reads
+  through the cache (a file system that refuses direct reads).
+  `gguf/host-tensor` and `read-tensor` take a reader (`gguf/reader`) or
+  a path. MLX's own loader (files of F32, F16, I32, Q8_0, Q4_0 and Q4_1
+  only) is unchanged.
+- **Changed (experimental): a Qwen3.5/3.6 mixture of experts picks its
+  router's top k experts by ranks** (genclj-p0ad). `gen.llm.models.qwen35`
+  ranked the 256 experts by k argmaxes, each masking the last pick: about
+  11 kernels a pick, 3500 of a decode step's 5400 on MLX's CUDA, whose
+  host encodes each kernel in about 5 µs. Each expert's rank is now
+  counted over the rows' [N E E] comparisons (the first of equal entries
+  first, as argmax's), in about 10 kernels a layer; reads of more than
+  2^24 comparisons (a prefill chunk of over 256 tokens) still pick. The
+  same indices and values: no draw changes. Qwen3.6-35B-A3B Q4_K_M in
+  float16 on fenrir's RTX PRO 6000, tokens/s: batch-1 decode 47.9 → 79.6,
+  16 rows 488 → 612 (llama.cpp 210 and 982), 8 clients of the continuous
+  mode 124 → 150 (llama.cpp 161).
+- **Changed (internal): MLX reads float16 and bfloat16 by a Java loop
+  from the buffer, and on CUDA prefetches a large read's pages**
+  (genclj-4acj). `->floats` of a 16-bit float array widens its bit
+  patterns from MLX's buffer in place (`MlxRuntime/widenHalves`), with no
+  copy of its own, bit for bit as before. On MLX's CUDA backend a host
+  read of at least `gen.mlx.prefetch-bytes` bytes (a system property,
+  default 1 MiB; 0 turns it off) moves its managed pages to the host in
+  one `cudaMemPrefetchAsync` (the CUDA runtime MLX links,
+  libcudart.so.13) rather than page by page as the host faults on them.
+  Values are unchanged. A float16 read of 8 to 16 rows of Qwen3's
+  logits took 2.9-3.1 ms a step on fenrir, now 1.1-1.8.
+- **Changed (experimental): `gen.array/load-gguf` loads BF16** (genclj-9pn4,
+  PROVISIONAL), as bfloat16 on MLX (by the host reader: MLX's loader is
+  not trusted with it) and float32 on the JVM backend, where it was
+  `:unsupported`; test/fixtures/gguf/unsupported-bf16.gguf is now
+  bf16.gguf, with its values (bf16.edn).
+- **Changed (experimental): `gen.array.gguf/write-gguf` writes every type
+  above** (genclj-t007), from `:data` (values, encoded) or `:bytes`
+  (copied), either one given as a function, so a converter holds one
+  tensor at a time. It used to write F32 only. It honors
+  `general.alignment`. `gen.array.gguf/header` also gives `:keys`, the
+  metadata's keys in the file's order, and `gen.array.gguf/host-values`
+  reads any loaded tensor's values as a float[] on the host.
+- **Changed (experimental): the paged mode copies a block only for a
+  second writer; Qwen3.5 runs paged** (genclj-6qb6, genclj-1ovd).
+  - `gen.llm.paged`: an allocator records each block's written offsets
+    (`:written`, `paged/written`). `prepare` appends to a shared block
+    filled in part in place when no holder has written past the
+    sequence's end, and copies it only otherwise: an LM's kept entry and
+    the fork that goes on from it share the block, and only a second
+    writer (a resampled duplicate, or the entry itself written later)
+    copies. The values read are the same; the copies, and `stats`'
+    `:copied-blocks`, are fewer: token SMC at 16 particles copied 44
+    blocks where it copied 1012 (Qwen3-0.6B on Metal: 680-703 tokens/s
+    in float32 against 604, 742-758 in float16 against 713).
+  - `gen.llm.models.qwen35`: `paged-pools`, `paged-states`,
+    `paged-cache`, `paged-entries`, `paged-step` and
+    `compile-paged-step`: the attention layers' keys and values in paged
+    pools, the GatedDeltaNet layers' states a row each, the step's
+    layers the two merged by layer.
+  - `gen.llm.array-engine`: `:paged? true` runs Qwen3.5 and Qwen3.6
+    (`:continuous?` stays Qwen3's, loud otherwise). A branch's recurrent
+    states are a row of a group, as the static mode's: a lane steps in
+    place, any other step stacks its rows' states (`stats`'
+    `:stacked-steps`).
+  - `p/IFused` gains `:put-blocks` (gen.array.paged's block write): on
+    MLX one scatter of the blocks as slices.
+  - The donated writes' cost of 8 ms a GB (genclj-1daf) was the GC that
+    genclj-c7uf removed: on Metal a write into pools of 0.14 to 3 GB now
+    takes 0.3-0.7 ms whatever their size.
+- **Changed: `qwen3/config` (and a model's `:config`) holds
+  `:architecture "qwen3"`** (gen.llm.models.qwen3, experimental;
+  genclj-yc3b), the GGUF's general.architecture, which an adapter's file
+  names.
+- **Changed (experimental): `gen.llm.array-engine` runs Qwen3.5 and
+  Qwen3.6** (genclj-xnx3): `:model` a GGUF of architecture qwen3, qwen35
+  or qwen35moe (read from its header), or a model either family's `load`
+  made (its config's `:arch`); another architecture is loud
+  (`:unsupported`). Its info's `:model` gains `:arch`.
+- **Changed: Qwen3's static caches write their keys and values with
+  `put-along-axis`**, not `scatter-add` (genclj-8rnc), so a slot written
+  again holds the new value instead of the sum; the slots past a row's
+  offset need no longer be zeros. **Added (experimental):
+  `(qwen3/rewind cache offsets)`**, a static cache with its rows moved
+  back (each to at most its own offset): the positions past them are
+  dropped and written over by the next steps (a rollback, a slot reused).
+- **Fixed (experimental): llama.cpp's recurrent and hybrid models split
+  their steps on Metal again by default** (gen.llm.llama; found by
+  genclj-ansx). The default (gen.llama.split-recurrent unset: split only
+  on Metal, DESIGN §9) looked for llama.cpp's Metal buffers by the name
+  "Metal…", which v0.9.0 renamed "MTL0…", so since the v0.9.0 pin a
+  Qwen3.5 engine on Metal stepped unsplit. Both names are recognized.
+  **Draws**: a split step replays the recurrent states, so a recurrent
+  model's next-token values on Metal move within llama.cpp's own band.
+- **Fixed (experimental): a JVM exiting with a llama.cpp model or engine
+  open no longer aborts on Metal** (genclj-8dtg). ggml-metal asserts at
+  the process's exit that none of its buffers is left
+  (`GGML_ASSERT([rsets->data count] == 0)`), status 134. A shutdown hook
+  now closes the open engines, each on its own thread after the
+  operation it runs, then the models no engine uses, under their write
+  locks; it waits at most `gen.llama.close-at-exit` seconds (default 10;
+  0 turns it off). gen.llm.llama's namespace doc says to close them first
+  all the same. `gen.llm.slots/closer-of` (experimental) is the action
+  that closes an engine, for such a registry.
+- **Fixed (experimental): gen.llm.array-engine after a failed call**
+  (genclj-5t5l, genclj-8ni2).
+  - A score whose read fails in a call that consumes the paged pools
+    (the paged and continuous modes) now loses every branch the pools
+    held, loudly: its error names them (`:lost-slots`) and they are no
+    longer live. It used to drop `:lost-slots`, leaving them live over
+    emptied slots, so their next operation failed as an engine bug
+    (`:internal`).
+  - A paged step whose rows fail to normalize keeps the pools it wrote,
+    its slots as they were. It used to leave the pools it had consumed
+    in the engine's state, which MLX refuses at the next step, losing
+    every branch.
+  - A run (every mode) normalizes its row before it writes its books, so
+    one that fails leaves its slot as it was. It used to leave the slot
+    ahead of its branch, so that the branch's next operation failed as an
+    engine bug.
+  - A continuous forward whose rows fail to normalize keeps its branches,
+    as a paged step does (genclj-8ni2). It used to lose every branch it
+    read (`:lost-slots`). A read begun in an earlier forward is still
+    lost.
+  - In the continuous mode, a score that loses every branch while other
+    callers' requests are in flight fails those requests too, as lost
+    (`:lost-slots`, their branches freed), and the operations waiting
+    for their branches run (genclj-8ni2). Their next forward used to fail
+    them as an engine bug (`:internal`).
+- **Fixed: `gen.llm.trie/insert` loops down a path** (gen.llm.trie,
+  experimental; genclj-gn5i). insert recursed once for each node on the
+  path it walked, so a trie with an entry at each of a few thousand
+  prefixes of one context overflowed the stack, a StackOverflowError (at
+  ~2,770 nodes on a 1 MB thread stack, fenrir's default). It now walks
+  down in a loop and rebuilds the path back up in another, as
+  remove-entry, entries and size already did (genclj-6h3b); its results
+  and its `:entry-exists` error are unchanged. A node stands only at an
+  entry or where paths part, so a long context alone never recursed
+  deeply, and gen.llm.cache's trie, at most :max-branches entries, passes
+  fewer than twice that many nodes on a path.
+- **Fixed: a batched particle outside its support moves as its scalar
+  trace does** (gen.batched; genclj-n1s3). A batched run cannot stop where
+  a particle's choice leaves its support, so the particle's batched trace
+  holds the choices the run made after that one, which its scalar trace
+  (`b/traces`) stops short of. `update`, `regenerate` and `move` kept
+  those choices' values and weighed them (an update discarded them too),
+  and `project` counted them, where the particle's scalar operation makes
+  them afresh: a particle moved back inside its support (its choice that
+  left it regenerated) left its scalar trace, its weight log p(c |
+  new)/p(c | old) for such a choice c where the scalar law gives 0. Such
+  a particle (score -Inf, on a concrete backend) now runs its scalar
+  operation alone, the result set in its row, and the collection stays
+  batched. **Draws:** those particles draw from their own keys (the key
+  split n ways, as the fallback's). A lazy backend's (MLX's) scalar runs
+  go on as batched ones do, so nothing changes there. Since 2026-10-25 (a
+  choice outside its support stops the run, 9277423); found by
+  gen.fuzz-test's chains of operations (seed 1794085868851).
+- **Performance: a compiled step that donates its arguments no longer
+  collects** (MLX backend, genclj-c7uf). The backend runs a collection
+  (System.gc) once the arrays made since the last one hold
+  `gen.mlx.gc-new-bytes` (a sixteenth of the memory), and counted a
+  step's outputs as new even when they took over the donated inputs'
+  buffers: a decode step consuming its static KV cache counted the whole
+  cache every step and collected every few steps, 1.25 ms a step at batch
+  1 on Metal (Qwen3-0.6B) and 12.5 ms at 16 rows. A donated array's bytes
+  now come off that count (`MlxRuntime/donate`, which replaces
+  `repoint`'s use, and `settleFresh`; new, rebuild with `clojure -T:build
+  java`). Values are unchanged.
+- **Performance (experimental): `gen.llm.array-engine` normalizes its
+  rows about 2.5x faster** (genclj-9y6y), by
+  `gen.llm.host/log-softmax-rows` (new): a row's log-normalizer is taken
+  by blocks of 4096 logits, each block's largest and its sum of
+  exponentials, combined in block order, the exponentials by
+  `gen.llm.host/exp` (new: Tang's table-driven method, within 0.51 ulp on
+  [-708, 0], about a third of `Math/exp`'s cost where that is fdlibm's).
+  Its units of blocks are spread over the engine's host pool and its own
+  thread, so a row's log-normalizer is the same, bit for bit, for any
+  number of threads. ns an entry, one thread and 16 rows of Qwen3's
+  151,936 on the pool of four: M4 4.8 to 2.0 and 1.30 to 0.65; fenrir's
+  x86 under the Graal JIT 13 to 5.0 and 3.5 to 1.6 (floats are converted
+  four at a time there: Graal serializes lone conversions). The
+  log-normalizer moves in its last bits (within 1 ulp of an exact sum,
+  where the sequential sum was within 9), so a log-probability, and a
+  token drawn from the row, can change only where that moves a float's
+  rounding: none of 9.7 million did. Not finite logits are loud as
+  before (`:decode-failed`).
+- **Performance (experimental): MLX's `array/->floats` reads a float16
+  or bfloat16 array as its bits, widened on the host** (genclj-9y6y), not
+  cast to float32 on the device first: the same floats, bit for bit. On
+  CUDA the cast's buffer, freed at once, came back from MLX's buffer
+  cache for the next read's cast in unified memory, so that the device
+  wrote, and the host read, pages the other side held: Qwen3-0.6B's 16
+  rows of float16 logits took 26 ms to read on fenrir, against 4.6 now.
+- **Performance (experimental): MLX's `array/->floats` widens a float16
+  or bfloat16 array's bits about 1.5 to 4 times faster** (genclj-9y6y's
+  follow-up; `gen.array.host/halves->floats`, internal), the same floats,
+  bit for bit: each loop runs to its array's length, a float16's four
+  entries at a time. On the M4, 16 rows of 151,936
+  (bench/gen/widen_bench.clj), ns an entry: Graal's JIT, float16 0.56 to
+  0.38 and bfloat16 0.43 to 0.10; C2 0.60 to 0.34 and 0.52 to 0.25.
+- **Performance (experimental): `gen.llm.token`'s draw walks a row
+  about 2x faster** (genclj-9y6y): its inverse CDF sums each token's
+  probability by `gen.llm.host/exp`. The total moves in its last bits, so
+  a draw for a key can change only when its uniform falls within an ulp
+  or so of a token's cumulative probability.
+- **Performance (experimental): `gen.llm.array-engine` normalizes a
+  decode of fewer rows than its host pool's threads in parts across them**
+  (genclj-c7uf): a row of Qwen3's 151,936 logits in 0.33 ms instead of
+  0.73 (M4, four threads). Its log-normalizer and log-probabilities are
+  the same, bit for bit: the terms are summed in the same order.
+- **Added (experimental): `gen.array/load-gguf`'s `:dtype`, a model cast
+  as it loads; `qwen3/load` and `qwen35/load` load so** (genclj-0nxn).
+  `(array/load-gguf path {:dtype d})`, d a float dtype or a function of a
+  tensor's name giving one (or nil), makes each float tensor (and a
+  quantized tensor's scales and biases) in its dtype as it loads: on MLX
+  the host reader converts as it reads (rounded to nearest even, as
+  astype rounds), else a tensor is cast and evaluated at a time, its
+  source released. The arrays are `(astype x d)` of the plain load's,
+  bit for bit (checked tensor by tensor on the fixtures, both backends,
+  and on Qwen3.6-35B-A3B on MLX in float32, float16 and bfloat16).
+  `qwen35/load` and `qwen3/load` pass the model's dtype (the router
+  float32 under a half float), so a float16 model no longer loads whole
+  in float32 first: Qwen3.6-35B-A3B in float16 peaks at 23.1 GB in MLX on
+  Metal, where it peaked at 33.7. A `:dtype` that is no float dtype is
+  loud (`:invalid-args`).
+- **Added (experimental): llama.cpp's intermediate tensors recorded, for
+  checks: `gen.llm.llama`'s `:record`, `recorded` and `experts`**
+  (genclj-ansx). An engine opened with `:record #{"ffn_moe_topk"}` passes
+  llama.cpp an eval callback (`cb_eval`) that copies the tensors llama.cpp
+  names `<base>-<layer>` to the host at each decode (F32 or I32, 2-D);
+  `(llama/recorded e)` returns the decodes since the last call
+  (`{:slot :positions :tensors {base {layer {position row}}}}`) and
+  `(llama/experts decodes)` the experts each layer of a mixture of experts
+  picked, `{slot {position [indices by layer]}}` (nil where a layer
+  computed no row: llama.cpp's last layer computes only the positions
+  whose logits are read). Off by default, and without it nothing changes:
+  no callback, the same context. With it the context computes its graphs
+  in pieces (slower; llama.cpp's readings moved by at most 2.2e-4 nats on
+  the tiny MoE), a step advances one branch (several are refused,
+  `:unsupported`), and a decode that records no tensor of a base named,
+  or a layer short, is a loud error, undone (`:not-recorded`). The
+  binding gains ggml's `ggml_nelements`, `ggml_nbytes`,
+  `ggml_element_size`, `ggml_get_name` and `ggml_backend_tensor_get`
+  (native/jextract-llama.sh's list; written in jextract's form).
+  gen.llm.models.against-llama's readings of a recording engine carry
+  llama.cpp's experts, which compare-readings' `:forced` forces on the
+  forward: on Qwen3.6-35B-A3B Q4_K_M on Metal (the MacBook M2 Max) the gap
+  falls from 0.97 to 6.4e-3 nats on the general prompts and from 5.97 to
+  8.0e-2 on the digits, its forced band 0.16 (`against/forced-band`,
+  where the unforced is 11.7); on CUDA (fenrir) from 2.19 to 0.45 and
+  from 6.24 to 1.91, its forced band 3.9 (unforced 12.3).
+  qwen35-llama-test and the noise bench compare both ways on a mixture of
+  experts.
+- **Added (experimental): `gen.array/release-cache!`, and the array
+  engine gives back its backend's cache after compiling at open**
+  (genclj-v1kg). `(array/release-cache! b)` gives back the memory backend
+  b keeps for its next arrays: on MLX (by the new optional protocol
+  `gen.array.protocols/ICaching`) its buffer cache is freed, live arrays
+  keeping theirs; on the JVM backend nothing; a wrapping backend's (a
+  tape's, a batch tracer's) is the one it wraps. For runtimes; never in
+  semantics code. gen.llm.array-engine calls it once, after the shapes
+  `:precompile?` compiles when it opens. The warm calls' buffers had
+  filled 1.9 GB of MLX's 2.1 GB cache (a sixteenth of a 32 GB Mac's
+  memory), so the steps' freed buffers found it full and were freed and
+  made anew: Qwen3.5-0.8B's token SMC at 16 particles lost 2-3% on Metal
+  (float16 939 tokens/s against 964 without `:precompile?`; float32 753
+  against 770; 964 and 775 with the cache cleared, and the cost also
+  went with MLX's cache limit raised to 6 GB). Against main, alternated
+  (three JVMs each, tokens/s): Qwen3.5-0.8B token SMC float16 933-941 →
+  954-971, float32 705-758 → 772-778; 8 continuous clients unchanged
+  (float16 290-295 → 292-296, float32 217-218 → 217-219); Qwen3-0.6B,
+  whose steps use under 0.7 GB of the cache, unchanged within 1-2%
+  (SMC float16 847-856 → 838-853, float32 747-753 → 738-752; 8 clients
+  400-428 → 404-422, 272-277 → 272-279). Open times unchanged. No result
+  changes.
 - **Added (experimental): `gen.array/device`** (genclj-1vk7). `(array/device
   b)` is the device backend b computes on: `:cpu` (the JVM backend, MLX's
   CPU), `:metal` (MLX's GPU on macOS) or `:cuda` (MLX's GPU elsewhere), by
@@ -270,7 +646,6 @@ other values for the same key, from the same distribution.
   backend's (a tape's, a batch tracer's) is the one it wraps. For runtime
   choices measured per device, such as the engine's default dtype; never
   for semantics code.
-
 - **Added (experimental): paged attention of a run, and several prompts
   in one continuous forward** (genclj-6qb6, PROVISIONAL).
   `gen.array/paged-attention` also takes T queries a sequence: q
@@ -304,19 +679,6 @@ other values for the same key, from the same distribution.
   (bench/gen/array_engine_bench.clj). Eight prompts of 32 tokens in one
   forward take 84.6 ms against 150.7 in eight (Qwen3, float16;
   bench/gen/prefill_bench.clj).
-
-- **Changed (experimental): a Qwen3.5/3.6 mixture of experts picks its
-  router's top k experts by ranks** (genclj-p0ad). `gen.llm.models.qwen35`
-  ranked the 256 experts by k argmaxes, each masking the last pick: about
-  11 kernels a pick, 3500 of a decode step's 5400 on MLX's CUDA, whose
-  host encodes each kernel in about 5 µs. Each expert's rank is now
-  counted over the rows' [N E E] comparisons (the first of equal entries
-  first, as argmax's), in about 10 kernels a layer; reads of more than
-  2^24 comparisons (a prefill chunk of over 256 tokens) still pick. The
-  same indices and values: no draw changes. Qwen3.6-35B-A3B Q4_K_M in
-  float16 on fenrir's RTX PRO 6000, tokens/s: batch-1 decode 47.9 → 79.6,
-  16 rows 488 → 612 (llama.cpp 210 and 982), 8 clients of the continuous
-  mode 124 → 150 (llama.cpp 161).
 - **Added (experimental): token SMC and completions read the LM's rows
   lent, and an LM forks a step's parents in one call** (genclj-4acj).
   `gen.llm.lm/batch-next-logprobs-lent` gives an LM's rows without
@@ -335,31 +697,6 @@ other values for the same key, from the same distribution.
   step on gen.array's engine and 0.8-1.0 on llama.cpp's, the forks'
   hand-offs 0.6 and 0.2; token SMC there runs 1272 tokens/s paged (main
   1008), 1445 continuous (1056), 2579 on llama.cpp (2177).
-- **Changed (internal): MLX reads float16 and bfloat16 by a Java loop
-  from the buffer, and on CUDA prefetches a large read's pages**
-  (genclj-4acj). `->floats` of a 16-bit float array widens its bit
-  patterns from MLX's buffer in place (`MlxRuntime/widenHalves`), with no
-  copy of its own, bit for bit as before. On MLX's CUDA backend a host
-  read of at least `gen.mlx.prefetch-bytes` bytes (a system property,
-  default 1 MiB; 0 turns it off) moves its managed pages to the host in
-  one `cudaMemPrefetchAsync` (the CUDA runtime MLX links,
-  libcudart.so.13) rather than page by page as the host faults on them.
-  Values are unchanged. A float16 read of 8 to 16 rows of Qwen3's
-  logits took 2.9-3.1 ms a step on fenrir, now 1.1-1.8.
-- **Changed (experimental): MLX's Metal multiplies 5 to 15 rows of
-  float32 by a quantized matrix as 16** (genclj-qu77, PROVISIONAL;
-  **Draws**, float32 models on an M3 or M4). `gen.array/quantized-matmul`
-  of x with 5 to 15 rows (its leading axes together) in float32 runs as
-  16 rows, zero rows after x's, its first rows taken: MLX 0.32.4 takes
-  fewer rows than its qmv batch limit by qmv_wide, which reads the weights
-  again for every 5 rows, and 16 by qmm, which reads them once. Only on
-  Metal GPUs of generations 15 and 16 (M3, M4; not an Ultra), where it
-  was measured: on the M4 a Qwen3.5-0.8B Q8_0 step of 8 rows took 38.0
-  ms and now 28.7 (16 rows: 34.4), Qwen3-0.6B's 30.4 (16 rows: 26.9).
-  float16 is unchanged (qmv_wide was the faster there). Each row's values
-  are those of a 16-row product, summed in another order than
-  qmv_wide's: within float round-off, so a draw at a near-tie may
-  differ.
 - **Added (experimental): `gen.array/release!`, and the array engine
   releases the recurrent states no branch holds** (genclj-qu77,
   PROVISIONAL). `(array/release! t)` gives the backend arrays in the tree
@@ -381,27 +718,6 @@ other values for the same key, from the same distribution.
   Qwen3-0.6B in float32 (both changes): token SMC in the static mode,
   which stacks its rows into a new cache every step, 352 → 529; 8
   continuous clients 214 → 264. The engine's values are unchanged.
-
-- **Changed (experimental): paged attention runs a kernel on MLX's CUDA**
-  (genclj-6qb6, genclj-1daf; **Draws**, the paged and continuous modes
-  on CUDA). On MLX's CUDA backend `gen.array/paged-attention` runs vLLM's
-  paged attention kernel (v1, from vLLM's last commit that has it,
-  ported per THIRD-PARTY-NOTICES, Apache-2.0) through
-  mlx_fast_cuda_kernel, where it ran the composite: float32, float16 and
-  bfloat16 (compute capability 8.0 and up), blocks of 8, 16 or 32
-  positions, head sizes up to 256, tables of up to 16,000 positions (the
-  composite past them). Its values are the composite's within float
-  round-off (float32 2.9e-6, the half floats an output ulp), so a draw at
-  a near-tie may differ. NVRTC compiles each variant (a dtype, head size,
-  block size and size of shared memory) at its first launch in a
-  process, in under a second. Measured on fenrir's RTX PRO 6000
-  (Qwen3-0.6B Q8_0, float16, against the composite): token SMC at 16
-  particles 1158 tokens/s paged (999) and 1202 continuous (989); 8
-  concurrent clients 219 paged (181) and 555 continuous (431), where
-  llama.cpp's CUDA build gives 503.
-
-### Changes
-
 - **Added (experimental): `gen.array/load-safetensors`, and Hugging Face
   checkpoints in `qwen3/load` and `qwen35/load`** (genclj-9pn4,
   PROVISIONAL).
@@ -456,13 +772,6 @@ other values for the same key, from the same distribution.
     (the +1 missed moves it 25.6; A_log's sign gives NaN); Qwen/Qwen3-0.6B
     against the F16 GGUF, 4.4e-5, argmax 128 of 128 (weights apart by
     float16's subnormals only, 3e-8).
-
-- **Changed (experimental): `gen.array/load-gguf` loads BF16** (genclj-9pn4,
-  PROVISIONAL), as bfloat16 on MLX (by the host reader: MLX's loader is
-  not trusted with it) and float32 on the JVM backend, where it was
-  `:unsupported`; test/fixtures/gguf/unsupported-bf16.gguf is now
-  bf16.gguf, with its values (bf16.edn).
-
 - **Added (experimental): `gen.llm.convert`, models converted between
   quantizations** (genclj-t007, PROVISIONAL).
   - `convert!` writes a GGUF file's model as another GGUF file, each
@@ -481,15 +790,6 @@ other values for the same key, from the same distribution.
     (`:mlx-4bit`, `:mlx-mixed-4-6`, …). No GGUF type holds them, and no
     file does yet.
   - `plan` shows each tensor's type without writing.
-
-- **Changed (experimental): `gen.array.gguf/write-gguf` writes every type
-  above** (genclj-t007), from `:data` (values, encoded) or `:bytes`
-  (copied), either one given as a function, so a converter holds one
-  tensor at a time. It used to write F32 only. It honors
-  `general.alignment`. `gen.array.gguf/header` also gives `:keys`, the
-  metadata's keys in the file's order, and `gen.array.gguf/host-values`
-  reads any loaded tensor's values as a float[] on the host.
-
 - **Added (experimental): K-quants in `gen.array/load-gguf`** (genclj-kqxr,
   PROVISIONAL): Q4_K, Q5_K and Q6_K, and Q5_0 and Q5_1 (Q4_K_M's
   fallbacks for rows not of 256 values), each value the file's exactly
@@ -524,7 +824,6 @@ other values for the same key, from the same distribution.
     qwen3-small-f16.gguf with its Q4_K_M by llama.cpp's quantizer
     (generate.py's `--llama-lib`); unsupported-q4_k.gguf is now
     unsupported-q3_k.gguf.
-
 - **Added (experimental): paged KV caches and paged attention**
   (genclj-1daf; route A of the spike, PROVISIONAL: mlx_fast_metal_kernel
   and MLX's donated scatter, no C++ of gen.clj's).
@@ -546,7 +845,6 @@ other values for the same key, from the same distribution.
     doubling, `:min-rows` 1), so token SMC's steps stack no rows; `stats`
     reports its counts and `blocks` its books. A failed paged step loses
     every branch (`:lost-slots`), its pools having been donated.
-
 - **Added (experimental): continuous batching** (genclj-b3ow, PROVISIONAL:
   concurrent callers' results then depend on how their calls were
   gathered, within the engine's band).
@@ -573,7 +871,6 @@ other values for the same key, from the same distribution.
     302 tokens/s in float16 against 90 in the paged mode and 103 through
     llama.cpp (175 against 82 and 92 in float32); a lone caller as
     before.
-
 - **Added (experimental): Qwen3.5 and Qwen3.6 in the continuous mode;
   v2 paged attention past v1's contexts** (genclj-6qb6, PROVISIONAL).
   - `gen.llm.array-engine`: `:continuous? true` runs Qwen3.5 and Qwen3.6
@@ -608,35 +905,6 @@ other values for the same key, from the same distribution.
     ported per THIRD-PARTY-NOTICES), where the composite ran. A decode
     step of Qwen3-0.6B at 16,384 positions: 78 ms (1 row) and 279 ms
     (8 rows) against the composite's 351 and 3338.
-
-- **Changed (experimental): the paged mode copies a block only for a
-  second writer; Qwen3.5 runs paged** (genclj-6qb6, genclj-1ovd).
-  - `gen.llm.paged`: an allocator records each block's written offsets
-    (`:written`, `paged/written`). `prepare` appends to a shared block
-    filled in part in place when no holder has written past the
-    sequence's end, and copies it only otherwise: an LM's kept entry and
-    the fork that goes on from it share the block, and only a second
-    writer (a resampled duplicate, or the entry itself written later)
-    copies. The values read are the same; the copies, and `stats`'
-    `:copied-blocks`, are fewer: token SMC at 16 particles copied 44
-    blocks where it copied 1012 (Qwen3-0.6B on Metal: 680-703 tokens/s
-    in float32 against 604, 742-758 in float16 against 713).
-  - `gen.llm.models.qwen35`: `paged-pools`, `paged-states`,
-    `paged-cache`, `paged-entries`, `paged-step` and
-    `compile-paged-step`: the attention layers' keys and values in paged
-    pools, the GatedDeltaNet layers' states a row each, the step's
-    layers the two merged by layer.
-  - `gen.llm.array-engine`: `:paged? true` runs Qwen3.5 and Qwen3.6
-    (`:continuous?` stays Qwen3's, loud otherwise). A branch's recurrent
-    states are a row of a group, as the static mode's: a lane steps in
-    place, any other step stacks its rows' states (`stats`'
-    `:stacked-steps`).
-  - `p/IFused` gains `:put-blocks` (gen.array.paged's block write): on
-    MLX one scatter of the blocks as slices.
-  - The donated writes' cost of 8 ms a GB (genclj-1daf) was the GC that
-    genclj-c7uf removed: on Metal a write into pools of 0.14 to 3 GB now
-    takes 0.3-0.7 ms whatever their size.
-
 - **Added (experimental): LoRA adapters, `gen.llm.lora`** (genclj-yc3b,
   genclj-p4mk): low-rank adapters trained beside a model's frozen, dense
   or quantized, weights, and served by llama.cpp.
@@ -824,10 +1092,6 @@ other values for the same key, from the same distribution.
     the first step's factor is 0.
   - `(learn/clip-value optimizer {:max-value v})` clips gradients
     elementwise. A wrapper acts before the optimizer it wraps.
-- **Changed: `qwen3/config` (and a model's `:config`) holds
-  `:architecture "qwen3"`** (gen.llm.models.qwen3, experimental;
-  genclj-yc3b), the GGUF's general.architecture, which an adapter's file
-  names.
 - **Added (experimental): Qwen3.5's and Qwen3.6's forward passes over
   gen.array, `gen.llm.models.qwen35`** (genclj-xnx3): a GGUF of
   architecture qwen35 (dense) or qwen35moe (mixture of experts), with
@@ -863,129 +1127,6 @@ other values for the same key, from the same distribution.
   gated-delta kernel (ported with its notice: THIRD-PARTY-NOTICES,
   gen.backend.mlx.gated-delta), declined under MLX's native gradients,
   on the CPU device and for a key size not a multiple of 32.
-- **Performance: a compiled step that donates its arguments no longer
-  collects** (MLX backend, genclj-c7uf). The backend runs a collection
-  (System.gc) once the arrays made since the last one hold
-  `gen.mlx.gc-new-bytes` (a sixteenth of the memory), and counted a
-  step's outputs as new even when they took over the donated inputs'
-  buffers: a decode step consuming its static KV cache counted the whole
-  cache every step and collected every few steps, 1.25 ms a step at batch
-  1 on Metal (Qwen3-0.6B) and 12.5 ms at 16 rows. A donated array's bytes
-  now come off that count (`MlxRuntime/donate`, which replaces
-  `repoint`'s use, and `settleFresh`; new, rebuild with `clojure -T:build
-  java`). Values are unchanged.
-- **Performance (experimental): `gen.llm.array-engine` normalizes its
-  rows about 2.5x faster** (genclj-9y6y), by
-  `gen.llm.host/log-softmax-rows` (new): a row's log-normalizer is taken
-  by blocks of 4096 logits, each block's largest and its sum of
-  exponentials, combined in block order, the exponentials by
-  `gen.llm.host/exp` (new: Tang's table-driven method, within 0.51 ulp on
-  [-708, 0], about a third of `Math/exp`'s cost where that is fdlibm's).
-  Its units of blocks are spread over the engine's host pool and its own
-  thread, so a row's log-normalizer is the same, bit for bit, for any
-  number of threads. ns an entry, one thread and 16 rows of Qwen3's
-  151,936 on the pool of four: M4 4.8 to 2.0 and 1.30 to 0.65; fenrir's
-  x86 under the Graal JIT 13 to 5.0 and 3.5 to 1.6 (floats are converted
-  four at a time there: Graal serializes lone conversions). The
-  log-normalizer moves in its last bits (within 1 ulp of an exact sum,
-  where the sequential sum was within 9), so a log-probability, and a
-  token drawn from the row, can change only where that moves a float's
-  rounding: none of 9.7 million did. Not finite logits are loud as
-  before (`:decode-failed`).
-- **Performance (experimental): MLX's `array/->floats` reads a float16
-  or bfloat16 array as its bits, widened on the host** (genclj-9y6y), not
-  cast to float32 on the device first: the same floats, bit for bit. On
-  CUDA the cast's buffer, freed at once, came back from MLX's buffer
-  cache for the next read's cast in unified memory, so that the device
-  wrote, and the host read, pages the other side held: Qwen3-0.6B's 16
-  rows of float16 logits took 26 ms to read on fenrir, against 4.6 now.
-- **Performance (experimental): MLX's `array/->floats` widens a float16
-  or bfloat16 array's bits about 1.5 to 4 times faster** (genclj-9y6y's
-  follow-up; `gen.array.host/halves->floats`, internal), the same floats,
-  bit for bit: each loop runs to its array's length, a float16's four
-  entries at a time. On the M4, 16 rows of 151,936
-  (bench/gen/widen_bench.clj), ns an entry: Graal's JIT, float16 0.56 to
-  0.38 and bfloat16 0.43 to 0.10; C2 0.60 to 0.34 and 0.52 to 0.25.
-- **Performance (experimental): `gen.llm.token`'s draw walks a row
-  about 2x faster** (genclj-9y6y): its inverse CDF sums each token's
-  probability by `gen.llm.host/exp`. The total moves in its last bits, so
-  a draw for a key can change only when its uniform falls within an ulp
-  or so of a token's cumulative probability.
-- **Performance (experimental): `gen.llm.array-engine` normalizes a
-  decode of fewer rows than its host pool's threads in parts across them**
-  (genclj-c7uf): a row of Qwen3's 151,936 logits in 0.33 ms instead of
-  0.73 (M4, four threads). Its log-normalizer and log-probabilities are
-  the same, bit for bit: the terms are summed in the same order.
-- **Changed (experimental): `gen.llm.array-engine` runs Qwen3.5 and
-  Qwen3.6** (genclj-xnx3): `:model` a GGUF of architecture qwen3, qwen35
-  or qwen35moe (read from its header), or a model either family's `load`
-  made (its config's `:arch`); another architecture is loud
-  (`:unsupported`). Its info's `:model` gains `:arch`.
-
-- **Fixed (experimental): a JVM exiting with a llama.cpp model or engine
-  open no longer aborts on Metal** (genclj-8dtg). ggml-metal asserts at
-  the process's exit that none of its buffers is left
-  (`GGML_ASSERT([rsets->data count] == 0)`), status 134. A shutdown hook
-  now closes the open engines, each on its own thread after the
-  operation it runs, then the models no engine uses, under their write
-  locks; it waits at most `gen.llama.close-at-exit` seconds (default 10;
-  0 turns it off). gen.llm.llama's namespace doc says to close them first
-  all the same. `gen.llm.slots/closer-of` (experimental) is the action
-  that closes an engine, for such a registry.
-
-- **Fixed (experimental): gen.llm.array-engine after a failed call**
-  (genclj-5t5l, genclj-8ni2).
-  - A score whose read fails in a call that consumes the paged pools
-    (the paged and continuous modes) now loses every branch the pools
-    held, loudly: its error names them (`:lost-slots`) and they are no
-    longer live. It used to drop `:lost-slots`, leaving them live over
-    emptied slots, so their next operation failed as an engine bug
-    (`:internal`).
-  - A paged step whose rows fail to normalize keeps the pools it wrote,
-    its slots as they were. It used to leave the pools it had consumed
-    in the engine's state, which MLX refuses at the next step, losing
-    every branch.
-  - A run (every mode) normalizes its row before it writes its books, so
-    one that fails leaves its slot as it was. It used to leave the slot
-    ahead of its branch, so that the branch's next operation failed as an
-    engine bug.
-  - A continuous forward whose rows fail to normalize keeps its branches,
-    as a paged step does (genclj-8ni2). It used to lose every branch it
-    read (`:lost-slots`). A read begun in an earlier forward is still
-    lost.
-  - In the continuous mode, a score that loses every branch while other
-    callers' requests are in flight fails those requests too, as lost
-    (`:lost-slots`, their branches freed), and the operations waiting
-    for their branches run (genclj-8ni2). Their next forward used to fail
-    them as an engine bug (`:internal`).
-- **Fixed: `gen.llm.trie/insert` loops down a path** (gen.llm.trie,
-  experimental; genclj-gn5i). insert recursed once for each node on the
-  path it walked, so a trie with an entry at each of a few thousand
-  prefixes of one context overflowed the stack, a StackOverflowError (at
-  ~2,770 nodes on a 1 MB thread stack, fenrir's default). It now walks
-  down in a loop and rebuilds the path back up in another, as
-  remove-entry, entries and size already did (genclj-6h3b); its results
-  and its `:entry-exists` error are unchanged. A node stands only at an
-  entry or where paths part, so a long context alone never recursed
-  deeply, and gen.llm.cache's trie, at most :max-branches entries, passes
-  fewer than twice that many nodes on a path.
-- **Fixed: a batched particle outside its support moves as its scalar
-  trace does** (gen.batched; genclj-n1s3). A batched run cannot stop where
-  a particle's choice leaves its support, so the particle's batched trace
-  holds the choices the run made after that one, which its scalar trace
-  (`b/traces`) stops short of. `update`, `regenerate` and `move` kept
-  those choices' values and weighed them (an update discarded them too),
-  and `project` counted them, where the particle's scalar operation makes
-  them afresh: a particle moved back inside its support (its choice that
-  left it regenerated) left its scalar trace, its weight log p(c |
-  new)/p(c | old) for such a choice c where the scalar law gives 0. Such
-  a particle (score -Inf, on a concrete backend) now runs its scalar
-  operation alone, the result set in its row, and the collection stays
-  batched. **Draws:** those particles draw from their own keys (the key
-  split n ways, as the fallback's). A lazy backend's (MLX's) scalar runs
-  go on as batched ones do, so nothing changes there. Since 2026-10-25 (a
-  choice outside its support stops the run, 9277423); found by
-  gen.fuzz-test's chains of operations (seed 1794085868851).
 - **Added (experimental): `array/compile`'s `:donate`** (genclj-tjvd):
   `(array/compile f {:donate #{0}})` names arguments the compiled function
   consumes, after JAX's donate_argnums. On MLX their arrays are released
@@ -1037,13 +1178,6 @@ other values for the same key, from the same distribution.
   the device lowerings refuse it) implement it. Repeated indices along a
   line of the axis are loud on the JVM backend (`:repeated-indices`) and
   unspecified on MLX.
-- **Changed: Qwen3's static caches write their keys and values with
-  `put-along-axis`**, not `scatter-add` (genclj-8rnc), so a slot written
-  again holds the new value instead of the sum; the slots past a row's
-  offset need no longer be zeros. **Added (experimental):
-  `(qwen3/rewind cache offsets)`**, a static cache with its rows moved
-  back (each to at most its own offset): the positions past them are
-  dropped and written over by the next steps (a rollback, a slot reused).
 - **Added (experimental): static-capacity KV caches and compiled steps
   for Qwen3** (gen.llm.models.qwen3; genclj-tjvd). `(static-cache m rows
   capacity)`, or prefill's `:capacity`, is a cache of fixed shapes:
@@ -1082,48 +1216,6 @@ other values for the same key, from the same distribution.
   loading say `llama/model` (their `:reason`s are unchanged). Test
   adapters for Qwen3-0.6B are in test/fixtures/lora, with their
   generator.
-- **Breaking: the inference, learning and gradient functions refuse an
-  option key they do not read** (gen.inference.mcmc, .nuts, .kernel,
-  .particle-filter, .importance, .vi, .mh, .enumerative, .transform,
-  .diagnostics, gen.learning, gen.gradients; genclj-vux3, genclj-yrb6;
-  DESIGN §9, 1.2.1's owner calls, item 6). They ignored it and ran on
-  their defaults, silently: `(mcmc/hmc t s {:steps 50 :epsilon 0.3})` ran
-  at :L 10 and :eps 0.1, `kernel/run`'s `{:burnin 50}` burned nothing,
-  `nuts/sample`'s `{:adapt-delta 0.95}` kept 0.8, `(learn/adam
-  {:learning-rate 0.1})` stepped at 0.001, `diagnostics/summary`'s
-  `{:quantiles …}` gave the default quantiles. Each now throws an
-  `ex-info`, `:reason :unknown-options`, its data naming the function
-  (`:fn`), the keys refused (`:unknown`) and the keys it takes
-  (`:accepted`), and an options map that is not a map
-  (`:invalid-options`). The functions: mcmc's hmc, mala, nuts,
-  map-optimize and their -particles forms; kernel's kernel, hmc, mala,
-  nuts and map-optimize (when the kernel is made) and run; nuts' adapt
-  and sample; mh's move; importance's importance-sampling,
-  importance-resampling, estimate and weighted-sample; the particle
-  filter's initialize, step, resample, resize, maybe-resample, replicate,
-  dereplicate, coalesce, introduce and reweighting; vi's black-box-vi,
-  black-box-vimco, elbo-gradient and vimco-gradient; enumerative's
-  choice-vol-grid (its trailing map), enumerative-inference and
-  with-exact-proposal; the translators' maps (translator,
-  deterministic-translator, extending-translator, updating-translator)
-  and involution's options; diagnostics' summary; gen.learning's
-  optimizers (sgd, gradient-descent, momentum, rmsprop, adagrad, adam,
-  adamw, clip-norm) and train; gen.gradients' choice-gradients.
-  kernel/kernel and tf/run refused unknown keys already, and now say so
-  in the same form (tf/run's data was `{:options …}`); a deterministic
-  translator's `:q-forward` and `:q-backward` keep their own error. This
-  breaks correct code that shares one options map between functions that
-  read different keys: `nuts/adapt` refuses sample's `:samples` and
-  `:keep`, `kernel/run` refuses nuts' `:warmup`, `pf/step` refuses
-  initialize's `:batched?`, `pf/resample` maybe-resample's
-  `:ess-threshold`, `updating-translator` translator's `:p-new`. Give each
-  function its own keys, `(select-keys opts (:accepted (ex-data e)))`. A
-  qualified key is refused as any other. The API snapshot records `:as
-  opts` added to the arglists of weighted-sample, resample, replicate,
-  dereplicate, coalesce, vimco-gradient, summary, enumerative-inference,
-  with-exact-proposal, translator, extending-translator,
-  updating-translator, involution, train and the eight optimizers (their
-  arities are unchanged).
 - **Added (experimental): gen.array's neural-network operations**
   `rms-norm`, `rope` and `sdpa` (gen.array, vars marked `{:api
   :experimental}`; genclj-ezdd; docs/array-api.md §6). Composites of
