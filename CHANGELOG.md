@@ -50,9 +50,10 @@ other values for the same key, from the same distribution.
   layers), the top-k sets that differ fall from 14.5% to 11.6% of
   layers and positions. The median gap in the next-token
   log-probabilities (over the CPU's 64 most likely tokens) falls from
-  0.17–0.58 to 0.12–0.36 nats, and the largest stays about 6. Unchanged:
-  float32 models (every default but an explicit `:dtype`), dense models,
-  and the JVM backend.
+  0.17–0.58 to 0.12–0.36 nats, and the largest stays about 6. The speed
+  is unchanged within noise (8 continuous clients in float16, alternated:
+  165–180 tokens/s either way). Unchanged: float32 models (every default
+  but an explicit `:dtype`), dense models, and the JVM backend.
 - **Changed (experimental): the array engine's paged mode is its default**
   (genclj-17it, the owner's call of 2026-11-08). `gen.llm.array-engine/
   engine` opens the paged mode unless given `:paged? false`, which opens

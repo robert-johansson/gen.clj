@@ -101,7 +101,10 @@
    (0.35). The bench's planted errors so, in float32 and float16 alike
    (the least and the median over the 20 general prompts): RoPE's
    traditional pairs 0.057 and 0.20 (at most 0.83 to 0.86); the others
-   2.24 (the conv state's oldest inputs) to 10.8 at least.
+   2.24 (the conv state's oldest inputs) to 10.8 at least. This test's
+   worst gaps so (fenrir, 2026-11-08): RoPE's pairs 0.897 in float32
+   (outside its band on every prompt, 7.5e-3 at least) and 0.899 in
+   float16 (outside it on 2 of the 5 prompts); the others 4.31 to 27.8.
 
    The Thor (sm_110, aarch64): unmeasured. The test runs there as it is,
    given MLX's CUDA build for sm_110, llama.cpp's aarch64 library (for
