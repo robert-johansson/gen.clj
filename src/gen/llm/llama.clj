@@ -797,10 +797,11 @@
             (.run batch toks (int from) (int len) (int (+ (long pos) from)) (int slot) (some? tgts))
             (recording-cleared! recording)
             (decode! (.-lock model) ctx batch "read")
-            (recorded! recording slot (range (+ (long pos) from) (+ (long pos) end))
-                       (if tgts len 1) "read")
             (replayed! splits recurrent/decode [slot] [(+ (long pos) end -1)])
             (replay-checked! splits mem [slot] "read")
+            ;; after the replay, as a failure after a decode
+            (recorded! recording slot (range (+ (long pos) from) (+ (long pos) end))
+                       (if tgts len 1) "read")
             ;; row k scores the token after token from+k; the run's last
             ;; row is its next-token distribution instead
             (let [scores (if tgts
@@ -837,9 +838,9 @@
             (.step batch (int-array (mapv tokens g)) (int-array ps) (int-array ss))
             (recording-cleared! recording)
             (decode! (.-lock model) ctx batch "advance")
-            (recorded! recording (first ss) ps 1 "advance")
             (replayed! splits recurrent/decode ss ps)
             (replay-checked! splits mem ss "advance")
+            (recorded! recording (first ss) ps 1 "advance")
             (doseq [[i r] (map vector g (host/in-order pool #(row-logprobs % n-vocab "advance")
                                                      (mapv #(row ctx % "advance") (range (count g)))))]
               (aset rows (int i) r))))
