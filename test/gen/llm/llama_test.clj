@@ -223,6 +223,59 @@
           (is (string? (:llama-error (ex-data x))) "with llama.cpp's own message"))
         (finally (.delete junk))))))
 
+(defn- experts?
+  "Is the test model a mixture of experts (its architecture's
+   expert_count)?"
+  []
+  (let [md (:metadata ((requiring-resolve 'gen.array.gguf/header) model-path))]
+    (pos? (long (or (get md (str (get md "general.architecture") ".expert_count")) 0)))))
+
+(deftest recorded-tensors-are-each-layer-s-by-position
+  ;; :record's tensors (llama.cpp's eval callback), on any model: attn_norm,
+  ;; each layer's normed input, a row of n_embd floats for every token (the
+  ;; last layer's too: llama.cpp keeps only the rows read after attention)
+  (when-llama
+    (with-open [e ((llama 'engine) {:model model-path :max-branches 2 :n-ctx 256 :record #{"attn_norm"}})]
+      (let [tokens ((llama 'tokenize) e "The capital of Sweden is a city called")
+            n (count tokens)
+            root (br/open e tokens)
+            [{:keys [slot positions tensors]} :as ds] ((llama 'recorded) e)
+            by-layer (get tensors "attn_norm")
+            width (count (get-in by-layer [0 0]))]
+        (is (= 1 (count ds)) "the prompt is one decode")
+        (is (= (vec (range n)) positions))
+        (is (= (vec (range (count by-layer))) (vec (keys by-layer))) "every layer, from 0")
+        (is (< 1 (count by-layer)))
+        (is (every? (fn [[_ rows]] (and (= (set (range n)) (set (keys rows)))
+                                        (every? #(= width (count %)) (vals rows))))
+                    by-layer)
+            "each layer a row of each position, of one width")
+        (is (every? #(Double/isFinite %) (get-in by-layer [0 (dec n)])))
+        (is (= [] ((llama 'recorded) e)) "recorded forgets what it returned")
+        (let [b (br/fork root)
+              [b'] (br/advance [b] [(first tokens)])
+              [d :as ds] ((llama 'recorded) e)]
+          (is (= 1 (count ds)))
+          (is (= [n] (:positions d)) "a step: the next position")
+          (is (not= slot (:slot d)) "of the fork's slot")
+          (is (= :unsupported (reason #(br/advance [root b'] [1 2])))
+              "a step of several branches is refused while recording")
+          (br/dispose! b'))
+        (br/dispose! root)))
+    (with-open [e ((llama 'engine) {:model model-path :max-branches 2 :n-ctx 256 :record #{"no_such_tensor"}})]
+      (let [tokens ((llama 'tokenize) e "The capital")
+            x (try (br/open e tokens) nil (catch Exception x x))]
+        (is (= :not-recorded (:reason (ex-data x))) "a tensor the graph does not name is loud")
+        (is (zero? (:live (br/info e))) "and the read is undone")))
+    (when-not (experts?)
+      (with-open [e ((llama 'engine) {:model model-path :max-branches 2 :n-ctx 256 :record #{"ffn_moe_topk"}})]
+        (let [x (try (br/open e ((llama 'tokenize) e "The capital")) nil (catch Exception x x))]
+          (is (= :not-recorded (:reason (ex-data x))) "a model without experts has no ffn_moe_topk")
+          (is (re-find #"without experts" (str (ex-message x)))))))
+    (is (= :not-recording (reason #((llama 'recorded) (engine)))) "an engine opened without :record records nothing")
+    (doseq [bad [#{} ["ffn moe"] "ffn_moe_topk" #{:ffn_moe_topk}]]
+      (is (= :invalid-option (reason #((llama 'engine) {:model model-path :record bad}))) (pr-str bad)))))
+
 (deftest reads-longer-than-a-batch-agree
   ;; with 16 tokens a decode, a 25-token prompt and a 40-token continuation
   ;; are read in several decodes: the chunks' boundaries change nothing

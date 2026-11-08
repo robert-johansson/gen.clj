@@ -61,6 +61,26 @@
    experts read through its eval callback would force them (the owner's
    call, 2026-11-08).
 
+   Forced (-Dgen.bench.forced, default true on a mixture of experts):
+   llama.cpp's engine records the experts its layers pick (gen.llm.llama's
+   :record #{\"ffn_moe_topk\"}, its eval callback), its readings carry them
+   (against-llama/reference's :experts, in the readings file too), and
+   every comparison, the planted errors' too, is made twice: unforced, and
+   with llama.cpp's experts forced on the forward (compare-readings'
+   :forced). Then the gap is the forward's, not its routing's. Measured
+   on the MacBook (2026-11-08, Qwen3.6-35B-A3B-Q4_K_M, two JVMs), forced
+   against unforced on the same readings: the general prompts 6.4e-3
+   (median 1.1e-3) against 0.97, the digits 8.0e-2 (median 5.5e-3 to
+   7.3e-3) against 5.97; the argmax equal in 400 of 400 (398 unforced).
+   The planted errors forced, the least over the general prompts: RoPE's
+   traditional pairs 0.056 (median 0.20), the rest 2.23 (the conv state's
+   oldest inputs) to 10.6 (attn_q's query and gate swapped). On fenrir
+   (llama.cpp's CUDA build, MLX's forward on CUDA, one JVM each): the
+   general prompts 0.45 (median 0.10) against 2.19, the digits 1.91
+   (median 0.16 to 0.21) against 6.24; the planted errors' least forced
+   0.13 (RoPE's pairs) and 2.04 to 11.2 for the rest.
+   qwen35-llama-test's docstring has them all, and the forced bands.
+
    One model in memory at a time: llama.cpp's readings of every prompt
    are taken first (against-llama/reference) and its engine closed, then
    the forward's model loaded and compared with them (compare-readings),
@@ -80,6 +100,7 @@
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [gen.array :as array]
+            [gen.array.gguf :as gguf]
             [gen.llama-noise :as noise]
             [gen.llm.branching-contract :refer [top-tokens]]
             [gen.llm.llama :as llama]
@@ -92,12 +113,20 @@
 
 (defn- seconds [t0] (/ (- (System/nanoTime) (long t0)) 1e9))
 
+(defn- forced?
+  "Are llama.cpp's experts recorded and forced (gen.bench.forced, default
+   true), on the model at path, a mixture of experts?"
+  [path]
+  (and (not= "false" (System/getProperty "gen.bench.forced"))
+       (pos? (long (or (get-in (gguf/header path) [:metadata (str (against/architecture path) ".expert_count")]) 0)))))
+
 (defn- llama-readings
   "llama.cpp's readings (against-llama/reference's, 8 steps) of each set's
    prompts, its engine of the model at path closed on return: {set-name
-   [readings]}."
+   [readings]}; with llama.cpp's experts (:experts) where forced?."
   [path sets]
-  (with-open [e (llama/engine {:model path :max-branches 4 :n-ctx 1024})]
+  (with-open [e (llama/engine (cond-> {:model path :max-branches 4 :n-ctx 1024}
+                                (forced? path) (assoc :record #{"ffn_moe_topk"})))]
     (println (llama/system-info))
     (let [t0 (System/nanoTime)
           out (into {} (for [[set-name items] sets]
@@ -123,9 +152,10 @@
   [file model refs]
   (spit file (pr-str {:model model
                       :vocab (alength ^floats (:root (first (val (first refs)))))
-                      :sets (update-vals refs (fn [rs] (mapv (fn [{:keys [tokens root steps]}]
-                                                               {:tokens tokens :root (sparse root)
-                                                                :steps (mapv (fn [[t lp]] [t (sparse lp)]) steps)})
+                      :sets (update-vals refs (fn [rs] (mapv (fn [{:keys [tokens root steps experts]}]
+                                                               (cond-> {:tokens tokens :root (sparse root)
+                                                                        :steps (mapv (fn [[t lp]] [t (sparse lp)]) steps)}
+                                                                 experts (assoc :experts experts)))
                                                              rs)))})))
 
 (defn- read-readings
@@ -133,9 +163,10 @@
    tokens checked): {set-name [readings]}."
   [file sets]
   (let [{:keys [vocab] :as r} (edn/read-string (slurp file))
-        refs (update-vals (:sets r) (fn [rs] (mapv (fn [{:keys [tokens root steps]}]
-                                                     {:tokens tokens :root (dense vocab root)
-                                                      :steps (mapv (fn [[t s]] [t (dense vocab s)]) steps)})
+        refs (update-vals (:sets r) (fn [rs] (mapv (fn [{:keys [tokens root steps experts]}]
+                                                     (cond-> {:tokens tokens :root (dense vocab root)
+                                                              :steps (mapv (fn [[t s]] [t (dense vocab s)]) steps)}
+                                                       experts (assoc :experts experts)))
                                                    rs)))]
     (doseq [[set-name items] sets]
       (when-not (= (mapv :tokens items) (mapv :tokens (get refs set-name)))
@@ -253,25 +284,44 @@ by the router's margin: the readings whose forwards' least log p_k/p_k+1 is at l
                                             (format "%.0e: - (0)" θ))))))
         (flush)))))
 
+(defn- forced-readings
+  "The readings rs with their experts forced (against-llama's :forced)."
+  [rs]
+  (mapv #(assoc % :forced (:experts %)) rs))
+
+(defn- planted
+  "The planted errors' worst |Δ log p| of each general prompt (whole,
+   chunk, one step) against readings general, printed."
+  [m general]
+  (doseq [mutation (sort (keys (against/mutations-of m)))]
+    (let [ds (mapv #(against/mutated m % mutation) general)]
+      (println (format "  %-24s min %.3f  median %.2f  max %.2f nats" (name mutation)
+                       (reduce min ds) (nth (sort ds) (quot (count ds) 2)) (reduce max ds)))
+      (flush))))
+
 (defn- compare-all
   "The forward of the model at path against llama.cpp's readings refs
    ({set-name [readings]}) of the prompts sets, then the planted errors,
-   printed."
+   printed; again with llama.cpp's experts forced, where the readings
+   hold them."
   [path sets refs]
   (let [t0 (System/nanoTime)
-        m (against/load-model path)]
+        m (against/load-model path)
+        forced (when (:experts (first (val (first refs)))) (update-vals refs forced-readings))]
     (println (format "the forward's model loaded in %.1f s" (seconds t0)))
     (doseq [[set-name items] sets]
       (println (str "\n== the " set-name " prompts (" (count items) ")"))
-      (against-llama m items (get refs set-name)))
+      (against-llama m items (get refs set-name))
+      (when forced
+        (println (str "\n== the " set-name " prompts (" (count items) "), llama.cpp's experts forced"))
+        (against-llama m items (get forced set-name))))
     (when-not (= "false" (System/getProperty "gen.bench.mutations"))
       (if-let [general (get refs "general")]
         (do (println "\nplanted convention errors, the worst |Δ log p| of each general prompt (whole, chunk, one step):")
-            (doseq [mutation (sort (keys (against/mutations-of m)))]
-              (let [ds (mapv #(against/mutated m % mutation) general)]
-                (println (format "  %-24s min %.2f  median %.2f  max %.2f nats" (name mutation)
-                                 (reduce min ds) (nth (sort ds) (quot (count ds) 2)) (reduce max ds)))
-                (flush))))
+            (planted m general)
+            (when forced
+              (println "\nthe same, llama.cpp's experts forced:")
+              (planted m (get forced "general"))))
         (println "\n(the planted errors are measured on the general prompts: -Dgen.bench.prompts=general or all)")))
     (when (and (get-in m [:config :experts]) (not= "false" (System/getProperty "gen.bench.margins")))
       (margin-report m sets refs))))

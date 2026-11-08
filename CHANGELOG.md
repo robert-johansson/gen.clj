@@ -38,6 +38,35 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Added (experimental): llama.cpp's intermediate tensors recorded, for
+  checks: `gen.llm.llama`'s `:record`, `recorded` and `experts`**
+  (genclj-ansx). An engine opened with `:record #{"ffn_moe_topk"}` passes
+  llama.cpp an eval callback (`cb_eval`) that copies the tensors llama.cpp
+  names `<base>-<layer>` to the host at each decode (F32 or I32, 2-D);
+  `(llama/recorded e)` returns the decodes since the last call
+  (`{:slot :positions :tensors {base {layer {position row}}}}`) and
+  `(llama/experts decodes)` the experts each layer of a mixture of experts
+  picked, `{slot {position [indices by layer]}}` (nil where a layer
+  computed no row: llama.cpp's last layer computes only the positions
+  whose logits are read). Off by default, and without it nothing changes:
+  no callback, the same context. With it the context computes its graphs
+  in pieces (slower; llama.cpp's readings moved by at most 2.2e-4 nats on
+  the tiny MoE), a step advances one branch (several are refused,
+  `:unsupported`), and a decode that records no tensor of a base named,
+  or a layer short, is a loud error, undone (`:not-recorded`). The
+  binding gains ggml's `ggml_nelements`, `ggml_nbytes`,
+  `ggml_element_size`, `ggml_get_name` and `ggml_backend_tensor_get`
+  (native/jextract-llama.sh's list; written in jextract's form).
+  gen.llm.models.against-llama's readings of a recording engine carry
+  llama.cpp's experts, which compare-readings' `:forced` forces on the
+  forward: on Qwen3.6-35B-A3B Q4_K_M on Metal (the MacBook M2 Max) the gap
+  falls from 0.97 to 6.4e-3 nats on the general prompts and from 5.97 to
+  8.0e-2 on the digits, its forced band 0.16 (`against/forced-band`,
+  where the unforced is 11.7); on CUDA (fenrir) from 2.19 to 0.45 and
+  from 6.24 to 1.91, its forced band 3.9 (unforced 12.3).
+  qwen35-llama-test and the noise bench compare both ways on a mixture of
+  experts.
+
 - **Added (experimental): `gen.array/release-cache!`, and the array
   engine gives back its backend's cache after compiling at open**
   (genclj-v1kg). `(array/release-cache! b)` gives back the memory backend
