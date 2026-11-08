@@ -898,9 +898,10 @@
   "One block's attention of x [R 1 hidden], a token a row, over the
    layer's pools entry: every row's key and value written at its slot (at
    its position, rotated there), then the first d rows' attention by
-   paged attention over their tables, and the rest's (a prefill chunk of
-   one sequence) over the chunk table's blocks gathered, each row to its
-   own position (a causal mask): [its output, the pools after x]."
+   paged attention over their tables, and the rest's (prefill chunks, a
+   run of one sequence each) over their tables' blocks, each row to its
+   own position (common/batch-attention): [its output, the pools after
+   x]."
   [{:keys [heads kv-heads head-dim] :as cfg} w x {:keys [positions slots] :as at} entry]
   (let [r (long (first (array/shape x)))
         [q k v] (qkv cfg w x positions)
@@ -941,8 +942,10 @@
              (str "a :chunk table, but no rows after the " d " decode rows")
              (str "the rows after the " d " decode rows read a chunk: a :chunk table is missing"))
            {:rows r :decode-rows d}))
-    (when (and chunk (not (and (= 2 (array/ndim chunk)) (= 1 (first (array/shape chunk))))))
-      (bad (str ":chunk must be [1 MB], not " (array/shape chunk)) {:chunk (array/shape chunk)}))
+    (when (and chunk (not (and (= 2 (array/ndim chunk)) (pos? (long (first (array/shape chunk))))
+                               (zero? (rem (c/- r d) (long (first (array/shape chunk))))))))
+      (bad (str ":chunk must be [K MB], K chunks of the " (c/- r d) " rows after the decode rows alike, not " (array/shape chunk))
+           {:chunk (array/shape chunk)}))
     (when-not (and (array/array? out) (= 1 (array/ndim out)))
       (bad ":out must be the rows whose logits are computed, an int array [O]" {:out (when (array/array? out) (array/shape out))}))
     (when (and targets (not (and (array/array? targets) (= (array/shape out) (array/shape targets)))))
@@ -966,10 +969,11 @@
      :tables     [D MB] the block tables of the first D rows (decode
                  rows), each attending over its first position + 1
                  positions by paged attention (absent when D is 0)
-     :chunk      [1 MB] the block table of the sequence the other R - D
-                 rows read (a prefill chunk at consecutive positions),
-                 which attend over its blocks gathered, each to its own
-                 position (absent when D is R)
+     :chunk      [K MB] the block tables of the K sequences the other
+                 R - D rows read, (R - D)/K rows each (prefill chunks,
+                 each at consecutive positions of its sequence), which
+                 attend over its blocks (gen.array/paged-attention of a
+                 run), each to its own position (absent when D is R)
      :out        [O] the rows whose logits are computed
      :targets    [O] (optional) a token for each: :scores, its log-
                  probability at that row (in the model's dtype).

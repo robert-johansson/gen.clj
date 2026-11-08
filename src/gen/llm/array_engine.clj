@@ -142,19 +142,25 @@
      :min-rows);
    - then a chunk of the oldest longer read (open, extend), as many of
      its tokens as the budget (:n-batch tokens a forward) leaves after
-     the decode rows, at least a block: its rows written into its blocks
-     and attending over them gathered (sdpa, each row to its position),
-     padded to a power of 2 within the budget. Longer reads wait their
-     turn, first come first served; their chunks go on in the next
-     forwards, between which other requests come and go.
+     the decode rows, at least a block, padded to t rows, a power of 2
+     within the budget; and chunks of the next longer reads, at most t
+     tokens each, padded to t rows, while the budget holds them (at most
+     :max-chunks in all; genclj-6qb6). Each chunk's rows are written
+     into its blocks and attend over them (gen.array/paged-attention of
+     a run: its blocks gathered once, each row to its own position); a
+     chunk's padding rows sit at its last position. Longer reads past
+     the budget wait their turn, first come first served; their chunks
+     go on in the next forwards, between which other requests come and
+     go.
    Under Qwen3.5 the GatedDeltaNet layers read a forward's decode rows as
    a paged step does (each its own sequence's next token, their states
-   read as step-states says: in place, a lane, or stacked) and its chunk
-   as one sequence, in order, from the read's states (zeros at its
-   start, else its row's, read in place), its padding rows past the
-   chunk's tokens leaving the states as they were (qwen35/
-   compile-paged-batch-step's :chunk-len). Its states after a forward
-   are two new groups: the decode rows' and the chunk's.
+   read as step-states says: in place, a lane, or stacked) and each
+   chunk as one sequence, in order, from the read's states (one chunk:
+   zeros at its start, else its row's, read in place; several: their
+   rows stacked, a copy), its padding rows past the chunk's tokens
+   leaving the states as they were (qwen35/compile-paged-batch-step's
+   :chunk-len). Its states after a forward are two new groups: the
+   decode rows' and the chunks'.
    The logits are computed for the rows read only (each decode row, a
    read's last token, the scored rows of an extend), the scores on the
    device. A read alone (a score's, or a program's from one thread) is
@@ -894,38 +900,49 @@
 ;; ---------------------------------------------------------------------------
 
 ;; The paged mode's books, with :stats {:forwards :decode-rows :chunk-rows
-;; :padded-rows :mixed-forwards :copied-blocks :pool-grows}, and its
-;; scratch blocks enough for the padding rows of a forward's decode rows
-;; and of its chunk.
+;; :chunks :padded-rows :mixed-forwards :copied-blocks :pool-grows}, and
+;; its scratch blocks enough for the padding rows of a forward's decode
+;; rows and of its chunks (at most the budget, or a block).
 
 (defn- one-token? [r] (c/== 1 (count (:tokens r))))
 
 (defn- forward-plan
   "Which of reads (gen.llm.slots/slots-forward's) a forward reads, and
    its rows: every one-token read (decode rows, in order, padded to a
-   power of 2, at least min-rows), and the first longer read's next chunk
-   of what the budget (n-batch tokens) leaves, at least a block (bs), its
-   rows padded to a power of 2 within the budget. {:decode [indices]
-   :d-rows :chunk index-or-nil :c (its tokens) :c-rows}."
-  [reads min-rows n-batch bs]
+   power of 2, at least min-rows), and chunks of the longer reads, first
+   come first served: the first one's next chunk of what the budget
+   (n-batch tokens) leaves, at least a block (bs), its rows t padded to
+   a power of 2 within the budget; then the next longer reads' chunks of
+   at most t tokens each, padded to t rows, while the budget holds them,
+   at most max-chunks in all (genclj-6qb6). {:decode [indices] :d-rows
+   :chunks [indices] :cs [their tokens] :t}."
+  [reads min-rows n-batch bs max-chunks]
   (let [decode (filterv #(one-token? (reads %)) (range (count reads)))
         d (count decode)
         d-rows (if (pos? d) (max (long min-rows) (next-pow2 d)) 0)
-        ci (first (remove #(one-token? (reads %)) (range (count reads))))
+        longer (remove #(one-token? (reads %)) (range (count reads)))
         left (max (long bs) (c/- (long n-batch) d-rows))
-        c (when ci (min (count (:tokens (reads ci))) left))]
-    {:decode decode :d-rows d-rows :chunk ci :c c
-     :c-rows (when c (min (next-pow2 c) (max (long c) left)))}))
+        n-of #(count (:tokens (reads %)))
+        c (when (seq longer) (min (long (n-of (first longer))) left))
+        t (when c (min (next-pow2 c) (max (long c) left)))
+        chunks (when t (vec (take (min (long max-chunks) (quot left (long t))) longer)))]
+    {:decode decode :d-rows d-rows :chunks (or chunks []) :t t
+     :cs (mapv #(min (long (n-of %)) (long t)) chunks)}))
 
 (defn- chunk-states
-  "{:fresh :held} the states (by layer, one row, a GatedDeltaNet layer's
-   {:chunk-conv :chunk-state}) a chunk read into slot starts from: zeros
-   when it has none yet (fresh, the forward's own), else its row's, read
-   in place (held)."
-  [{:keys [state] :as ctx} slot]
+  "{:fresh :held} the states (by layer, a row a chunk, a GatedDeltaNet
+   layer's {:chunk-conv :chunk-state}) the chunks read into slots start
+   from. One chunk: zeros when it has none yet (fresh, the forward's
+   own), else its row's, read in place (held). Several: their rows
+   stacked (stacked: a copy, zeros for a slot with none yet; fresh)."
+  [{:keys [state] :as ctx} slots]
   (let [chunked (fn [states] (mapv #(if (contains? % :state) {:chunk-conv (:conv %) :chunk-state (:state %)} {}) states))]
-    (if (nth (:rows @state) slot)
-      {:held (chunked (row-states state slot))}
+    (cond
+      (c/< 1 (count slots))
+      {:fresh (chunked (stacked ctx (mapv #(when-let [e (nth (:rows @state) %)] [(:group e) (:row e)]) slots) (count slots)))}
+      (nth (:rows @state) (first slots))
+      {:held (chunked (row-states state (first slots)))}
+      :else
       {:fresh (chunked (zero-states ctx 1))})))
 
 (defn- batch-layers
@@ -949,62 +966,74 @@
    books written: a forward whose rows fail to normalize leaves its slots
    as they were (but a lane's, whose states it consumed: lost). A family
    with recurrent layers (Qwen3.5) reads its decode rows' states as a
-   paged step does (step-states, in their order) and the chunk's from its
-   row (chunk-states), its padding rows past :chunk-len."
-  [{:keys [state pool batch-fn min-rows n-batch] :as ctx} reads]
+   paged step does (step-states, in their order) and the chunks' from
+   their rows (chunk-states), each chunk's padding rows past its
+   :chunk-len."
+  [{:keys [state pool batch-fn min-rows n-batch max-chunks] :as ctx} reads]
   (let [bs (long (:block-size @state))
-        {:keys [decode d-rows chunk c c-rows]} (forward-plan reads min-rows n-batch bs)
+        {:keys [decode d-rows chunks cs t]} (forward-plan reads min-rows n-batch bs (or max-chunks 1))
         rows? (contains? @state :rows)
         dstates (when (and rows? (seq decode)) (step-states ctx (mapv #(:slot (reads %)) decode) d-rows))
         decode (if dstates (mapv decode (:order dstates)) decode)
-        cstates (when (and rows? chunk) (chunk-states ctx (:slot (reads chunk))))
-        chosen (cond-> decode chunk (conj chunk))
+        cstates (when (and rows? (seq chunks)) (chunk-states ctx (mapv #(:slot (reads %)) chunks)))
+        chosen (into decode chunks)
         _ (doseq [i chosen] (check-paged-position state (:slot (reads i)) (:pos (reads i)) "forward"))
         seqs (mapv #(or (entry state (:slot (reads %))) paged/empty-sequence) chosen)
-        [a seqs' write-slots copies] (prepared ctx seqs (mapv #(if (= % chunk) c 1) chosen))
+        by-chunk (zipmap chunks cs)
+        [a seqs' write-slots copies] (prepared ctx seqs (mapv #(get by-chunk % 1) chosen))
         _ (copy-blocks! ctx a copies)
         d (count decode)
         d-rows (long d-rows)
-        c (long (or c 0))
-        c-rows (long (or c-rows 0))
-        r (c/+ d-rows c-rows)
+        t (long (or t 0))
+        nk (count chunks)
+        read-c (long (reduce c/+ 0 cs))
+        r (c/+ d-rows (c/* nk t))
         dseqs (subvec seqs' 0 d)
+        cseqs (subvec seqs' d)
         width (next-pow2 (reduce max 1 (map (comp count :blocks) dseqs)))
+        cwidth (next-pow2 (reduce max 1 (map (comp count :blocks) cseqs)))
         ;; a padding row writes the scratch slot of its row's index, and a
         ;; padding decode row reads that slot's block
         pad-table (fn [^long i] (vec (cons (quot i bs) (repeat (dec width) 0))))
-        {cpos :pos ctoks :tokens :as cread} (when chunk (reads chunk))
-        cpos (long (or cpos 0))
+        ;; chunk j's rows: its c tokens, then padding to t rows at its last
+        ;; position (seeing what that sees: within its table)
+        base (fn ^long [^long j] (c/+ d-rows (c/* j t)))
+        per-chunk (fn [f] (into [] (mapcat f) (map vector (range) chunks cs)))
         tokens (-> []
                    (into (map #(vector (first (:tokens (reads %))))) decode)
                    (into (repeat (c/- d-rows d) [0]))
-                   (into (map vector) (when chunk (subvec ctoks 0 c)))
-                   (into (repeat (c/- c-rows c) [0])))
+                   (into (per-chunk (fn [[_ i c]]
+                                      (concat (map vector (subvec (:tokens (reads i)) 0 c)) (repeat (c/- t (long c)) [0]))))))
         positions (-> []
                       (into (map #(:pos (reads %))) decode)
                       (into (repeat (c/- d-rows d) 0))
-                      (into (range cpos (c/+ cpos c-rows))))
+                      (into (per-chunk (fn [[_ i c]]
+                                         (let [p (long (:pos (reads i))) c (long c)]
+                                           (concat (range p (c/+ p c)) (repeat (c/- t c) (c/+ p (dec c)))))))))
         slots (-> []
                   (into (map first) (subvec write-slots 0 d))
                   (into (range d d-rows))
-                  (into (when chunk (peek write-slots)))
-                  (into (range (c/+ d-rows c) r)))
-        ;; the rows read: each decode row, the chunk's last when it ends
-        ;; its read, then the chunk's scored rows
-        ends? (and chunk (c/== c (count ctoks)))
-        lp-rows (cond-> (vec (range d)) ends? (conj (c/+ d-rows (dec c))))
-        ;; the chunk's scored rows: those of its targets among its c tokens
-        k (if (:targets cread) (min c (count (:targets cread))) 0)
-        out (into lp-rows (map #(c/+ d-rows (long %))) (range k))
+                  (into (mapcat (fn [j sl c] (concat sl (range (c/+ (base j) (long c)) (c/+ (base j) t))))
+                                (range) (subvec write-slots d) cs)))
+        ;; the rows read: each decode row, each chunk's last when it ends
+        ;; its read, then the chunks' scored rows
+        ends (mapv (fn [i c] (c/== (long c) (count (:tokens (reads i))))) chunks cs)
+        ended (filterv ends (range nk))
+        lp-rows (into (vec (range d)) (map #(c/+ (base %) (dec (long (cs %))))) ended)
+        ;; each chunk's scored rows: those of its targets among its tokens
+        ks (mapv (fn [i c] (if-let [tg (:targets (reads i))] (min (long c) (count tg)) 0)) chunks cs)
+        out (into lp-rows (mapcat (fn [j k] (map #(c/+ (base j) (long %)) (range k))) (range) ks))
         o (next-pow2 (count out))
+        targets (when (some pos? ks)
+                  (-> (vec (repeat (count lp-rows) 0))
+                      (into (mapcat (fn [i k] (when (pos? (long k)) (subvec (:targets (reads i)) 0 k))) chunks ks))
+                      (into (repeat (c/- o (count out)) 0))))
         batch (cond-> {:tokens (i32 tokens) :positions (i32 positions) :slots (i32 slots)
                        :out (i32 (into out (repeat (c/- o (count out)) 0)))}
                 (pos? d) (assoc :tables (i32 (into (mapv #(paged/table-row % width 0) dseqs) (map pad-table) (range d d-rows))))
-                chunk (assoc :chunk (i32 [(paged/table-row (peek seqs') (next-pow2 (count (:blocks (peek seqs')))) 0)]))
-                (pos? k) (assoc :targets (i32 (-> (vec (repeat (count lp-rows) 0))
-                                                  (into (subvec (:targets cread) 0 k))
-                                                  (into (repeat (c/- o (count out)) 0)))))
-                (and rows? chunk) (assoc :chunk-len (i32 [c])))
+                (pos? nk) (assoc :chunk (i32 (mapv #(paged/table-row % cwidth 0) cseqs)))
+                targets (assoc :targets (i32 targets))
+                (and rows? (pos? nk)) (assoc :chunk-len (i32 cs)))
         {:keys [logits scores] :as res}
         (donating ctx #(let [res (if rows?
                                    (batch-fn (reduce merged (:pools @state) (keep :fresh [dstates cstates])) batch
@@ -1021,32 +1050,42 @@
         ;; states it consumed: lost)
         _ (vswap! state assoc :pools pools)
         gd (when (and dstates (pos? d)) (new-states-group! state dstates' d-rows))
-        gc (when (and rows? chunk) (new-states-group! state cstates' 1))
+        gc (when (and rows? (pos? nk)) (new-states-group! state cstates' nk))
         rows (when (seq lp-rows)
                (normalized pool (if (c/== o (count lp-rows)) logits (array/slice logits 0 0 (count lp-rows))) (:lane dstates)))
-        sc (when (pos? k) (mapv double (array/->floats scores)))
+        sc (when targets (mapv double (array/->floats scores)))
         old (when rows? (groups-of state (mapv #(:slot (reads %)) chosen)))]
     (vswap! state (fn [st] (cond-> (-> st
                                        (assoc :alloc a)
                                        (update :table #(reduce (fn [t [i s']] (assoc t (:slot (reads i)) s')) % (map vector chosen seqs'))))
                              gd (update :rows #(reduce (fn [t [j i]] (assoc t (:slot (reads i)) {:group gd :row j})) % (map-indexed vector decode)))
-                             gc (assoc-in [:rows (:slot (reads chunk))] {:group gc :row 0}))))
+                             gc (update :rows #(reduce (fn [t [j i]] (assoc t (:slot (reads i)) {:group gc :row j})) % (map-indexed vector chunks))))))
     (release-dropped! state :rows :states old)
     (when dstates
       (tally! state (cond (:lane dstates) :lane-forwards (:fresh dstates) :stacked-forwards :else :held-forwards) 1))
     (tally! state :forwards 1)
     (tally! state :decode-rows d)
-    (tally! state :chunk-rows c)
-    (tally! state :padded-rows (c/- r d c))
-    (when (and (pos? d) chunk) (tally! state :mixed-forwards 1))
-    (let [by (zipmap decode (range))]
+    (tally! state :chunk-rows read-c)
+    (tally! state :chunks nk)
+    (tally! state :padded-rows (c/- r d read-c))
+    (when (and (pos? d) (pos? nk)) (tally! state :mixed-forwards 1))
+    (let [by (zipmap decode (range))
+          cj (zipmap chunks (range))
+          ;; chunk j's logits row among the rows read (when it ends its
+          ;; read), and its scores' offset in sc
+          lp-of (zipmap ended (range d (count lp-rows)))
+          sc-of (vec (reductions c/+ (count lp-rows) ks))]
       (mapv (fn [i]
               (let [{:keys [targets]} (reads i)]
-                (cond (contains? by i) {:read 1 :scores (when targets []) :logprobs (rows (by i))}
-                      (= i chunk) {:read c
-                                   :scores (when targets (subvec sc (count lp-rows) (c/+ (count lp-rows) k)))
-                                   :logprobs (when ends? (rows (dec (count lp-rows))))}
-                      :else {:read 0 :scores (when targets [])})))
+                (if-let [j (cj i)]
+                  (let [k (long (ks j))
+                        from (long (sc-of j))]
+                    {:read (cs j)
+                     :scores (when targets (if (pos? k) (subvec sc from (c/+ from k)) []))
+                     :logprobs (when-let [row (lp-of j)] (rows row))})
+                  (if (contains? by i)
+                    {:read 1 :scores (when targets []) :logprobs (rows (by i))}
+                    {:read 0 :scores (when targets [])}))))
             (range (count reads))))))
 
 (defn- continuous-run
@@ -1103,7 +1142,7 @@
 
 (def ^:private defaults {:max-branches 32 :n-ctx 4096 :n-batch 256 :block 128
                          :paged? false :block-size 16 :pool-blocks 128 :min-rows 1
-                         :continuous? false :wait 0.25})
+                         :continuous? false :wait 0.25 :max-chunks 16})
 
 (def ^:private option-checks
   {:model #(or (and (string? %) (.isFile (java.io.File. ^String %)))
@@ -1111,7 +1150,7 @@
    :dtype #{:float16 :bfloat16 :float32 :float64}
    :max-branches pos-int? :n-ctx pos-int? :n-batch pos-int? :block pos-int?
    :paged? boolean? :block-size #{8 16 32} :pool-blocks pos-int? :min-rows pos-int?
-   :continuous? boolean? :wait #(and (number? %) (c/<= 0.0 (double %) 10.0))})
+   :continuous? boolean? :wait #(and (number? %) (c/<= 0.0 (double %) 10.0)) :max-chunks pos-int?})
 
 (defn- check-options
   "opts with their defaults, checked: a loud error for an unknown, missing
@@ -1146,7 +1185,7 @@
   "PagedSlots (with :continuous?, ContinuousSlots) for checked opts
    (:paged?), the model m loaded on backend b, its family's functions
    fam: the pools made, the step compiled."
-  [{:keys [model max-branches n-ctx n-batch block-size pool-blocks min-rows continuous? wait]} m b fam]
+  [{:keys [model max-branches n-ctx n-batch block-size pool-blocks min-rows continuous? wait max-chunks]} m b fam]
   (when-not (:paged-pools fam)
     (throw (ex-info (str "array-engine/engine: the paged mode runs Qwen3 and Qwen3.5, not " (pr-str (arch-of model)))
                     {:reason :unsupported :architecture (arch-of model)})))
@@ -1185,14 +1224,14 @@
               :n-ctx n-ctx
               :n-batch n-batch
               :paged (cond-> {:block-size block-size :pool-blocks pool-blocks :min-rows min-rows}
-                       continuous? (assoc :continuous? true))
+                       continuous? (assoc :continuous? true :max-chunks max-chunks))
               :model (merge {:path (when (string? model) model) :arch (arch-of model)}
                             (select-keys cfg [:layers :hidden :heads :kv-heads :head-dim :dtype :context]))}
         state (volatile! (cond-> {:table (vec (repeat n-slots nil)) :family fam :block-size block-size :scratch scratch
                                   :alloc (paged/allocator size scratch) :pools ((:paged-pools fam) m size block-size)
                                   :stats (if continuous?
-                                           (cond-> {:forwards 0 :decode-rows 0 :chunk-rows 0 :padded-rows 0 :mixed-forwards 0
-                                                    :copied-blocks 0 :pool-grows 0}
+                                           (cond-> {:forwards 0 :decode-rows 0 :chunk-rows 0 :chunks 0 :padded-rows 0
+                                                    :mixed-forwards 0 :copied-blocks 0 :pool-grows 0}
                                              (:paged-states fam) (assoc :lane-forwards 0 :held-forwards 0 :stacked-forwards 0))
                                            (cond-> {:runs 0 :steps 0 :rows 0 :padded-rows 0 :copied-blocks 0
                                                     :pool-grows 0}
@@ -1202,7 +1241,7 @@
         pool (host/pool "gen.llm array rows-" (host/default-threads))
         ctx {:model m :state state :pool pool :n-batch n-batch :min-rows min-rows :gather-fn gather-fn :put-fn put-fn}]
     (if continuous?
-      (ContinuousSlots. m b (assoc ctx :batch-fn step-fn) pool (assoc info :batching {:wait wait}) state)
+      (ContinuousSlots. m b (assoc ctx :batch-fn step-fn :max-chunks max-chunks) pool (assoc info :batching {:wait wait}) state)
       (PagedSlots. m b (assoc ctx :step-fn step-fn :write-fn write-fn) pool info state))))
 
 (defn- open-slots
@@ -1269,11 +1308,14 @@
                     are padded to a power of 2 at least this
        :continuous? true: concurrent callers' reads batched (continuous
                     batching; see the namespace's docstring), :n-batch
-                    then the tokens a forward reads at most (a long
-                    read's chunk), with
+                    then the tokens a forward reads at most (its long
+                    reads' chunks), with
          :wait      how long a forward waits for the callers the last
                     one answered, at most, as a fraction of its time
-                    (default 0.25; 0 never waits)"
+                    (default 0.25; 0 never waits)
+         :max-chunks the most longer reads (prompts) a forward reads a
+                    chunk of (default 16; 1 reads one at a time), within
+                    :n-batch"
   ^java.io.Closeable [opts]
   (let [opts (check-options opts)
         b array/*backend*]
@@ -1287,9 +1329,9 @@
    :copied-blocks (copy-on-write) :pool-grows}, and for Qwen3.5
    :stacked-steps (steps whose rows' recurrent states were stacked, a
    copy) and :held-steps (read in place from a group others hold); in
-   the continuous mode {:forwards :decode-rows :chunk-rows (a prefill
-   chunk's) :padded-rows :mixed-forwards (forwards of decode rows and a
-   chunk) :copied-blocks :pool-grows}, for Qwen3.5 with :lane-forwards
+   the continuous mode {:forwards :decode-rows :chunk-rows (prefill
+   chunks' tokens) :chunks (prefill chunks) :padded-rows :mixed-forwards
+   (forwards of decode rows and chunks) :copied-blocks :pool-grows}, for Qwen3.5 with :lane-forwards
    :held-forwards :stacked-forwards (how the forwards with decode rows
    read their states), and gen.llm.slots/schedule the scheduler's
    counts."

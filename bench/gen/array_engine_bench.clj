@@ -123,6 +123,7 @@
    :min-rows (long-prop "min-rows" 1)
    ;; the continuous mode's (genclj-b3ow)
    :wait (parse-double (prop "wait" 0.25))
+   :max-chunks (long-prop "max-chunks" 16)
    :clients (long-prop "clients" 8)
    :client-tokens (long-prop "client-tokens" 64)
    :smc-clients (long-prop "smc-clients" 1)
@@ -168,17 +169,53 @@
       (mapv deref (mapv (fn [i] (future (one i (into [(first prompt)] (drop (* 3 (long i)) (rest prompt)))))) (range k))))))
 
 (defn- timed-lm
-  "m with each read's time (ms) conj'd onto the atom times."
-  [m times]
-  (reify lm/LM
+  "m with each read's time (ms) conj'd onto the atom times, and with
+   first-read (an atom of nil) and start (a promise of the clock's start, in
+   ns), the time from start to its first read's end: the client's time
+   to its first token."
+  ([m times] (timed-lm m times nil nil))
+  ([m times first-read start]
+   (reify lm/LM
     (-tokenizer [_] (lm/-tokenizer m))
     (-next-logprobs [_ contexts]
       (let [t0 (System/nanoTime)
-            v (lm/-next-logprobs m contexts)]
-        (swap! times conj (/ (- (System/nanoTime) t0) 1e6))
+            v (lm/-next-logprobs m contexts)
+            t1 (System/nanoTime)]
+        (swap! times conj (/ (- t1 t0) 1e6))
+        (when (and first-read (nil? @first-read))
+          (reset! first-read (/ (- t1 (long @start)) 1e6)))
         v))
     (-score [_ context continuation] (lm/-score m context continuation))
-    (-info [_] (lm/-info m))))
+    (-info [_] (lm/-info m)))))
+
+;; Prompt admission's time (genclj-6qb6): the continuous mode's forwards
+;; that read a chunk of a longer read, and the paged mode's runs, timed
+;; by wrapping the engine's (private) functions while the clients run;
+;; and the batched steps' traces (calls of the families' batch-forward,
+;; which a compiled step makes once per new shape).
+(def ^:private admission-ns (atom 0))
+(def ^:private traces (atom 0))
+
+(defn- admitting
+  "(f) with admission-ns counting the ns of the engine's forwards that
+   read a chunk (more than one token of a read) and of its paged runs."
+  [f]
+  (let [forward @#'ae/batch-forward!
+        run @#'ae/paged-read-run
+        timed (fn [g] (fn [& args]
+                        (let [t0 (System/nanoTime)]
+                          (try (apply g args)
+                               (finally (swap! admission-ns + (- (System/nanoTime) t0)))))))]
+    (with-redefs-fn {(requiring-resolve 'gen.llm.models.qwen3/batch-forward)
+                     (let [g @(requiring-resolve 'gen.llm.models.qwen3/batch-forward)] (fn [& args] (swap! traces inc) (apply g args)))
+                     (requiring-resolve 'gen.llm.models.qwen35/batch-forward)
+                     (let [g @(requiring-resolve 'gen.llm.models.qwen35/batch-forward)] (fn [& args] (swap! traces inc) (apply g args)))
+                     #'ae/batch-forward! (fn [ctx reads]
+                                           (if (some #(< 1 (count (:tokens %))) reads)
+                                             ((timed forward) ctx reads)
+                                             (forward ctx reads)))
+                     #'ae/paged-read-run (timed run)}
+      f)))
 
 (defn- client-run
   "n completion clients at once on engine e (tokenizer tok), client i
@@ -188,21 +225,24 @@
   (let [{:keys [client-tokens]} settings
         n (long n)
         times (atom [])
+        firsts (vec (repeatedly n #(atom nil)))
         go (promise)
         branches (quot (long (:max-branches (br/info e))) n)
         one (fn [i]
               (with-open [m (lm/lm e tok {:max-branches (min 4 branches) :max-cells 1024})]
                 @go
-                (gfi/simulate (token/completion (timed-lm m times) {:end-tokens #{}})
+                (gfi/simulate (token/completion (timed-lm m times (firsts i) go) {:end-tokens #{}})
                               [(into [(first prompt)] (drop (* 5 (long i)) (rest prompt))) client-tokens]
                               (rng/key (+ 11 (long i))))))
         fs (mapv (fn [i] (future (one i))) (range n))
         ;; every LM made before the clock starts
         _ (Thread/sleep 200)
+        _ (reset! admission-ns 0)
+        _ (reset! traces 0)
         t0 (System/nanoTime)]
-    (deliver go true)
+    (deliver go t0)
     (run! deref fs)
-    [(/ (- (System/nanoTime) t0) 1e6) @times]))
+    [(/ (- (System/nanoTime) t0) 1e6) @times (mapv deref firsts) (/ @admission-ns 1e6) @traces]))
 
 (defn- percentile [xs q]
   (let [v (vec (sort xs))]
@@ -213,13 +253,19 @@
    (:runs settings) runs after an untimed one, and the latencies of every
    timed run's reads."
   [label e tok prompt n]
-  (client-run e tok prompt n)
-  (let [runs (repeatedly (:runs settings) #(client-run e tok prompt n))
-        ms (nth (sort (map first runs)) (quot (count runs) 2))
-        lat (mapcat second runs)]
-    (println (format "| %-44s | %9.1f | %9.1f | %7.1f | %7.1f | %7.1f |" label ms
-                     (/ (* 1000.0 n (:client-tokens settings)) ms)
-                     (percentile lat 0.5) (percentile lat 0.9) (reduce max 0.0 lat)))))
+  (admitting
+   (fn []
+     (client-run e tok prompt n)
+     (let [runs (vec (repeatedly (:runs settings) #(client-run e tok prompt n)))
+           ms (nth (sort (map first runs)) (quot (count runs) 2))
+           lat (mapcat second runs)
+           ttft (mapcat #(nth % 2) runs)
+           share (/ (reduce + (map #(nth % 3) runs)) (reduce + (map first runs)))]
+       (println (format "| %-44s | %9.1f | %9.1f | %7.1f | %7.1f | %7.1f | %7.1f | %7.1f | %5.1f%% | %s |" label ms
+                        (/ (* 1000.0 n (:client-tokens settings)) ms)
+                        (percentile lat 0.5) (percentile lat 0.9) (reduce max 0.0 lat)
+                        (percentile ttft 0.5) (reduce max 0.0 ttft) (* 100.0 share)
+                        (mapv #(nth % 4) runs)))))))
 
 (defn- row [label ms tokens]
   (println (format "| %-44s | %9.1f | %9.1f |" label ms (/ (* 1000.0 tokens) ms))))
@@ -237,7 +283,8 @@
                           [:continuous (str "gen.array continuous (MLX), wait " (:wait settings) (when-not (:paged-kernel settings) ", composite"))
                            #(ae/engine {:model path :max-branches 64 :dtype (:dtype settings) :paged? true :continuous? true
                                         :block-size (:block-size settings) :pool-blocks (:pool-blocks settings)
-                                        :min-rows (:min-rows settings) :wait (:wait settings)})]
+                                        :min-rows (:min-rows settings) :wait (:wait settings)
+                                        :max-chunks (:max-chunks settings)})]
                           [:llama "llama.cpp" #((llama 'engine) {:model path :max-branches 64 :n-ctx 8192})]])
         stats (fn [k e] (when-not (= :llama k)
                           (println "|" (pr-str (ae/stats e)) (if (= :continuous k) (pr-str (slots/schedule e)) "") "| | |")))]
@@ -264,8 +311,8 @@
         (doseq [[section n] [[:clients (:clients settings)] [:lone 1]]
                 :when ((:sections settings) section)]
           (println "\n###" n (if (= 1 n) "client" "clients at once") "," (:client-tokens settings) "tokens each, an LM each\n")
-          (println "|                                              |   wall ms |  tokens/s | p50 ms  | p90 ms  | max ms  |")
-          (println "|---|---:|---:|---:|---:|---:|")
+          (println "|                                              |   wall ms |  tokens/s | p50 ms  | p90 ms  | max ms  | TTFT p50 | TTFT max | admission | traces |")
+          (println "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|")
           (doseq [[k label make] engines]
             (with-open [^java.io.Closeable e (make)]
               (clients-rows label e tok prompt-tokens n)

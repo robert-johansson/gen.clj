@@ -38,6 +38,25 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Added (experimental): paged attention of a run, and several prompts
+  in one continuous forward** (genclj-6qb6, PROVISIONAL).
+  `gen.array/paged-attention` also takes T queries a sequence: q
+  `[B T Hq D]` and lens `[B T]`, query t of sequence b over the first
+  lens[b t] positions of its blocks (a prefill chunk, causal: its own
+  position plus one; speculative decoding's drafts), `[B T Hq D]`. A
+  composite: each sequence's blocks gathered once, then one sdpa (no
+  backend kernel yet). The array engine's continuous mode reads chunks
+  of several longer reads (prompts, extends) in one forward, first come
+  first served, each padded to the first one's power of 2 of rows,
+  within `:n-batch`; the new option `:max-chunks` (default 16) bounds
+  them, and 1 reads one a forward as before. `qwen3/paged-batch-step`'s
+  and `qwen35/paged-batch-step`'s `:chunk` is `[K MB]` (K chunks of the
+  rows after the decode rows alike; `[1 MB]` as before), and qwen35's
+  `:chunk-len` `[K]`. `ae/stats` counts `:chunks`. A single caller's
+  reads are unchanged, bit for bit; concurrent callers' are gathered
+  otherwise (within the engine's band, as before).
+  Measured on Metal: see the bench (bench/gen/array_engine_bench.clj).
+
 - **Added (experimental): token SMC and completions read the LM's rows
   lent, and an LM forks a step's parents in one call** (genclj-4acj).
   `gen.llm.lm/batch-next-logprobs-lent` gives an LM's rows without

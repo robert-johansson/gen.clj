@@ -692,9 +692,9 @@
    rule over them from its recurrent state (entry {:conv :state}, nil
    for zeros, the start), with beta and the log decay g [B T value-heads]:
    [y [B T value-heads value-dim], the entry after them]. The conv state
-   after is the newest K-1 inputs, or with end (an int array [1], the
-   tokens of the T that are a sequence's, the rest padding) those up to
-   its end."
+   after is the newest K-1 inputs, or with end (an int array [B], each
+   row's tokens of the T that are its sequence's, the rest padding)
+   those up to each row's end."
   [{:keys [eps dtype delta-conv delta-key-heads delta-value-heads delta-key-dim delta-value-dim]} w qkv beta g entry end]
   (let [[b t channels] (array/shape qkv)
         hk (long delta-key-heads) hv (long delta-value-heads) dk (long delta-key-dim) dv (long delta-value-dim)
@@ -710,7 +710,8 @@
         [y state] (array/gated-delta q k v g beta state)]
     [(if (= dtype (array/dtype y)) y (array/astype y dtype))
      {:conv (if end
-              (array/take padded (+ (array/arange 0 kk 1 {:dtype :int32}) end) 1)
+              (let [idx (+ (array/reshape (array/arange 0 kk 1 {:dtype :int32}) [1 kk 1]) (array/reshape end [b 1 1]))]
+                (array/take-along-axis padded (array/broadcast-to idx [b kk channels]) 1))
               (conv-state padded t))
       :state state}]))
 
@@ -1409,12 +1410,13 @@
 (defn- batch-delta-net
   "One GatedDeltaNet layer of the normed x [R 1 hidden] of a batch: its
    first d rows (decode rows) each one token of its own sequence, from
-   its row of entry's {:conv :state} (d rows); the rest, with a chunk,
-   one sequence's tokens in order, from entry's {:chunk-conv
-   :chunk-state} (one row), those past :chunk-len padding, which leave
-   its states as they are (no decay, no write; the conv state taken at
-   its end). [its output, the entry after x: {:conv :state} of the d rows
-   and {:chunk-conv :chunk-state} of the chunk]."
+   its row of entry's {:conv :state} (d rows); the rest, with chunks (K
+   of them, :chunk's rows), each chunk's (R - d)/K rows one sequence's
+   tokens in order, from its row of entry's {:chunk-conv :chunk-state}
+   (K rows), those past its :chunk-len padding, which leave its states
+   as they are (no decay, no write; the conv state taken at its end).
+   [its output, the entry after x: {:conv :state} of the d rows and
+   {:chunk-conv :chunk-state} of the K chunks]."
   [{:keys [delta-value-heads delta-value-dim] :as cfg} w x {:keys [d chunk chunk-len]} entry]
   (let [r (long (first (array/shape x)))
         d (long d)
@@ -1426,8 +1428,11 @@
         [yd ed] (when (pos? d)
                   (delta-rule cfg w (rows qkv 0 d) (rows beta 0 d) (rows g 0 d) (select-keys entry [:conv :state]) nil))
         [yc ec] (when chunk
-                  (let [one (fn [y] (array/reshape (rows y d r) [1 n (peek (array/shape y))]))
-                        live (when chunk-len (array/reshape (array/< (array/arange 0 n 1 {:dtype :int32}) chunk-len) [1 n 1]))
+                  (let [k (long (first (array/shape chunk)))
+                        t (quot n k)
+                        one (fn [y] (array/reshape (rows y d r) [k t (peek (array/shape y))]))
+                        live (when chunk-len
+                               (array/reshape (array/< (array/arange 0 t 1 {:dtype :int32}) (array/reshape chunk-len [k 1])) [k t 1]))
                         masked (fn [y] (if live (array/where live y 0.0) y))]
                     (delta-rule cfg w (one qkv) (masked (one beta)) (masked (one g))
                                 {:conv (:chunk-conv entry) :state (:chunk-state entry)} chunk-len)))
@@ -1463,18 +1468,19 @@
         d (long (if tables (first (array/shape tables)) 0))
         bad (fn [msg data] (throw (invalid (str "paged-batch-step: " msg) data)))
         rows (fn [x] (when (array/array? x) (first (array/shape x))))
-        want (cond-> #{} (pos? d) (into [:conv :state]) chunk (into [:chunk-conv :chunk-state]))]
+        want (cond-> #{} (pos? d) (into [:conv :state]) chunk (into [:chunk-conv :chunk-state]))
+        nk (when (and chunk (= 2 (array/ndim chunk))) (first (array/shape chunk)))]
     (when-not (and (vector? layers) (= (count kinds) (count layers))
                    (every? (fn [[kind e]]
                              (if (= :attention kind)
                                (pools? e)
                                (and (map? e) (= want (set (keys e)))
                                     (every? #(= d (rows (% e))) (filter #{:conv :state} want))
-                                    (every? #(= 1 (rows (% e))) (filter #{:chunk-conv :chunk-state} want)))))
+                                    (every? #(= nk (rows (% e))) (filter #{:chunk-conv :chunk-state} want)))))
                            (map vector kinds layers)))
       (bad (str "the layers must be a vector by layer, each attention layer's pools (paged-pools') and each"
                 " GatedDeltaNet layer's states: {:conv :state} of the " d " decode rows (paged-states'), and"
-                (if chunk " {:chunk-conv :chunk-state} of the chunk's one row" " no chunk's"))
+                (if chunk (str " {:chunk-conv :chunk-state} of the " nk " chunks' rows") " no chunk's"))
            {:layers (if (vector? layers) (mapv #(when (map? %) (vec (keys %))) layers) layers)}))
     (when-not (= [r 1] (array/shape ids))
       (bad (str "a batch reads one token a row, [R 1], not " (array/shape ids)) {:tokens (array/shape ids)}))
@@ -1489,10 +1495,12 @@
              (str "a :chunk table, but no rows after the " d " decode rows")
              (str "the rows after the " d " decode rows read a chunk: a :chunk table is missing"))
            {:rows r :decode-rows d}))
-    (when (and chunk (not (and (= 2 (array/ndim chunk)) (= 1 (first (array/shape chunk))))))
-      (bad (str ":chunk must be [1 MB], not " (array/shape chunk)) {:chunk (array/shape chunk)}))
-    (when (and chunk-len (not (and chunk (array/array? chunk-len) (= [1] (array/shape chunk-len)))))
-      (bad ":chunk-len must be an int array [1], with a :chunk" {:chunk-len (when (array/array? chunk-len) (array/shape chunk-len))}))
+    (when (and chunk (not (and nk (pos? (long nk)) (zero? (rem (c/- r d) (long nk))))))
+      (bad (str ":chunk must be [K MB], K chunks of the " (c/- r d) " rows after the decode rows alike, not " (array/shape chunk))
+           {:chunk (array/shape chunk)}))
+    (when (and chunk-len (not (and chunk (array/array? chunk-len) (= [nk] (array/shape chunk-len)))))
+      (bad ":chunk-len must be an int array [K], a chunk's tokens each, with a :chunk [K MB]"
+           {:chunk-len (when (array/array? chunk-len) (array/shape chunk-len))}))
     (when-not (and (array/array? out) (= 1 (array/ndim out)))
       (bad ":out must be the rows whose logits are computed, an int array [O]" {:out (when (array/array? out) (array/shape out))}))
     (when (and targets (not (and (array/array? targets) (= (array/shape out) (array/shape targets)))))
@@ -1511,17 +1519,18 @@
    :layers}. layers is a vector by layer: each attention layer's paged
    pools (paged-pools'), each GatedDeltaNet layer's states of the D
    decode rows, in row order ({:conv :state}, paged-states', when D is
-   positive), and of the chunk's sequence ({:chunk-conv :chunk-state}, of
-   one row, with a :chunk), merged; :layers the same after the rows.
-   batch is qwen3/paged-batch-step's (:tokens :positions :slots :tables
-   :chunk :out :targets) and
-     :chunk-len  (optional, with a :chunk) [1] the chunk's tokens: its
+   positive), and of the chunks' sequences ({:chunk-conv :chunk-state},
+   a row a chunk, with a :chunk), merged; :layers the same after the
+   rows. batch is qwen3/paged-batch-step's (:tokens :positions :slots
+   :tables :chunk :out :targets; :chunk [K MB], K chunks) and
+     :chunk-len  (optional, with a :chunk) [K] each chunk's tokens: its
                  rows past them are padding, which leave its states as
                  they were (absent: every chunk row is the sequence's).
-   A decode row is one token of its own sequence; the chunk's rows are
+   A decode row is one token of its own sequence; a chunk's rows are
    one sequence's tokens in order through the GatedDeltaNet layers
-   (gen.array/gated-delta over them), as through the attention layers
-   (each attending to the positions up to its own). Its logits are
+   (gen.array/gated-delta over them, the K chunks its batch), as through
+   the attention layers (each attending to the positions up to its own).
+   Its logits are
    paged-step's (decode rows) and a concatenating cache's (a chunk)
    within float round-off; the layers are values, as paged-step's."
   [{:keys [config weights]} layers batch]
