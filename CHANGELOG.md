@@ -52,7 +52,13 @@ other values for the same key, from the same distribution.
   made anew: Qwen3.5-0.8B's token SMC at 16 particles lost 2-3% on Metal
   (float16 939 tokens/s against 964 without `:precompile?`; float32 753
   against 770; 964 and 775 with the cache cleared, and the cost also
-  went with MLX's cache limit raised to 6 GB). No result
+  went with MLX's cache limit raised to 6 GB). Against main, alternated
+  (three JVMs each, tokens/s): Qwen3.5-0.8B token SMC float16 933-941 →
+  954-971, float32 705-758 → 772-778; 8 continuous clients unchanged
+  (float16 290-295 → 292-296, float32 217-218 → 217-219); Qwen3-0.6B,
+  whose steps use under 0.7 GB of the cache, unchanged within 1-2%
+  (SMC float16 847-856 → 838-853, float32 747-753 → 738-752; 8 clients
+  400-428 → 404-422, 272-277 → 272-279). Open times unchanged. No result
   changes.
 - **Changed (experimental): a mixture of experts' router computes in
   float32 under half floats** (genclj-fxag; **Draws**, a Qwen3.5/3.6

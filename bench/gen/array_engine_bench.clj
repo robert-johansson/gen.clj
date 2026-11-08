@@ -142,7 +142,15 @@
    tokens/s without :precompile?, 939 with it, 964 cleared, 977
    collected; float32 770, 753, 775, 765. With MLX's cache limit at 6
    GB (gen.mlx.cache-bytes) the cost went too (float16 968-973, float32
-   770-783), and the steps alone then held 2.1 GB of cache."
+   770-783), and the steps alone then held 2.1 GB of cache. The engine
+   now gives the cache back after the compile (array/release-cache!);
+   main → the branch, alternated, three JVMs each (SMC runs 8; clients
+   warm-runs 3, runs 6): Qwen3.5-0.8B token SMC float16 933-941 →
+   954-971, float32 705-758 → 772-778; 8 continuous clients float16
+   290-295 → 292-296 (read p90 21.9-23.2 → 21.9-22.3 ms), float32
+   217-218 → 217-219; Qwen3-0.6B (its SMC steps hold 0.5-0.6 GB of
+   cache) SMC float16 847-856 → 838-853, float32 747-753 → 738-752, 8
+   clients 400-428 → 404-422, 272-277 → 272-279."
   (:require [clojure.string :as str]
             [gen.array :as array]
             [gen.gfi :as gfi]
