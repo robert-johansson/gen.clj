@@ -4677,6 +4677,8 @@ The lora-llama test has not yet run on Metal (0.075 band).
    for k-quants (genclj-utti, blocked by genclj-kqxr).
 6. **The band off the Mac is 0.65, borrowed from Qwen3** and not measured
    for Qwen3.5 (genclj-2krw: a CUDA kernel and the band).
+   Superseded: measured as 7.1 (Q8_0) and 12.3 (the MoE's K-quants), in
+   "The real Qwen3.6 MoE, the off-Mac bands from one place".
 
 **Deferred:**
 - mlx-node's chunked kernel, only if measured (genclj-afy0);
@@ -5111,6 +5113,8 @@ in 5.5 minutes.
 - The max |Δ log p| was 0.90 with the adapter, and 0.73 for the base model
   alone, both over CUDA's 0.65 band on these digit-heavy prompts. The test
   holds the adapter to 1.3 nats; the band is re-measured in genclj-fc6u.
+  Superseded: the band off the Mac is 2.4 and the adapter is held to it
+  (1.07 nats), in "The real Qwen3.6 MoE, the off-Mac bands from one place".
 
 **The lead's calls, on the implementing agent's recommendations:**
 1. **Old log-probabilities** are recorded where each token is drawn (the
@@ -5398,3 +5402,170 @@ patterns.
 - Most of the gain comes from bounding loops by the array's length, not by a
   long argument. gen.llm.host's kernels loop to long arguments too, which may
   be why Graal on x86 doesn't vectorize them: worth a widen-bench on fenrir.
+
+### The real Qwen3.6 MoE, the off-Mac bands from one place, the book on x86
+
+(PROVISIONAL, owner to confirm; genclj-utti, genclj-fc6u, 2026-11-08)
+
+**The real MoE checks out.** Qwen3.6-35B-A3B (Q4_K_M) on fenrir, MLX CUDA
+under C2, against llama.cpp's CUDA build:
+- Its largest gap over llama.cpp's top 64 is 2.35 nats on the 20 general
+  prompts and 6.13 on 20 digit prompts. The medians are 0.25 to 0.75, and the
+  argmax matches in 197 and 196 of 200. Against the CPU build the largest
+  gaps are 1.87 and 5.88.
+- The gap is llama.cpp's. Its own batched and lone reads on CUDA differ by
+  3.88 and 6.09. MLX's forward on its CPU gives our CUDA gaps to three digits.
+- The largest gaps sit at the second-ranked token behind a top token of
+  p ≈ 1 (llama.cpp −10.9 nats, ours −17.0).
+- The band is 12.3 nats (twice 6.13, rounded up).
+- The planted errors, least and median over the general prompts:
+  - value heads grouped 6.80 / 14.2;
+  - experts' gate and up swapped 9.57 / 14.2;
+  - router not renormalized 2.78 / 6.08;
+  - shared expert ungated 7.18 / 13.8.
+  qwen35's renormalization became a private function (routing) so the router
+  error could be planted. against-llama/mutations-of adds the value-head and
+  MoE errors where a model has them.
+- **Unequal heads are checked on a trained model:** the MoE has 16 key and
+  32 value heads. No 4B or 9B download was needed.
+- **Decode speed, tokens/s:** 47.9 against llama.cpp's 208 at batch 1, and
+  488 against 964 at batch 16. MoE decode on MLX CUDA is 2 to 4.3× behind,
+  which bears on the owner's NVIDIA decision (see "The sampling path on
+  fenrir").
+
+**Off-Mac bands come from one place: against-llama/band.**
+- The bands are per platform and family. Each is twice the largest gap
+  measured against llama.cpp's CUDA and CPU builds over 40 prompts (20
+  general, 12 of GRPO's chat prompts, 8 texts of numbers), rounded up:
+
+  | Model | vs CUDA | vs CPU | llama.cpp's own (CUDA) | Band |
+  |---|---|---|---|---|
+  | Qwen3-0.6B Q8_0 | 1.05 | 1.19 | 0.85 | 2.4 (was 0.65) |
+  | Qwen3.5-0.8B Q8_0 | 3.38 | 3.53 | 2.59 | 7.1 (was 0.65) |
+  | Qwen3.6-35B-A3B Q4_K_M | 6.13 | 5.88 | 6.09 | 12.3 |
+
+- The cause is llama.cpp's activation rounding. Its CPU build is
+  deterministic (its own spread is 1e-7) yet 1.2 to 3.5 nats from ours: both
+  its CUDA and x86 CPU builds round activations to 8 bits for their dot
+  products, and its Metal build does not. MLX on its CPU matches its CUDA to
+  three digits.
+- The Mac's bands are unchanged: Qwen3 0.075 (Q8_0) and 0.47 (K-quants),
+  Qwen3.5 0.035.
+- The qwen3, qwen35, LoRA, SFT and GRPO tests all take their band from it.
+  GRPO's adapter is now held to the band, where it used to be held to
+  twice it.
+- **The catch:** off the Mac most planted errors fall inside these bands.
+  Metal's bands and the fixed 0.75-nat planted-error threshold are what
+  check the conventions.
+- Not taken:
+  - a band per prompt set (general prompts only: Qwen3.5 1.8, the MoE 4.7);
+  - another measure off the Mac (the max over tokens above −10 nats, or a
+    prompt's median);
+  - a llama.cpp build that keeps activations in float, as the reference;
+  - keeping 0.65 in the LoRA and SFT tests, whose own prompts measured at
+    most 0.53.
+- Still unmeasured: K-quant bands for Qwen3.5 on Metal (still 0.035; about
+  0.83 by the earlier k-quants measurement) and for Qwen3 off the Mac.
+- This supersedes "Qwen3.5/3.6 and gen.array/gated-delta" point 6 (0.65
+  borrowed from Qwen3) and GRPO's band note (1.3 nats, re-measured here).
+
+**grpo-llama-test had crashed on main** since the Qwen3.5 LoRA merge, where
+lora/targets became keyed by family. It is fixed. On fenrir's rerun the
+adapter is 1.07 nats from llama.cpp (base 0.731), and the held-out pass rate
+went 0.615 → 0.771 (z 7.1).
+
+**The book on x86: the JVM's math, not a bug.**
+- Every failure on fenrir (14 values and 3 figures in chapters 023, 028 and
+  054) is a `; float64` display of a chaotic run: NUTS's and HMC's
+  adaptation, and a tanh network after 3000 Adam steps. Their banded checks
+  pass.
+- The JVM on x86 rounds exp, log, log10, pow, tan, tanh and cbrt differently
+  from fdlibm: 1 to 2 ulp on 2 to 12% of inputs, identically under C2 and
+  Graal. On the Mac only sin and cos differ (7%).
+- gen.book takes a fingerprint of the JVM's math results (math-fingerprint)
+  and compares it with the Mac's (reference-math?). Where they differ,
+  `; float64` values and figures are not checked, a note says so, and sync
+  writes no figures. gen.book-test covers both branches.
+- The whole book passes on fenrir under C2 and Graal. On the Mac every value
+  is still checked.
+- Not taken:
+  - StrictMath (fdlibm) for transcendentals everywhere. Results would be
+    identical on every platform, but x86 transcendentals get 1.3 to 2.5×
+    slower (pow 5× under C2), about 100 call sites change, and the Mac's
+    sin/cos displays would need recording again. That is a numerics call
+    for the owner.
+  - Fewer shown digits: a chaotic run's tree-depth counts differ entirely.
+
+### Converting models: gen.llm.convert, by llama.cpp's quantizers
+
+(PROVISIONAL, owner to confirm; genclj-t007, genclj-whi8, 2026-11-08)
+
+**What it is.** gen.llm.convert (experimental):
+- `convert!` writes a GGUF file's model as another GGUF file on the host, a
+  tensor at a time, with no backend. `plan` is its dry run.
+- `quantize` holds MLX's affine layouts in memory, at any of MLX's bit widths
+  and group sizes, through gen.array/quantize. It takes mlx-lm's recipes
+  (`:mlx-4bit`, `:mlx-8bit`, `:mlx-mixed-4-6`, `:mlx-mixed-3-6`).
+- A recipe is one of llama.cpp's file types (`:q4_k_m`, `:q8_0`, `:bf16`, …,
+  with its per-tensor choices and fallbacks), or `[pattern value]` rules that
+  may end in one, as llama-quantize's `--tensor-type`.
+- gen.array.gguf/write-gguf writes every type: F32, F16, BF16, Q8_0, Q4_0,
+  Q4_1, Q5_0, Q5_1, Q4_K, Q5_K and Q6_K. It used to write F32 only.
+
+**The decisions:**
+1. **The output format is GGUF only, for now.** gen.clj and llama.cpp both
+   load it, and it carries the tokenizer and architecture. MLX-only layouts
+   stay in memory; a file for them waits for genclj-k8gx (an MLX safetensors
+   writer). Not taken: MLX safetensors now, which needs the safetensors
+   loader's names.
+2. **GGUF's types are encoded by llama.cpp's own quantizers,** ported into
+   gen.array.gguf.quants (MIT, in THIRD-PARTY-NOTICES), not by
+   gen.array/quantize. So our files equal llama-quantize's. Not taken: MLX's
+   algorithm for Q4_1 and Q5_1, whose codes differ from llama-quantize's.
+3. **`{:bits 8 :group-size 32}` maps to Q8_0,** whose bias is fixed, not
+   free; 4/32 maps to Q4_1 and 5/32 to Q5_1. Other widths are refused as
+   MLX-only. Not taken: refusing 8/32.
+4. **Byte-exactness is pinned to Apple clang's build of llama.cpp.** The port
+   follows libggml's disassembly: clang's fused multiply-adds, which it uses
+   only in loops it does not vectorize, and arm64's saturating float-to-int
+   conversion (Qwen3.5's subnormal blocks). A GCC build may differ in a few
+   K-quant sub-blocks.
+5. **BF16 loads,** reversing "K-quants and BF16 are loud" for BF16 (genclj-9pn4
+   on main did the same). One host reader widens F16 and BF16 in gguf and
+   safetensors: gen.array.host/halves->floats. Not taken: quantfmt's scalar
+   bfloat16-value inside gguf, leaving safetensors its own copy.
+6. **Requantizing is refused** unless `:allow-requantize?` is set, as in
+   llama.cpp. A recipe made only of rules drops `general.file_type`.
+7. **MLX's in-memory scales are float32,** where mlx-lm keeps float16.
+8. **ggml-quants.c's origin is not traced:** native/build-llama.sh's checkout
+   is shallow. THIRD-PARTY-NOTICES cites llama.cpp at v0.9.0 (cd959ba). The
+   owner checks the file's history before a release.
+
+**The evidence:**
+- Byte for byte, every tensor, the metadata and the file size equal llama.cpp
+  v0.9.0's quantizer output. This holds on the fixtures (all 8 quantized
+  types, BF16, F16 and F32) and on whole models: ggml-org's Qwen3-0.6B as Q8_0
+  (2.2 s on the M4) and Q4_K_M (27 s), Qwen3.5-0.8B as Q4_K_M and Q8_0, and
+  Qwen3.5-0.8B BF16 → Q8_0 and Qwen3-0.6B F16 → BF16 after the merge.
+- llama.cpp reads our files as its own: its log-probs on them equal those on
+  its own files, and qwen3-llama-test and qwen35-llama-test pass on them.
+- Our reader reads what the writer wrote, for every type, on both backends.
+- On Metal, Qwen3-0.6B's KL against F16, excluding position 0
+  (median / max): Q8_0 0.0005 / 0.005; Q4_K_M 0.058 / 0.36; MLX 4-bit
+  group 64 0.15 / 1.17.
+- Mutations: 15 planted, 13 caught. One FMA mutation changes no fixture byte
+  and only the real-model test catches it. One is equivalent: no input tells
+  it apart.
+
+**docs/benchmarks.md** gains "Language models (1.3.0)": decode at batch
+1/16/64, prefill, token SMC, continuous batching, training, llama.cpp's
+ceilings, loading and converting weights, and what is not yet measured
+(genclj-pnw2). Every number has its setting and source, and disagreeing
+sources are both shown.
+
+**The merge with main.** quantfmt and main had each made BF16 load.
+gen.llm.convert's writing and host-values are quantfmt's. The one reader is
+main's widening. main's load-safetensors stays, and so does main's word for
+MLX's own BF16 reading, "unverified": MLX 0.32.4's gguf.cpp has no BF16 case.
+The two BF16 load tests are one, bf16-loads-its-bits, against gguf-py's
+reference and llama.cpp's.
