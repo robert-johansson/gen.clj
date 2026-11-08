@@ -40,7 +40,7 @@ other values for the same key, from the same distribution.
 
 - **Added (experimental): llama.cpp's intermediate tensors recorded, for
   checks: `gen.llm.llama`'s `:record`, `recorded` and `experts`**
-  (genclj-c09l). An engine opened with `:record #{"ffn_moe_topk"}` passes
+  (genclj-ansx). An engine opened with `:record #{"ffn_moe_topk"}` passes
   llama.cpp an eval callback (`cb_eval`) that copies the tensors llama.cpp
   names `<base>-<layer>` to the host at each decode (F32 or I32, 2-D);
   `(llama/recorded e)` returns the decodes since the last call
@@ -61,7 +61,11 @@ other values for the same key, from the same distribution.
   llama.cpp's experts, which compare-readings' `:forced` forces on the
   forward: on Qwen3.6-35B-A3B Q4_K_M on Metal (the MacBook M2 Max) the gap
   falls from 0.97 to 6.4e-3 nats on the general prompts and from 5.97 to
-  8.0e-2 on the digits, its forced band 0.16 (`against/forced-band`).
+  8.0e-2 on the digits, its forced band 0.16 (`against/forced-band`,
+  where the unforced is 11.7); on CUDA (fenrir) from 2.19 to 0.45 and
+  from 6.24 to 1.91, its forced band 3.9 (unforced 12.3).
+  qwen35-llama-test and the noise bench compare both ways on a mixture of
+  experts.
 
 - **Added (experimental): `gen.array/release-cache!`, and the array
   engine gives back its backend's cache after compiling at open**

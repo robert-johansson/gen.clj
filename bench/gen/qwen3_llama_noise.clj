@@ -74,8 +74,12 @@
    7.3e-3) against 5.97; the argmax equal in 400 of 400 (398 unforced).
    The planted errors forced, the least over the general prompts: RoPE's
    traditional pairs 0.056 (median 0.20), the rest 2.23 (the conv state's
-   oldest inputs) to 10.6 (attn_q's query and gate swapped).
-   qwen35-llama-test's docstring has them all, and its forced band.
+   oldest inputs) to 10.6 (attn_q's query and gate swapped). On fenrir
+   (llama.cpp's CUDA build, MLX's forward on CUDA, one JVM each): the
+   general prompts 0.45 (median 0.10) against 2.19, the digits 1.91
+   (median 0.16 to 0.21) against 6.24; the planted errors' least forced
+   0.13 (RoPE's pairs) and 2.04 to 11.2 for the rest.
+   qwen35-llama-test's docstring has them all, and the forced bands.
 
    One model in memory at a time: llama.cpp's readings of every prompt
    are taken first (against-llama/reference) and its engine closed, then

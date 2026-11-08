@@ -83,7 +83,11 @@
    its eval callback; against-llama/reference's :experts), and each
    reading is compared again with them forced on the forward
    (compare-readings' :forced), within against-llama/forced-band; the
-   planted errors must pass it too. On Metal it is 0.16 nats: twice the
+   planted errors, forced, must pass it too where it is tighter than
+   mutation-nats (on Metal), else mutation-nats as unforced. The
+   readings with the experts recorded (the eval callback computes the
+   graph in pieces) are llama.cpp's too: unforced they keep the bands
+   above. On Metal it is 0.16 nats: twice the
    largest |Δ log p| (8.0e-2, rounded up) the bench measured forced on
    the MacBook (2026-11-08, the readings recording the experts, two
    JVMs): 6.4e-3 on the general prompts (median 1.1e-3), 8.0e-2 on the
@@ -95,7 +99,7 @@
    the least and the median over the general prompts: the conv state's
    oldest inputs 2.23 and 4.47; the conv kernel reversed 8.97 and 12.1;
    attn_q's query and gate swapped 10.6 and 16.5; KV heads tiled 2.43
-   and 4.21; the q/k norms skipped 9.09 and 13.1; RoPE's traditional
+   and 4.21; the q/k norms skipped 8.98 and 12.7; RoPE's traditional
    pairs 0.056 and 0.20 (0.95 on this test's 44 tokens); the value heads
    grouped 6.62 and 13.3; the experts' gate and up swapped 6.21 and 12.2;
    the router's top k not renormalized 2.97 and 6.41; the shared expert
@@ -131,7 +135,26 @@
    value-heads-mutations and moe-mutations): the value heads grouped 6.80
    and 14.2; the experts' gate and up swapped 9.57 and 14.2; the router's
    top k not renormalized 2.78 and 6.08; the shared expert ungated 7.18
-   and 13.8."
+   and 13.8.
+   Forced off the Mac the band is 3.9 nats (against-llama/forced-band):
+   twice the largest |Δ log p| (1.91, rounded up) the bench measured
+   forced on fenrir (2026-11-08, llama.cpp's CUDA build recording its
+   experts, MLX's forward on CUDA): 0.45 on the general prompts (median
+   0.10), 1.91 on the digits (median 0.16 to 0.21; one step's, the next
+   0.78), against 2.19 and 6.24 unforced on the same readings; the argmax
+   equal in 399 of 400 (393 unforced). The planted errors forced, the
+   least and the median over the general prompts: the conv state's
+   oldest inputs 2.04 and 4.38; the conv kernel reversed 9.59 and 12.4;
+   attn_q's query and gate swapped 11.2 and 16.7; KV heads tiled 2.46 and
+   4.35; the q/k norms skipped 8.82 and 12.5; RoPE's traditional pairs
+   0.13 and 0.26; the value heads grouped 8.22 and 14.2; the experts' gate
+   and up swapped 5.81 and 12.7; the router's top k not renormalized 3.52
+   and 6.18; the shared expert ungated 7.74 and 13.6. Six of the ten are
+   past the forced band on every general prompt (none past the unforced
+   12.3 on every one); llama.cpp's 8-bit activations keep the rest inside
+   it, as they keep Qwen3.5's dense errors inside 7.1. So off the Mac the
+   forced planted errors are asserted past mutation-nats, as unforced,
+   and Metal's forced band is the check of the conventions."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gen.llm.branching :as br]
             [gen.llm.models.against-llama :as against]
