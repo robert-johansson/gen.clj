@@ -5271,3 +5271,52 @@ llama.cpp's path through gen.clj by 10-35%, and is never worse for MLX's.
   - a scores-only advance (genclj-t46p, a protocol change);
   - device-side normalization, the owner's call under the engine's
     decision 2.
+
+### Paged follow-ups: copy only for a second writer; Qwen3.5 paged
+
+(PROVISIONAL, owner to confirm; genclj-6qb6, genclj-1ovd, 2026-11-08)
+
+**Copy-on-write.** gen.llm.paged records how far each block has been written.
+A holder appends in place unless another holder wrote past its end, so only a
+second writer copies. Copies per SMC run fell from 1012 to 44.
+- A test writes to a parent after its fork, and both histories hold.
+- Folding the copy into the compiled step measured within noise of two
+  calls, so it is dropped.
+- MLX's block write is one scatter of slices: IFused :put-blocks.
+
+**Token SMC**, Qwen3-0.6B, 16 particles, tokens/s, before → after:
+
+| | float32 | float16 |
+|---|---:|---:|
+| paged | 604 → 701 | 713 → 787 |
+| continuous | 637 → 751 | 722 → 836 |
+| static | 345 | 649 |
+| llama.cpp | 924 | |
+
+**Qwen3.5 in the paged mode.**
+- Its attention layers are paged.
+- Its GatedDeltaNet states stay one row each: a group stepped by its own
+  slots goes in place; any other step stacks the states (:stacked-steps).
+- The contracts pass on the tiny Qwen3.5 and its MoE variant.
+- On Qwen3.5-0.8B it doesn't pay yet: paged 595-698 against static 645-728
+  tokens/s, and llama.cpp 276. The states' stacking dominates at short
+  contexts.
+- The continuous mode stays Qwen3-only, and refuses Qwen3.5 loudly.
+
+**The write cost (genclj-1ovd)** was gen.clj's own GC, gone on main (see the
+k-quants entry's note). Closed.
+
+**The lead's calls, on the implementing agent's recommendations:**
+1. **Copy only for a second writer.** Not taken: vLLM's rule, which always
+   copies a shared partial block.
+2. **The in-step copy is dropped;** two calls are kept.
+3. **IFused :put-blocks** is internal.
+4. **Qwen3.5 stacks its states,** as in the static mode. Not taken: a state
+   pool, which meets the same MLX limit on gathering and writing in one
+   call.
+
+*Merged with genclj-5t5l's failure-safety.* A paged read normalizes its row
+before writing the pools, and a step stores its pools at once.
+- Under Qwen3.5 the step also consumes the recurrent states. After a failed
+  normalization those rows' groups were donated, so they are lost: the
+  continuous mode's behaviour, genclj-8ni2's to align.
