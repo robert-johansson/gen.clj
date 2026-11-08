@@ -436,6 +436,17 @@ other values for the same key, from the same distribution.
   made (its config's `:arch`); another architecture is loud
   (`:unsupported`). Its info's `:model` gains `:arch`.
 
+- **Fixed (experimental): a JVM exiting with a llama.cpp model or engine
+  open no longer aborts on Metal** (genclj-8dtg). ggml-metal asserts at
+  the process's exit that none of its buffers is left
+  (`GGML_ASSERT([rsets->data count] == 0)`), status 134. A shutdown hook
+  now closes the open engines, each on its own thread after the
+  operation it runs, then the models no engine uses, under their write
+  locks; it waits at most `gen.llama.close-at-exit` seconds (default 10;
+  0 turns it off). gen.llm.llama's namespace doc says to close them first
+  all the same. `gen.llm.slots/closer-of` (experimental) is the action
+  that closes an engine, for such a registry.
+
 - **Fixed (experimental): gen.llm.array-engine after a failed call**
   (genclj-5t5l, genclj-8ni2).
   - A score whose read fails in a call that consumes the paged pools

@@ -894,6 +894,15 @@
       (vswap! state assoc :cleanable (.register ^Cleaner cleaner e (closer w impl state)))
       e)))
 
+(defn closer-of
+  "The action that closes engine e, as close does (a function of no
+   arguments, run at most once however often it is called), holding
+   nothing of e: a registry of open engines (an engine's exit hook,
+   gen.llm.llama's) that holds it keeps no engine reachable."
+  [^SlotEngine e]
+  (let [^Cleaner$Cleanable c (:cleanable @(books-of e))]
+    (fn [] (.clean c))))
+
 (defn call
   "(f impl) on the engine's thread, for engine-specific operations
    (tokenizing, say), impl its Slots: its value, or what it threw. A loud
