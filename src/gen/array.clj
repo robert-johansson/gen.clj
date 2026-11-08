@@ -1493,10 +1493,12 @@
    A composite of gen.array's ops: each sequence's blocks gathered
    (take), then sdpa under a mask of its length, the reference that a
    backend's kernel is checked against. MLX's Metal computes it by
-   kernels-community's paged_attention kernel (vLLM's, through
+   kernels-community's paged_attention kernels (vLLM's, through
    mlx_fast_metal_kernel; gen.backend.mlx.paged-attention, ported per
-   THIRD-PARTY-NOTICES), which reads the blocks in place; it computes the
-   softmax in float32 and adds 1e-6 to its normalizer, as vLLM's does.
+   THIRD-PARTY-NOTICES), which read the blocks in place: v1, and past its
+   threadgroup memory (tables of about 8,000 positions) v2, by partitions
+   of 512 positions then a reduction; they compute the softmax in float32
+   and add 1e-6 to its normalizer, as vLLM's do.
    Experimental: outside the 1.x promise (DESIGN §9)."
   ([q k-pool v-pool tables lens] (paged-attention q k-pool v-pool tables lens nil))
   ([q k-pool v-pool tables lens opts] ((:paged-attention @paged) q k-pool v-pool tables lens opts)))

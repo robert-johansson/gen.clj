@@ -394,10 +394,11 @@ each capability is an optional protocol of its own:
   writes by two scatters on the block and offset axes, `IFused`'s
   `:paged-write`, in place under `compile`'s `:donate`), attention gathers each
   sequence's blocks (take) and runs sdpa under a length mask; MLX's Metal
-  runs kernels-community's paged_attention kernel (v1, through
-  mlx_fast_metal_kernel; gen.backend.mlx.paged-attention), which reads
-  the blocks in place, and falls back to the composite past 32 KiB of
-  threadgroup scores (about 8,000 positions; v2 is a follow-up). Indices
+  runs kernels-community's paged_attention kernels (through
+  mlx_fast_metal_kernel; gen.backend.mlx.paged-attention), which read
+  the blocks in place: v1, and past its 32 KiB of threadgroup scores
+  (tables of about 8,000 positions) v2, by partitions of 512 positions
+  and a reduction (genclj-6qb6). Indices
   are checked where readable (`concrete?`); on MLX the kernel clamps
   block ids and lengths. The books (allocator, tables) are host values,
   gen.llm.paged's.

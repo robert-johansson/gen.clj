@@ -1,8 +1,8 @@
 (ns gen.backend.mlx.paged-attention
-  "MLX's Metal kernel for gen.array/paged-attention (p/IFused's
+  "MLX's Metal kernels for gen.array/paged-attention (p/IFused's
    :paged-attention, gen.backend.mlx.nn/fused): kernels-community's
-   paged_attention kernel (vLLM's paged attention, as ported to Metal),
-   v1, through mlx_fast_metal_kernel. One threadgroup of 256 threads a
+   paged_attention kernels (vLLM's paged attention, as ported to Metal),
+   v1 and v2, through mlx_fast_metal_kernel. One threadgroup of 256 threads a
    query head of a sequence reads the sequence's blocks where they lie in
    the pools (its block table), keeps every position's score in
    threadgroup memory, softmaxes them in float32 and sums the values: no
@@ -17,14 +17,20 @@
 
    v1 holds a sequence's scores in threadgroup memory, sized when the
    kernel is made for its table's positions (MB·BS): MLX makes one kernel
-   per table width (a template argument), and declines tables past 32 KiB
-   of scores (about 8,000 positions; the composite then runs). The
-   partitioned v2, for longer contexts, is a follow-up. Metal only (the
+   per table width (a template argument), up to 32 KiB of scores (about
+   8,000 positions). Past them v2 runs (genclj-6qb6): a threadgroup a
+   partition of 512 positions of a query head, writing its partial
+   output, its maximum score and its sum of exponentials, then
+   paged_attention_v2_reduce's dispatch rescales and sums the partitions'
+   outputs (its threadgroup memory 8 bytes a partition: millions of
+   positions). The partials are in the operands' dtype, as upstream
+   keeps them. Metal only (the
    GPU on macOS): float32 and the half floats, blocks of 8, 16 or 32
    positions, head sizes up to 256; no VJP (declined under MLX's
    gradients)."
   {:api :internal}
-  (:require [gen.backend.mlx.array :refer [code device stream wrap-all]]
+  (:require [clojure.string :as str]
+            [gen.backend.mlx.array :refer [code device stream wrap-all]]
             [gen.backend.mlx.operands :refer [dtype-on scalar-handle shape-of with-operands with-temps]]
             [gen.backend.mlx.transforms :refer [*differentiating*]])
   (:import [gen.mlx Mlx MlxRuntime]
@@ -39,11 +45,13 @@
 ;;          contributors; after vLLM's paged attention kernels, Copyright contributors
 ;;          to the vLLM project); see gen.clj's THIRD-PARTY-NOTICES
 ;; Changes: modified by gen.clj. The three files joined (their includes inlined);
-;;          the paged_attention kernel's body kept and its signature replaced by
-;;          mlx_fast_metal_kernel's: its buffers the kernel's named inputs and
-;;          outputs, its scalars template arguments, its function constants
-;;          constexpr and its threadgroup memory a static array, declared in a
-;;          prologue (v1, one partition); the v2 reduction kernel, the
+;;          the paged_attention and paged_attention_v2_reduce kernels' bodies
+;;          kept and their signatures replaced by mlx_fast_metal_kernel's: their
+;;          buffers the kernels' named inputs and outputs, their scalars template
+;;          arguments, their function constants constexpr and their threadgroup
+;;          memory a static array, declared in a prologue (v1: one partition,
+;;          without exp_sums and max_logits; v2: partitions of PARTITION_SIZE,
+;;          exp_sums and max_logits outputs, then the reduction); the
 ;;          instantiations and the cache kernels not ported; this header added.
 (def ^:private header
   "// Ported from kernels-community/paged-attention: https://huggingface.co/kernels-community/paged-attention/blob/28a49f721313edf7c787f48a60c4eba9c4f6f9be/paged-attention-metal/attention/paged_attention.metal
@@ -53,11 +61,13 @@
 //          contributors; after vLLM's paged attention kernels, Copyright contributors
 //          to the vLLM project); see gen.clj's THIRD-PARTY-NOTICES
 // Changes: modified by gen.clj. The three files joined (their includes inlined);
-//          the paged_attention kernel's body kept and its signature replaced by
-//          mlx_fast_metal_kernel's: its buffers the kernel's named inputs and
-//          outputs, its scalars template arguments, its function constants
-//          constexpr and its threadgroup memory a static array, declared in a
-//          prologue (v1, one partition); the v2 reduction kernel, the
+//          the paged_attention and paged_attention_v2_reduce kernels' bodies
+//          kept and their signatures replaced by mlx_fast_metal_kernel's: their
+//          buffers the kernels' named inputs and outputs, their scalars template
+//          arguments, their function constants constexpr and their threadgroup
+//          memory a static array, declared in a prologue (v1: one partition,
+//          without exp_sums and max_logits; v2: partitions of PARTITION_SIZE,
+//          exp_sums and max_logits outputs, then the reduction); the
 //          instantiations and the cache kernels not ported; this header added.
 
 #include <metal_stdlib>
@@ -1186,11 +1196,13 @@ inline float block_sum(threadgroup float *red_smem, float sum, uint simd_tid,
 ;;          contributors; after vLLM's paged attention kernels, Copyright contributors
 ;;          to the vLLM project); see gen.clj's THIRD-PARTY-NOTICES
 ;; Changes: modified by gen.clj. The three files joined (their includes inlined);
-;;          the paged_attention kernel's body kept and its signature replaced by
-;;          mlx_fast_metal_kernel's: its buffers the kernel's named inputs and
-;;          outputs, its scalars template arguments, its function constants
-;;          constexpr and its threadgroup memory a static array, declared in a
-;;          prologue (v1, one partition); the v2 reduction kernel, the
+;;          the paged_attention and paged_attention_v2_reduce kernels' bodies
+;;          kept and their signatures replaced by mlx_fast_metal_kernel's: their
+;;          buffers the kernels' named inputs and outputs, their scalars template
+;;          arguments, their function constants constexpr and their threadgroup
+;;          memory a static array, declared in a prologue (v1: one partition,
+;;          without exp_sums and max_logits; v2: partitions of PARTITION_SIZE,
+;;          exp_sums and max_logits outputs, then the reduction); the
 ;;          instantiations and the cache kernels not ported; this header added.
 (def ^:private body
   "// Ported from kernels-community/paged-attention: https://huggingface.co/kernels-community/paged-attention/blob/28a49f721313edf7c787f48a60c4eba9c4f6f9be/paged-attention-metal/attention/paged_attention.metal
@@ -1200,11 +1212,13 @@ inline float block_sum(threadgroup float *red_smem, float sum, uint simd_tid,
 //          contributors; after vLLM's paged attention kernels, Copyright contributors
 //          to the vLLM project); see gen.clj's THIRD-PARTY-NOTICES
 // Changes: modified by gen.clj. The three files joined (their includes inlined);
-//          the paged_attention kernel's body kept and its signature replaced by
-//          mlx_fast_metal_kernel's: its buffers the kernel's named inputs and
-//          outputs, its scalars template arguments, its function constants
-//          constexpr and its threadgroup memory a static array, declared in a
-//          prologue (v1, one partition); the v2 reduction kernel, the
+//          the paged_attention and paged_attention_v2_reduce kernels' bodies
+//          kept and their signatures replaced by mlx_fast_metal_kernel's: their
+//          buffers the kernels' named inputs and outputs, their scalars template
+//          arguments, their function constants constexpr and their threadgroup
+//          memory a static array, declared in a prologue (v1: one partition,
+//          without exp_sums and max_logits; v2: partitions of PARTITION_SIZE,
+//          exp_sums and max_logits outputs, then the reduction); the
 //          instantiations and the cache kernels not ported; this header added.
 
   // gen.clj's prologue: what the kernel's signature and function constants
@@ -1573,6 +1587,133 @@ inline float block_sum(threadgroup float *red_smem, float sum, uint simd_tid,
     }
   }")
 
+;; Ported from kernels-community/paged-attention: https://huggingface.co/kernels-community/paged-attention/blob/28a49f721313edf7c787f48a60c4eba9c4f6f9be/paged-attention-metal/attention/paged_attention.metal
+;; Upstream commit: 28a49f721313edf7c787f48a60c4eba9c4f6f9be
+;; License: Apache-2.0 (Copyright 2024-2025 Eric Buehler and the kernels-community
+;;          contributors; after vLLM's paged attention kernels, Copyright contributors
+;;          to the vLLM project); see gen.clj's THIRD-PARTY-NOTICES
+;; Changes: modified by gen.clj. The paged_attention_v2_reduce kernel's body
+;;          kept and its signature replaced by mlx_fast_metal_kernel's: its
+;;          buffers the kernel's named inputs and output, max_num_partitions a
+;;          template argument and its threadgroup memory a static array,
+;;          declared in a prologue; this header added.
+(def ^:private reduce-body
+  "// Ported from kernels-community/paged-attention: https://huggingface.co/kernels-community/paged-attention/blob/28a49f721313edf7c787f48a60c4eba9c4f6f9be/paged-attention-metal/attention/paged_attention.metal
+// Upstream commit: 28a49f721313edf7c787f48a60c4eba9c4f6f9be
+// License: Apache-2.0 (Copyright 2024-2025 Eric Buehler and the kernels-community
+//          contributors; after vLLM's paged attention kernels, Copyright contributors
+//          to the vLLM project); see gen.clj's THIRD-PARTY-NOTICES
+// Changes: modified by gen.clj. The paged_attention_v2_reduce kernel's body
+//          kept and its signature replaced by mlx_fast_metal_kernel's: its
+//          buffers the kernel's named inputs and output, max_num_partitions a
+//          template argument and its threadgroup memory a static array,
+//          declared in a prologue; this header added.
+
+  // gen.clj's prologue: what the kernel's signature declared, for
+  // mlx_fast_metal_kernel's (its inputs exp_sums, max_logits, tmp_out and
+  // context_lens, its output out; template arguments T, HEAD_SIZE,
+  // NUM_THREADS, NUM_SIMD_LANES, PARTITION_SIZE, SHMEM, MAX_PARTITIONS)
+  threadgroup char shared_mem[SHMEM];
+  const uint simd_tid = simdgroup_index_in_threadgroup;
+  const uint simd_lid = thread_index_in_simdgroup;
+  const int max_num_partitions = MAX_PARTITIONS;
+  const int num_heads = threadgroups_per_grid.x;
+  const int head_idx = threadgroup_position_in_grid.x;
+  const int seq_idx = threadgroup_position_in_grid.y;
+  const uint32_t context_len = context_lens[seq_idx];
+  const int num_partitions = DIVIDE_ROUND_UP(context_len, PARTITION_SIZE);
+  if (num_partitions == 1) {
+    // No need to reduce. Only copy tmp_out to out.
+    device T *out_ptr =
+        out + seq_idx * num_heads * HEAD_SIZE + head_idx * HEAD_SIZE;
+    const device T *tmp_out_ptr =
+        tmp_out + seq_idx * num_heads * max_num_partitions * HEAD_SIZE +
+        head_idx * max_num_partitions * HEAD_SIZE;
+    for (int i = thread_position_in_threadgroup.x; i < HEAD_SIZE;
+         i += threads_per_threadgroup.x) {
+      out_ptr[i] = tmp_out_ptr[i];
+    }
+    // Terminate the thread block.
+    return;
+  }
+
+  constexpr int NUM_WARPS = NUM_THREADS / NUM_SIMD_LANES;
+  const int warp_idx = simd_tid;
+  const int lane = simd_lid;
+
+  // Workspace for reduction.
+  threadgroup float red_smem[2 * NUM_WARPS];
+
+  // Load max logits to shared memory.
+  threadgroup float *shared_max_logits =
+      reinterpret_cast<threadgroup float *>(shared_mem);
+  const device float *max_logits_ptr =
+      max_logits + seq_idx * num_heads * max_num_partitions +
+      head_idx * max_num_partitions;
+  float max_logit = -FLT_MAX;
+  for (int i = thread_position_in_threadgroup.x; i < num_partitions;
+       i += threads_per_threadgroup.x) {
+    const float l = max_logits_ptr[i];
+    shared_max_logits[i] = l;
+    max_logit = max(max_logit, l);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  // Get the global max logit.
+  // Reduce within the warp.
+#pragma unroll
+  for (int mask = NUM_SIMD_LANES / 2; mask >= 1; mask /= 2) {
+    max_logit = max(max_logit, simd_shuffle_xor(max_logit, mask));
+  }
+  if (lane == 0) {
+    red_smem[warp_idx] = max_logit;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  // Reduce across warps.
+  max_logit = lane < NUM_WARPS ? red_smem[lane] : -FLT_MAX;
+#pragma unroll
+  for (int mask = NUM_WARPS / 2; mask >= 1; mask /= 2) {
+    max_logit = max(max_logit, simd_shuffle_xor(max_logit, mask));
+  }
+  // Broadcast the max value to all threads.
+  max_logit = simd_shuffle(max_logit, 0);
+
+  // Load rescaled exp sums to shared memory.
+  threadgroup float *shared_exp_sums = reinterpret_cast<threadgroup float *>(
+      shared_mem + sizeof(float) * num_partitions);
+  const device float *exp_sums_ptr = exp_sums +
+                                     seq_idx * num_heads * max_num_partitions +
+                                     head_idx * max_num_partitions;
+  float global_exp_sum = 0.0f;
+  for (int i = thread_position_in_threadgroup.x; i < num_partitions;
+       i += threads_per_threadgroup.x) {
+    float l = shared_max_logits[i];
+    float rescaled_exp_sum = exp_sums_ptr[i] * exp(l - max_logit);
+    global_exp_sum += rescaled_exp_sum;
+    shared_exp_sums[i] = rescaled_exp_sum;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  global_exp_sum = block_sum<NUM_WARPS, NUM_SIMD_LANES>(
+      &red_smem[NUM_WARPS], global_exp_sum, simd_tid, simd_lid);
+  const float inv_global_exp_sum = divide(1.0f, global_exp_sum + 1e-6f);
+
+  // Aggregate tmp_out to out.
+  const device T *tmp_out_ptr =
+      tmp_out + seq_idx * num_heads * max_num_partitions * HEAD_SIZE +
+      head_idx * max_num_partitions * HEAD_SIZE;
+  device T *out_ptr =
+      out + seq_idx * num_heads * HEAD_SIZE + head_idx * HEAD_SIZE;
+#pragma unroll
+  for (int i = thread_position_in_threadgroup.x; i < HEAD_SIZE;
+       i += NUM_THREADS) {
+    float acc = 0.0f;
+    for (int j = 0; j < num_partitions; ++j) {
+      acc += float(tmp_out_ptr[j * HEAD_SIZE + i]) * shared_exp_sums[j] *
+             inv_global_exp_sum;
+    }
+    out_ptr[i] = T(acc);
+  }")
+
 ;; ---------------------------------------------------------------------------
 ;; The kernel and its dispatch (gen.clj's)
 ;; ---------------------------------------------------------------------------
@@ -1591,28 +1732,65 @@ inline float block_sum(threadgroup float *red_smem, float sum, uint simd_tid,
     (doseq [x xs] (Mlx/mlx_vector_string_append_value v ^String x))
     v))
 
-(def ^:private kernel
-  "The kernel's handle, made once (MLX compiles it at its first run for
-   each set of template arguments, and caches it), kept for the process."
-  (delay
-    (let [ins (strings ["q" "k_cache" "v_cache" "block_tables" "context_lens" "scale"])
-          outs (strings ["out"])]
-      (try
-        (with-open [arena (Arena/ofConfined)]
-          (Mlx/mlx_fast_metal_kernel_new (.allocateFrom arena "gen_paged_attention_v1") ins outs
-                                         (.allocateFrom arena ^String body) (.allocateFrom arena ^String header)
-                                         true false))
-        (finally (Mlx/mlx_vector_string_free ins) (Mlx/mlx_vector_string_free outs))))))
+(def ^:private kernels
+  "The kernels' handles by [name source], each made once (MLX compiles a
+   kernel at its first run for each set of template arguments, and caches
+   it), kept for the process."
+  (atom {}))
+
+(defn- kernel
+  "The handle of kernel name, its source (after header) with inputs ins
+   and outputs outs (their names)."
+  ^long [^String nm ^String source ins outs]
+  (locking kernels
+    (or (get @kernels [nm source])
+        (let [is (strings ins)
+              os (strings outs)
+              h (try
+                  (with-open [arena (Arena/ofConfined)]
+                    (Mlx/mlx_fast_metal_kernel_new (.allocateFrom arena nm) is os
+                                                   (.allocateFrom arena source) (.allocateFrom arena ^String header)
+                                                   true false))
+                  (finally (Mlx/mlx_vector_string_free is) (Mlx/mlx_vector_string_free os)))]
+          (swap! kernels assoc [nm source] h)
+          h))))
+
+(def ^:private partition-size
+  "v2's positions a partition (kernels-community's paged_attention_v2)."
+  512)
+
+(defn- v2-body
+  "v2's source: body, its partitions' maxima and sums (exp_sums,
+   max_logits) the kernel's outputs."
+  ^String []
+  (str/replace body "  device float* exp_sums = nullptr;\n  device float* max_logits = nullptr;\n" ""))
 
 (def ^:private mac?
   (delay (.contains (.toLowerCase (System/getProperty "os.name")) "mac")))
 
+(defn- scores-bytes
+  "The kernel's threadgroup memory for the scores of n positions (or the
+   warps' outputs, if more): its SHMEM."
+  ^long [^long n ^long d]
+  (max (* 4 n) (* (quot (quot threads lanes) 2) d 4)))
+
 (defn- shared-bytes
-  "The kernel's threadgroup memory: the scores of mb·bs positions (or the
-   warps' outputs, if more), then the query and the reductions'."
+  "v1's threadgroup memory: the scores of mb·bs positions (or the warps'
+   outputs, if more), then the query and the reductions'."
   ^long [^long mb ^long bs ^long d dtype]
-  (let [scores (max (* 4 mb bs) (* (quot (quot threads lanes) 2) d 4))]
-    (+ scores (* d (long (item-bytes dtype))) (* 2 (quot threads lanes) 4))))
+  (+ (scores-bytes (* mb bs) d) (* d (long (item-bytes dtype))) (* 2 (quot threads lanes) 4)))
+
+(defn- partitions
+  "v2's partitions of a table of mb blocks of bs."
+  ^long [^long mb ^long bs]
+  (quot (+ (* mb bs) (dec (long partition-size))) (long partition-size)))
+
+(defn- v2-fits?
+  "Does v2 fit in threadgroup memory: its partitions' scores, and the
+   reduction's maxima and sums of p partitions?"
+  [^long p ^long d dtype]
+  (and (<= (shared-bytes 1 partition-size d dtype) threadgroup-memory)
+       (<= (+ (* 8 p) (* 2 (quot threads lanes) 4)) threadgroup-memory)))
 
 (defn- table-width
   "The width the kernel reads tables of shape [B MB] at: MB, or more so
@@ -1622,8 +1800,9 @@ inline float block_sum(threadgroup float *red_smem, float sum, uint simd_tid,
   (max (long mb) (quot (+ 7 (long nq)) (long nq))))
 
 (defn applies?
-  "Does the kernel compute gen.array/paged-attention of these operands on
-   backend b's device (Metal)?"
+  "Does a kernel compute gen.array/paged-attention of these operands on
+   backend b's device (Metal): v1 where its scores fit in threadgroup
+   memory, else v2?"
   [b q k-pool tables]
   (let [dt (dtype-on b q)
         [_ _ _ bs x] (shape-of k-pool)
@@ -1635,47 +1814,82 @@ inline float block_sum(threadgroup float *red_smem, float sum, uint simd_tid,
          (== (long x) (quot 16 (long (item-bytes dt))))
          (#{8 16 32} bs)
          (<= (long d) 256)
-         (<= (shared-bytes mb bs d dt) threadgroup-memory))))
+         (or (<= (shared-bytes mb bs d dt) threadgroup-memory)
+             (v2-fits? (partitions mb bs) d dt)))))
+
+(defn- config
+  "A kernel's configuration: outputs [[shape dtype] …], grid, threadgroup
+   and template arguments [[name dtype-or-int] …]. Free it."
+  [arena outputs [gx gy gz] [tx ty tz] templates]
+  (let [cfg (Mlx/mlx_fast_metal_kernel_config_new)]
+    (doseq [[shape dt] outputs]
+      (Mlx/mlx_fast_metal_kernel_config_add_output_arg cfg (.allocateFrom ^Arena arena ValueLayout/JAVA_INT (int-array (map int shape)))
+                                                        (long (count shape)) (int (code dt))))
+    (Mlx/mlx_fast_metal_kernel_config_set_grid cfg (int gx) (int gy) (int gz))
+    (Mlx/mlx_fast_metal_kernel_config_set_thread_group cfg (int tx) (int ty) (int tz))
+    (doseq [[nm x] templates]
+      (if (keyword? x)
+        (Mlx/mlx_fast_metal_kernel_config_add_template_arg_dtype cfg ^String nm (int (code x)))
+        (Mlx/mlx_fast_metal_kernel_config_add_template_arg_int cfg ^String nm (int x))))
+    cfg))
+
+(defn- apply-kernel
+  "The outputs (handles) of kernel k on the input handles ins under cfg,
+   on stream s; tmp holds them (with-temps)."
+  [tmp k cfg ins s]
+  (MlxRuntime/vectorArrays (long (tmp :vector (Mlx/mlx_fast_metal_kernel_apply (long k) (long (tmp :vector (MlxRuntime/vectorOf (long-array ins)))) (long cfg) (long s))))))
 
 (defn paged-attention
   "[B Hq D] of gen.array/paged-attention's operands (MlxArrays of backend
-   b; opts {:scale}) by the kernel: one dispatch, grid (Hq·256, B, 1),
-   threadgroups of 256."
+   b; opts {:scale}) by the kernels: v1 (one dispatch, grid (Hq·256, B,
+   1), threadgroups of 256) where its scores fit in threadgroup memory,
+   else v2 (grid (Hq·256, B, P) over partitions of 512 positions, each's
+   output, maximum and sum written, then the reduction's dispatch, grid
+   (Hq·256, B, 1))."
   [b q k-pool v-pool tables lens {:keys [scale]}]
   (let [[nq hq d] (shape-of q)
         [nb hk _ bs _] (shape-of k-pool)
         [_ mb] (shape-of tables)
         width (table-width (shape-of tables))
         dt (dtype-on b q)
+        v1? (<= (shared-bytes width bs d dt) threadgroup-memory)
+        p (partitions width bs)
         s (stream b)
         u32 (int (code :uint32))
-        cfg (Mlx/mlx_fast_metal_kernel_config_new)]
-    (try
-      (with-open [arena (Arena/ofConfined)]
-        (Mlx/mlx_fast_metal_kernel_config_add_output_arg cfg (.allocateFrom arena ValueLayout/JAVA_INT (int-array [nq hq d]))
-                                                          3 (int (code dt)))
-        (Mlx/mlx_fast_metal_kernel_config_set_grid cfg (int (* (long hq) threads)) (int nq) 1)
-        (Mlx/mlx_fast_metal_kernel_config_set_thread_group cfg (int threads) 1 1)
-        (doseq [[nm t] [["T" dt] ["CACHE_T" dt]]]
-          (Mlx/mlx_fast_metal_kernel_config_add_template_arg_dtype cfg ^String nm (int (code t))))
-        (doseq [[nm x] [["HEAD_SIZE" d] ["BLOCK_SIZE" bs] ["NUM_THREADS" threads] ["NUM_SIMD_LANES" lanes]
-                        ["PARTITION_SIZE" 0]
-                        ["SHMEM" (max (* 4 width (long bs)) (* (quot (quot threads lanes) 2) (long d) 4))]
-                        ["NUM_KV_HEADS" hk] ["MAX_BLOCKS" width] ["Q_STRIDE" (* (long hq) (long d))]
-                        ["KV_BLOCK_STRIDE" (* (long hk) (long d) (long bs))] ["KV_HEAD_STRIDE" (* (long d) (long bs))]]]
-          (Mlx/mlx_fast_metal_kernel_config_add_template_arg_int cfg ^String nm (int x)))
-        (with-operands b :paged-attention [hq' q nil hk' k-pool nil hv v-pool nil ht tables nil hl lens nil]
-          (with-temps [tmp]
-            (let [clamp (fn [h hi] (tmp (Mlx/mlx_clip h (tmp (scalar-handle 0 :int32)) (tmp (scalar-handle hi :int32)) s)))
-                  t32 (tmp (Mlx/mlx_astype ht (int (code :int32)) s))
-                  t32 (if (> width (long mb))
-                        (tmp (Mlx/mlx_pad t32 (int-array [1]) (int-array [0]) (int-array [(- width (long mb))])
-                                          (tmp (scalar-handle 0 :int32)) "constant" s))
-                        t32)
-                  tbl (tmp (Mlx/mlx_astype (clamp t32 (dec (long nb))) u32 s))
-                  len (tmp (Mlx/mlx_astype (clamp (tmp (Mlx/mlx_astype hl (int (code :int32)) s)) (* (long mb) (long bs))) u32 s))
-                  hs (tmp (scalar-handle (double scale) :float32))
-                  in (tmp :vector (MlxRuntime/vectorOf (long-array [hq' hk' hv tbl len hs])))
-                  out (tmp :vector (Mlx/mlx_fast_metal_kernel_apply (long @kernel) in cfg s))]
-              (first (wrap-all b (MlxRuntime/vectorArrays out)))))))
-      (finally (Mlx/mlx_fast_metal_kernel_config_free cfg)))))
+        attention [["T" dt] ["CACHE_T" dt] ["HEAD_SIZE" d] ["BLOCK_SIZE" bs] ["NUM_THREADS" threads] ["NUM_SIMD_LANES" lanes]
+                   ["PARTITION_SIZE" (if v1? 0 partition-size)]
+                   ["SHMEM" (scores-bytes (if v1? (* width (long bs)) partition-size) d)]
+                   ["NUM_KV_HEADS" hk] ["MAX_BLOCKS" width] ["Q_STRIDE" (* (long hq) (long d))]
+                   ["KV_BLOCK_STRIDE" (* (long hk) (long d) (long bs))] ["KV_HEAD_STRIDE" (* (long d) (long bs))]]
+        ins ["q" "k_cache" "v_cache" "block_tables" "context_lens" "scale"]]
+    (with-open [arena (Arena/ofConfined)]
+      (let [cfgs (if v1?
+                   [(config arena [[[nq hq d] dt]] [(* (long hq) threads) nq 1] [threads 1 1] attention)]
+                   [(config arena [[[nq hq p] :float32] [[nq hq p] :float32] [[nq hq p d] dt]] [(* (long hq) threads) nq p]
+                            [threads 1 1] attention)
+                    (config arena [[[nq hq d] dt]] [(* (long hq) threads) nq 1] [threads 1 1]
+                            [["T" dt] ["HEAD_SIZE" d] ["NUM_THREADS" threads] ["NUM_SIMD_LANES" lanes]
+                             ["PARTITION_SIZE" partition-size] ["SHMEM" (* 8 p)] ["MAX_PARTITIONS" p]])])]
+        (try
+          (with-operands b :paged-attention [hq' q nil hk' k-pool nil hv v-pool nil ht tables nil hl lens nil]
+            (with-temps [tmp]
+              (let [clamp (fn [h hi] (tmp (Mlx/mlx_clip h (tmp (scalar-handle 0 :int32)) (tmp (scalar-handle hi :int32)) s)))
+                    t32 (tmp (Mlx/mlx_astype ht (int (code :int32)) s))
+                    t32 (if (> width (long mb))
+                          (tmp (Mlx/mlx_pad t32 (int-array [1]) (int-array [0]) (int-array [(- width (long mb))])
+                                            (tmp (scalar-handle 0 :int32)) "constant" s))
+                          t32)
+                    tbl (tmp (Mlx/mlx_astype (clamp t32 (dec (long nb))) u32 s))
+                    len (tmp (Mlx/mlx_astype (clamp (tmp (Mlx/mlx_astype hl (int (code :int32)) s)) (* (long mb) (long bs))) u32 s))
+                    hs (tmp (scalar-handle (double scale) :float32))
+                    args [hq' hk' hv tbl len hs]]
+                (if v1?
+                  (first (wrap-all b (apply-kernel tmp (kernel "gen_paged_attention_v1" body ins ["out"]) (first cfgs) args s)))
+                  (let [[exp-sums max-logits tmp-out] (apply-kernel tmp (kernel "gen_paged_attention_v2" (v2-body) ins
+                                                                                 ["exp_sums" "max_logits" "out"])
+                                                                    (first cfgs) args s)
+                        _ (run! tmp [exp-sums max-logits tmp-out])]
+                    (first (wrap-all b (apply-kernel tmp (kernel "gen_paged_attention_v2_reduce" reduce-body
+                                                                 ["exp_sums" "max_logits" "tmp_out" "context_lens"] ["out"])
+                                                     (second cfgs) [exp-sums max-logits tmp-out len] s))))))))
+          (finally (run! #(Mlx/mlx_fast_metal_kernel_config_free (long %)) cfgs)))))))

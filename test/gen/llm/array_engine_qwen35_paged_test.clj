@@ -11,13 +11,14 @@
      SMC's checks (gen.llm.token-contract), within gen.llm.array-engine-
      test's band;
    - a branch's rows are qwen35's forward's, through steps that cross
-     blocks, stacked steps and lane steps, forks appending in place and
-     copying (a second writer);
+     blocks, stacked steps, lane steps and steps reading a shared group
+     in place, forks appending in place and copying (a second writer);
    - qwen35/paged-step's rows are the concatenating cache's (the model
      alone).
    Planted bugs fail them (with-redefs-fn): a stacked step's states all
-   the first row's, a lane's rows given in reverse, a fork's copy
-   skipped, and a run's states zeroed."
+   the first row's, a lane's rows given in reverse, a shared group's
+   rows read in reverse, a fork's copy skipped, and a run's states
+   zeroed."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gen.array :as array]
             [gen.array.paged :as gpaged]
@@ -133,12 +134,15 @@
           ;; an extend from a row of a group of three
           x (:branch (br/extend (br/fork (s3 2)) [10 11]))
           [d4 [y]] (stats-delta e #(br/advance [(br/fork x)] [12]))
+          ;; forks of the lane's three, its group shared: read in place
+          [d5 s5] (stats-delta e #(br/advance (mapv br/fork s2) [13 14 15]))
           out {:gaps {:stacked (gap s1 (map #(conj p %) [1 2 3]))
                       :lane (gap s2 (map #(conj p %1 %2) [1 2 3] [4 5 6]))
                       :resampled (gap s3 [(conj p 2 5 7) (conj p 1 4 8) (conj p 2 5 9)])
-                      :after-a-run (gap [x y] [(conj p 2 5 9 10 11) (conj p 2 5 9 10 11 12)])}
-               :stats (mapv #(select-keys % [:stacked-steps :copied-blocks]) [d1 d2 d3 d4])}]
-      (br/dispose! (concat [root x y] s2 s3))
+                      :after-a-run (gap [x y] [(conj p 2 5 9 10 11) (conj p 2 5 9 10 11 12)])
+                      :held (gap s5 (map #(conj p %1 %2 %3) [1 2 3] [4 5 6] [13 14 15]))}
+               :stats (mapv #(select-keys % [:stacked-steps :held-steps :copied-blocks]) [d1 d2 d3 d4 d5])}]
+      (br/dispose! (concat [root x y] s2 s3 s5))
       out)))
 
 (deftest a-branch-s-rows-are-the-forward-s
@@ -150,19 +154,25 @@
         (is (= [{:stacked-steps 1 :copied-blocks 2}
                 {}
                 {:stacked-steps 1 :copied-blocks 1}
-                {:stacked-steps 1}]
+                {:held-steps 1}
+                {:held-steps 1 :copied-blocks 2}]
                stats)
             (str "three forks stacked (the first appends to the root's block, the others copy it), a lane in place"
-                 " (its padding row after its rows), resampled forks stacked (a duplicate copies), and the fork of"
-                 " a run's branch, appending in place"))))))
+                 " (its padding row after its rows), resampled forks stacked (a duplicate copies), the fork of"
+                 " a run's branch, appending in place, its row read in place (shared with the run's), and forks"
+                 " of the lane's three, their group shared, read in place (two blocks copied: the resample's"
+                 " forks of two of the three wrote past them)"))))))
 
 (def ^:private planted
   "Mutations of the paged mode's states, each failing scenario's gaps."
   {"a stacked step's states all the first row's"
    {#'ae/take-rows (let [f @#'ae/take-rows] (fn [states idx] (f states (repeat (count idx) (first idx)))))}
    "a lane's rows in reverse"
-   {#'ae/step-states (let [f @#'ae/step-states] (fn [state slots r] (let [[s order lane] (f state slots r)]
-                                                                       [s (if lane (vec (rseq order)) order) lane])))}
+   {#'ae/step-states (let [f @#'ae/step-states] (fn [ctx slots r] (let [s (f ctx slots r)]
+                                                                     (if (:lane s) (update s :order (comp vec rseq)) s))))}
+   "a shared group's rows read in place in reverse"
+   {#'ae/step-states (let [f @#'ae/step-states] (fn [ctx slots r] (let [s (f ctx slots r)]
+                                                                     (if (seq (:held s)) (update s :order (comp vec rseq)) s))))}
    "a fork's copy skipped"
    {#'gpaged/put-blocks (fn [pool _ _] pool)}
    "a run's states zeroed"
@@ -210,7 +220,6 @@
         m (:dense @models)
         pools (qwen35/paged-pools m 4 8)
         i32 #(array/array % {:dtype :int32})]
-    (is (= :unsupported (reason #(ae/engine (merge paged-opts {:model (:dense files) :continuous? true})))) "continuously")
     (is (= :invalid-args (reason #(qwen35/paged-step m pools (i32 [0]) (i32 [[1]]) (i32 [4]) [[7]]))) "no states")
     (is (= :invalid-args (reason #(qwen35/paged-step m (mapv merge pools (qwen35/paged-states m 2)) (i32 [0]) (i32 [[1]]) (i32 [4]) [[7]])))
         "states of two rows for one")))
