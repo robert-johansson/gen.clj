@@ -69,8 +69,10 @@ other values for the same key, from the same distribution.
   place: 20.1); at 16 rows 38.7, 32.8. Through the engine (main and this
   alternated, float16): 8 continuous clients 216-243 → 255-268 tokens/s,
   their reads' 90th percentile 53-60 → 29 ms; token SMC at 16 particles
-  continuous 871-907 → 917-937, static 791 → 808 (llama.cpp 280). The
-  engine's values are unchanged.
+  continuous 871-907 → 917-937, static 791 → 808 (llama.cpp 280).
+  Qwen3-0.6B in float32 (both changes): token SMC in the static mode,
+  which stacks its rows into a new cache every step, 352 → 529; 8
+  continuous clients 214 → 264. The engine's values are unchanged.
 
 - **Changed (experimental): paged attention runs a kernel on MLX's CUDA**
   (genclj-6qb6, genclj-1daf; **Draws**, the paged and continuous modes

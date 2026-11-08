@@ -76,7 +76,11 @@
    float16 216-232 → 255-268 tokens/s continuous (p90 read 53-60 → 29
    ms), in float32 154 → 205 (p50 40 → 29 ms); llama.cpp 69-70 (66-69).
    Token SMC continuous 872-907 → 921-937 (float16), 724 → 756 (float32);
-   llama.cpp 280. bench/gen/batch_profile.clj breaks a step down."
+   llama.cpp 280. Qwen3-0.6B-Q8_0 the same way: float32 token SMC static
+   352 → 529 (its dropped caches released), 8 continuous clients 214 →
+   264; float16 8 clients 368 → 382 (p90 27.5 → 18.3 ms), llama.cpp 98,
+   token SMC llama.cpp 944. bench/gen/batch_profile.clj breaks a step
+   down."
   (:require [clojure.string :as str]
             [gen.array :as array]
             [gen.gfi :as gfi]
