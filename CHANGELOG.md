@@ -76,7 +76,9 @@ other values for the same key, from the same distribution.
   2026-11-08; **Draws**, on CUDA). `gen.llm.array-engine/engine` given a
   GGUF file whose weights are quantized (Q8_0, Q4_0/1, Q5_0/1, K-quants)
   and no `:dtype` loads it in float16 on MLX's CUDA backend, where it
-  loaded it in the backend's default float (float32). MLX's fast
+  loaded it in the backend's default float (float32). A mixture of
+  experts (its architecture's `expert_count` positive) stays float32
+  (the owner's call, 2026-11-08, from the MoE's distance below). MLX's fast
   quantized products on CUDA (qmm_sm80) take half floats only, and every
   lead over llama.cpp on NVIDIA was measured in float16. Unchanged: an
   explicit `:dtype`, an unquantized file, a model passed loaded (GRPO's
@@ -89,7 +91,7 @@ other values for the same key, from the same distribution.
   Qwen3-0.6B and Qwen3.5-0.8B Q8_0, and by 0.2 to 0.6 on the
   Qwen3.6-35B-A3B MoE (at most 6.1, as far as llama.cpp's CUDA build is
   from the float32 forward; genclj-fxag looks into it). On fenrir's RTX PRO
-  6000 with the default (tokens/s, each engine in a JVM of its own, the
+  6000 in float16 (tokens/s, each engine in a JVM of its own, the
   median of 5 runs): token SMC at 16 particles on Qwen3-0.6B Q8_0 paged
   1462, continuous 1517, static 1136, llama.cpp 2552; on the MoE paged
   847, continuous 818, llama.cpp 1886. Eight clients of the continuous

@@ -6289,3 +6289,72 @@ Qwen3 and Qwen3.5. Three planted bugs fail it:
    trace; CUDA and the MoE may want a narrower set.
 5. **Smaller:** a growing pool makes every shape new; `ae/groups` is loud on
    a default engine.
+
+### float16 on CUDA as built; the MoE stays float32; the NVIDIA reference test
+
+(The owner's calls of 2026-11-08, items 1 and 2, built; the MoE carve-out the
+owner's, 2026-11-08 afternoon; the rest PROVISIONAL, owner to confirm;
+genclj-1vk7, genclj-gddh)
+
+**The float16 default.** A private default-dtype in gen.llm.array-engine
+gives `:float16` when:
+- the engine loads a GGUF path of quantized weights;
+- no `:dtype` is given;
+- `gen.array/device` says `:cuda`;
+- the file is not a mixture of experts.
+
+The new experimental `gen.array/device` and its optional protocol IDevice let
+the engine ask the device without calling a backend (rule 3). MLX answers
+`:cpu`, `:metal` or `:cuda`. Training stays float32: lora, sft and grpo load
+through the families.
+
+**The MoE stays float32 (the owner, after cudaref's measurement).** Against
+MLX's CPU in float32, float16 moves the Qwen3.6 MoE's next-token
+log-probabilities 0.17–0.58 nats at the median and 6.07 at most. The dense
+models move about 0.02. That is as far as llama.cpp's own rounding, probably
+the router flipping experts at near-ties (unconfirmed; genclj-fxag counts the
+flips and tries the router in float32). float32 costs the MoE about 20% on
+NVIDIA meanwhile. The engine detects an MoE by its architecture's positive
+`expert_count`. array-engine-test checks the dense and MoE fixtures; a planted
+"never an MoE" fails it.
+
+**The NVIDIA reference test** (gen.llm.models.cuda-reference-test, ^:slow,
+native suite `cuda`, skipped off MLX's CUDA). The reference is MLX's CPU in
+float32 for both CUDA dtypes: its float16 is over 40× slower (6 prompts of the
+0.6B took over 25 minutes, against 34 s in float32). The bands, twice the
+largest gap over the 20 general and 20 digit prompts
+(bench/gen/cuda_reference_noise.clj):
+
+| Model | float32: largest → band | float16: largest → band |
+|---|---|---|
+| Qwen3-0.6B Q8_0 | 2.51e-4 → 5.1e-4 | 9.24e-2 → 0.19 |
+| Qwen3.5-0.8B Q8_0 | 3.75e-4 → 7.5e-4 | 0.240 → 0.48 |
+| Qwen3.6 MoE Q4_K_M | 0.397 → 0.80 | 6.07 → 12.2 |
+
+- **The planted convention errors are asserted in float32, and every one
+  fails it.** The weakest is RoPE's traditional pairs: 0.6B 11.6, 0.8B 1.68,
+  and the MoE 1.19 against 0.80 (a thin 1.49×; outside the band on 2 of 5
+  prompts).
+- The MoE's float32 band is set by 2 of the 40 prompts (0.23 and 0.40); the
+  other 38 are within 1.2e-4. It looks like the same routing jump.
+- **What half precision is checked for** (a side agent's note, relayed by the
+  owner): its bands can't separate the planted errors. The MoE's 12.2 holds
+  most of them, and Qwen3.5's RoPE error (0.14 at least) sits inside 0.48 on
+  most prompts. The precision is a parameter, not separate code, so a
+  convention bug fails the float32 run. The float16 run catches gross
+  half-only failures (overflow, NaN, a wrong cast) within its band.
+  NVIDIA's gate runs both, with `-Dgen.require-native=cuda` so the suite
+  can't skip.
+- array-engine-llama-test is pinned to `:dtype :float32`, where its bands
+  were measured. The float16 default has no engine-level llama.cpp band on
+  CUDA yet.
+- The Thor (sm_110) is unmeasured. Measure its bands with the bench first and
+  key them by platform if they differ.
+
+**Measured on fenrir in float16, tokens/s, against llama.cpp:**
+- SMC 16 on the 0.6B: paged 1462, continuous 1517, static 1136; llama.cpp
+  2552.
+- SMC 16 on the MoE: paged 847, continuous 818; llama.cpp 1886.
+- 8 clients, continuous, after 6 warm runs: the 0.6B 718 (llama.cpp 504), the
+  MoE 135 (162). With one warm run the 0.6B gave 251, its forwards still
+  compiling; that was before shapes' open-time compile, merged beside it.
