@@ -802,8 +802,12 @@ gen.llm.llama on the same GGUF files.
   - The device's floor reads fixed tokens and evaluates once every 16
     steps, with no host round trip.
 - **Caches.** Static is the dense static-capacity cache. Paged is the paged
-  KV cache (`:paged?`). Continuous is the paged mode with continuous
-  batching (`:continuous?`).
+  KV cache (`:paged?`, the engine's default from 2026-11-08). Continuous is
+  the paged mode with continuous batching (`:continuous?`, opt-in).
+- **Several clients need the continuous mode.** Every many-client win below
+  is continuous. The paged mode alone serves concurrent clients in turn,
+  near llama.cpp's speed on the Mac and under half of it on CUDA. Open a
+  serving engine with `:continuous? true`.
 
 **Reproduce.** One GPU JVM at a time. `-J-Dgen.bench.dtype=float16`
 computes in float16, `-J-Dgen.bench.sections=…` picks a bench's parts,
@@ -1156,6 +1160,33 @@ Source: genclj-b3ow (2026-11-07); docs/research/llm-mlx-engine.md §8; docs/deci
   attributes it to MLX's quantized matmul at 8 rows.
 - **Not re-measured** after genclj-6qb6's copy change.
 
+**After 1.3.0's overnight work (2026-11-08).** 8 clients, 64-token
+completions; tokens/s, with the median or p90 read latency where the source
+gives it.
+
+| Machine, model, dtype | MLX static | MLX paged | MLX continuous | llama.cpp via gen.clj |
+|---|---:|---:|---:|---:|
+| Mac, Qwen3-0.6B Q8_0, f16 | — | — | 422 (p90 14.9 ms) | 99 (p90 80 ms) |
+| Mac, Qwen3-0.6B Q8_0, f32 | — | — | 287 (p90 23.7 ms) | 99 (p90 77 ms) |
+| Mac, Qwen3.5-0.8B Q8_0, f16 | 72 | 74 | 255–285 (p90 22–29 ms) | 69–70 (p90 114 ms) |
+| Mac, Qwen3.5-0.8B Q8_0, f32 | 65 | 66 | 205–217 (p90 30.6 ms) | 66–70 (p90 112 ms) |
+| fenrir, Qwen3-0.6B Q8_0, f16 | 147 | 219 | 549–555 | 501–505 |
+| fenrir, Qwen3-0.6B Q8_0, f32 | 104 | 195 | 409 | 502 |
+| fenrir, Qwen3-8B Q8_0, f16 | 73 | 81 | 231–236 | 144 |
+| fenrir, Qwen3.6-35B-A3B Q4_K_M, f16 | — | — | 150 (median 36–38 ms) | 161 (median 45.6 ms) |
+
+Source: docs/decisions.md's entries "Continuous batching for Qwen3.5/3.6",
+"Paged attention on CUDA", "Token SMC on CUDA", "Qwen3.5's step on Metal",
+"Paged multi-token reads" and "The MoE on CUDA" (2026-11-08);
+bench/gen/array_engine_bench.clj. The paged and static cells are the
+earliest of those runs. Later changes moved the continuous mode most.
+
+- **On CUDA the leads hold in float16 only.** The engine's default there
+  becomes float16 for quantized models (the owner's calls, 2026-11-08).
+- **The MoE's throughput trails** because mixed forwards retrace per new
+  shape (200–430 ms each). Shapes bucketed and compiled at open is the
+  owner's call, in progress.
+
 **The paged mode's parts, the Mac (MLX 0.32.4):**
 
 | Operation (one layer, 16 rows, contexts to 1023) | float32 | float16 |
@@ -1388,19 +1419,18 @@ choice); mlx-lm's files hold float16.
 ### Not yet measured
 
 - **The Thor:** nothing in 1.3.0, its power mode included (genclj-whi8).
-- **Larger and other models:** an MoE (Qwen3-30B-A3B or Qwen3.6-35B-A3B), a
-  model only the Thor holds, MLX 4-bit weights, and decode on k-quant files
-  (genclj-whi8, genclj-utti).
+- **Larger and other models:** a model only the Thor holds, MLX 4-bit
+  weights, and decode on k-quant files other than the Qwen3.6 MoE
+  (genclj-whi8).
 - **MLX's own ceiling** outside the JVM (mlx-lm), and mlx-node on the same
   weights (genclj-whi8).
 - **Batch 4 on fenrir.** genclj-ssiv ticks it, but no figure is recorded.
   Batch 64 through the protocol, on either machine.
-- **Token SMC** on fenrir, and with 64 particles anywhere (genclj-c7uf).
+- **Token SMC with 64 particles**, anywhere (genclj-c7uf). With 16 on
+  fenrir, see "Token SMC on CUDA" in docs/decisions.md.
 - **The KV fork cost and the full-logits overhead per token;** generate,
   assess and update over token sites against the raw engine call, on a real
   model (genclj-whi8).
-- **Paged attention and continuous batching on CUDA** (no CUDA kernel yet),
-  and contexts past v1's about 8,000 positions (genclj-6qb6).
 - **Qwen3.5 on CUDA**, its speed and band through the gated-delta composite
   (genclj-2krw); prefill of 2k-8k tokens on Metal (genclj-afy0).
 - **checkpoint_bench on Metal** (genclj-pnu6, genclj-jksq).
