@@ -5841,3 +5841,86 @@ alternated because a JVM's result varies by up to 30%):
 - array-engine-qwen35-continuous-test's band (2e-5, measured on Metal) fails
   on CUDA by 2.2–2.4e-5, on main as well. Its per-platform band is being
   measured (cuda-check).
+
+### Qwen3.5's step on Metal: 5-15 float32 rows as 16, dead states released
+
+(PROVISIONAL, owner to confirm; genclj-qu77, 2026-11-08)
+
+**What the profile found.** bench/gen/batch_profile.clj times one compiled
+paged batch step on the M4, Qwen3.5-0.8B Q8_0, in ms per step:
+
+| | 1 row | 8 rows | 16 rows |
+|---|---:|---:|---:|
+| f32, states in place | 12.8 | **38.0** | 34.4 |
+| f32, states read in place by forks | 13.0 | 39.6 | 40.8 |
+| f16, states read in place by forks | 12.6 | 23.1 | 38.7 |
+| Qwen3-0.6B f32 | 10.4 | **30.4** | 26.9 |
+
+1. **8 float32 rows were slower than 16.** Below its limit of 13 to 15 rows
+   on the M4, MLX 0.32.4 uses qmv_wide, which re-reads the weights for every
+   5 rows; 16 rows use qmm. The output projection took 9.6 ms at 8 rows and
+   5.5 at 16. In float16 qmv_wide is the faster one.
+2. **Steps that read their states in place paid for the GC.** Each step made
+   18.9 MB of new states per row, so MLX ran System.gc every 7 to 13 steps
+   and allocated fresh buffers in between: about 3 ms a step at 8 rows (f16)
+   and 6 ms at 16.
+3. **The gated-delta kernel is at memory speed:** 0.44 ms a row (86 GB/s).
+   Variants gained at most 7%, so the ported kernel stays.
+4. **No recompiles in steady decode.** In the 8-client bench, 2 or 3 mixed
+   forwards a run still retrace (50 to 125 ms each).
+5. **The rest is the host round trip.** At 8 rows in f16 a step takes
+   20.2 ms against a pipelined floor of 13.0: read 1.2, normalize 1.4, draw
+   0.5, and about 3.3 ms of GPU idle while encoding.
+
+**The decisions:**
+1. **gen.backend.mlx.nn's qmm-rows pads float32 inputs of 5 to 15 rows with
+   zero rows to 16,** so MLX uses qmm. It applies only on Metal generations
+   15 and 16 (M3, M4, not Ultra), where it was measured.
+   - f32 at 8 rows: 38.0 → 28.7 ms (Qwen3-0.6B 30.4 → 22.5).
+   - **Draws can change** at near-ties: values move within round-off. The
+     CHANGELOG has a Draws line.
+   - Not measured: M5, M2, Ultra (the M5's limits differ).
+   - Not taken: raising :min-rows, which costs gated-delta work for every
+     padded row; asking MLX upstream to tune qmv_wide; leaving it.
+2. **gen.array/release! (experimental), with the optional protocol
+   IReleasing.** On MLX it frees an array's buffer now, as a donated
+   array's; a later read is loud (:donated). On the JVM backend it does
+   nothing.
+   - The engine releases any group of states or caches no slot holds any
+     more, in all three modes. It is a runtime; rule 3 keeps release! out of
+     models, handlers and distributions, as its docstring says.
+   - Held steps are now as fast as in-place ones: f16 at 8 rows
+     23.1 → 20.2 ms, at 16 rows 38.7 → 32.8.
+   - Not taken: an internal-only function; consuming dead groups through a
+     donating no-op compile (no new API, but a hack); shortening
+     MlxRuntime's 10 ms GC quiet wait (no buffer reuse).
+
+**Measured, Qwen3.5-0.8B Q8_0 on Metal, tokens/s** (main and the change run
+alternately in one session, three rounds for f16):
+
+| | before | after | llama.cpp |
+|---|---:|---:|---:|
+| 8 clients, f16 continuous | 216–243 | **255–268** | 69–70 |
+| read latency p90 (ms) | 53–60 | **29** | 111–123 |
+| 8 clients, f32 continuous | 154 | **205** | 66–69 |
+| SMC 16, f16 continuous | 871–907 | 917–937 | 280 |
+| SMC 16, f32 continuous | 724 | 756 | 281 |
+
+- Qwen3-0.6B gains too: f32 static SMC 352 → 529, and f32 continuous with 8
+  clients 214 → 264.
+
+**Tests.**
+- nn-test's quantized-matmul-of-any-rows checks 1 to 17 rows against
+  dequantize-then-matmul, and on Metal that each row equals the same row of
+  a 16-row product. Taking the product's last rows fails 22 checks; skipping
+  the padding fails 8.
+- dropped-groups-are-released runs all three modes. Releasing a group still
+  held fails all three on the JVM and throws :donated on Metal. Never
+  releasing also fails all three.
+
+**Left, the owner's call:**
+- mixed-forward recompiles: bucket the shapes, or accept them as warm-up;
+- more than one prefill chunk a forward (prompt admission is about 23% of an
+  8-client run, at 44 to 61 ms a chunk);
+- half-float recurrent states, which halve their traffic but change numerics;
+- host normalization and host threads (genclj-t46p).
