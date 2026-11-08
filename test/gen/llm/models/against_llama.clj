@@ -142,7 +142,8 @@
   "The planted errors of Qwen3.5's mixture of experts: name to
    with-redefs-fn's map."
   {:experts-gate-up-swapped {#'qwen35/moe (fn [cfg w x] (moe cfg (assoc w :gate (:up w) :up (:gate w)) x))}
-   :router-unnormalized {#'qwen35/routing (fn [probs k] (top-k probs k))}
+   ;; top-k through its var, which a forced read (with-experts) redefines
+   :router-unnormalized {#'qwen35/routing (fn [probs k] (#'qwen35/top-k probs k))}
    ;; the routed experts' part (no :shared), plus the shared expert's SwiGLU
    :shared-expert-ungated {#'qwen35/moe (fn [cfg w x]
                                           (let [s (array/shape x)
@@ -195,24 +196,56 @@
   [m]
   (array/backend (first (filter array/backend-array? (array/tree-leaves (:weights m))))))
 
+(defn- recorded
+  "[(f)'s result, the experts each of its mixture-of-experts layers' top k
+   picked, by position: [position [layer [k indices]]], host vectors
+   (empty without such layers)]. f is a forward of a qwen35 model."
+  [f]
+  (let [calls (atom [])
+        out (with-redefs-fn {#'qwen35/top-k (fn [p k] (let [r (top-k p k)] (swap! calls conj (first r)) r))} f)
+        layers (mapv array/->clj @calls)]
+    [out (if (seq layers) (apply mapv vector layers) [])]))
+
+(defn- with-experts
+  "(f), a forward of a qwen35 model at the positions positions (one a row
+   of its tokens), each of its mixture-of-experts layers' top k the
+   experts' (position → layer → indices, reference's :experts), weighted
+   by the model's own router; (f) when experts is nil."
+  [experts positions f]
+  (if-not experts
+    (f)
+    (let [layer (atom -1)]
+      (with-redefs-fn {#'qwen35/top-k (fn [p _k]
+                                        (let [l (swap! layer inc)
+                                              idx (array/array (mapv #(get-in experts [% l]) positions) {:dtype :int32})]
+                                          [idx (array/take-along-axis p idx -1)]))}
+        f))))
+
 (defn reference
   "The readings of the reference ref on the prompt's tokens (a vector of
    at least 2) and steps greedy tokens after it, each the reference's
    argmax: {:tokens :root lp :steps [[t lp] …]}, each lp a float[] of the
    next token's log-probabilities. ref is a Branching engine (llama.cpp's)
    or a model (qwen3/load's, qwen35/load's) on any backend, read on its
-   own (the backend its weights live on)."
+   own (the backend its weights live on). A mixture of experts' readings
+   hold :experts too, the experts its layers' top k picked at each
+   position (the prompt's, then the steps' tokens'): [position [layer [k
+   indices]]], which compare-readings can force on the forward under test
+   (genclj-fxag)."
   [ref tokens steps]
   (if (map? ref)
     (array/with-backend (model-backend ref)
-      (let [[lg cache] (prefill ref [tokens] {:logits :last})]
-        (loop [i 1 c cache lp (logprobs lg) out {:tokens tokens :root lp :steps []}]
+      (let [moe? (some? (get-in ref [:config :experts]))
+            run (fn [f] (if moe? (recorded f) [(f) nil]))
+            [[lg cache] ex] (run #(prefill ref [tokens] {:logits :last}))]
+        (loop [i 1 c cache lp (logprobs lg) out (cond-> {:tokens tokens :root lp :steps []} moe? (assoc :experts ex))]
           (if (> i steps)
             out
             (let [t (first (top-tokens lp 1))
-                  [lg c'] (step ref c [[t]])
+                  [[lg c'] ex] (run #(step ref c [[t]]))
                   lp' (logprobs lg)]
-              (recur (inc i) c' lp' (update out :steps conj [t lp'])))))))
+              (recur (inc i) c' lp' (cond-> (update out :steps conj [t lp'])
+                                      moe? (update :experts into ex))))))))
     (let [root (br/open ref tokens)]
       (try
         (let [lp (br/logprobs root)]
@@ -229,18 +262,22 @@
   "The forward of model m against a reference's readings (reference's):
    a vector of {:what :max-diff :argmax? :top5?}, :what :whole, :chunk or
    [:step i] (i from 1, one a reading's step); tie as verdict's (0:
-   exactly the same tokens)."
-  [m {:keys [tokens root steps]} tie]
+   exactly the same tokens). Readings with :forced (reference's :experts)
+   force those experts on m's mixture-of-experts layers (with-experts):
+   the forward with the reference's routing, so that a near-tie of the
+   router's top k (which half floats flip) moves nothing (genclj-fxag)."
+  [m {:keys [tokens root steps forced]} tie]
   (array/with-backend (model-backend m)
     (let [n (count tokens)
-          [whole cache] (prefill m [tokens] {:logits :last})
-          [_ half] (prefill m [(subvec tokens 0 (quot n 2))])
-          [chunk] (step m half [(subvec tokens (quot n 2))] {:logits :last})]
+          h (quot n 2)
+          [whole cache] (with-experts forced (range n) #(prefill m [tokens] {:logits :last}))
+          [_ half] (with-experts forced (range h) #(prefill m [(subvec tokens 0 h)]))
+          [chunk] (with-experts forced (range h n) #(step m half [(subvec tokens h)] {:logits :last}))]
       (loop [i 1 c cache sts (seq steps)
              out [(assoc (verdict root (logprobs whole) tie) :what :whole)
                   (assoc (verdict root (logprobs chunk) tie) :what :chunk)]]
         (if-let [[t lp] (first sts)]
-          (let [[lg c'] (step m c [[t]])]
+          (let [[lg c'] (with-experts forced [(+ n i -1)] #(step m c [[t]]))]
             (recur (inc i) c' (next sts) (conj out (assoc (verdict lp (logprobs lg) tie) :what [:step i]))))
           out)))))
 

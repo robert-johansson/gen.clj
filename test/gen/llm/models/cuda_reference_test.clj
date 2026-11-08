@@ -49,12 +49,20 @@
    - Qwen3.6-35B-A3B Q4_K_M (the MoE: 256 experts, 8 used): float32
      6.20e-5, 0.397 (median 1.1e-5 to 3.1e-5), the band 0.80: 38 of the
      40 prompts within 1.2e-4, two texts of numbers at 0.23 and 0.40, a
-     jump rather than a drift (most likely an expert picked otherwise at
-     a near-tie of the router's top 8, not confirmed). float16 2.71, 6.07
-     (median 0.17 to 0.58), the band 12.2: as far from the float32
-     forward as llama.cpp's CUDA build is (its band 12.3), where the dense
-     models' float16 is 0.02 nats away (median). The argmax equal in 400
-     and 394 of 400, the top 5 in 398 and 347.
+     jump rather than a drift: an expert picked otherwise at a near-tie
+     of the router's top 8 (the CPU's log p_8/p_9 4.8e-7 and 3.1e-4;
+     genclj-fxag, bench/gen/moe_routing.clj). float16 2.71, 6.07 (median
+     0.17 to 0.58) with the router in float16; in float32 since
+     genclj-fxag 2.74, 6.01 (median 0.12 to 0.36), the band 12.2: as far
+     from the float32 forward as llama.cpp's CUDA build is (its band
+     12.3), where the dense models' float16 is 0.02 nats away (median).
+     The argmax equal in 400 and 394 of 400, the top 5 in 398 and 347.
+     Float16 flips the router's top k at 12% of a prompt's layers and
+     positions, each flip moving the hidden state and flipping more.
+     With the CPU's experts forced (against-llama's :forced) float16 is
+     3.97e-2, 0.172 away (median 1.3e-2 to 2.2e-2), the band 0.35: as
+     close as the dense models'. The argmax equal in 399 of 400, the top
+     5 in 398.
 
    The planted convention errors are asserted in float32, where the band
    is tight: they are the same code in both dtypes, and the MoE's float16
@@ -83,6 +91,20 @@
    RoPE pairs 1.68 (the others 5.51 to 25.2); Qwen3.6-35B-A3B's RoPE
    pairs 1.19, outside the band 0.80 on 2 of the 5 prompts (the others
    7.25 to 23.0).
+
+   A mixture of experts is checked with the CPU's experts forced too, in
+   both dtypes, where the bands are tight and the planted errors are
+   asserted outside them: a flip at a near-tie of the router is the
+   rounding's own, and forcing the CPU's experts leaves the rest of the
+   forward to check. Forced, float32 is 6.39e-5 and 5.37e-4 away (the
+   band 1.1e-3, where unforced it is 0.80), float16 3.97e-2 and 0.172
+   (0.35). The bench's planted errors so, in float32 and float16 alike
+   (the least and the median over the 20 general prompts): RoPE's
+   traditional pairs 0.057 and 0.20 (at most 0.83 to 0.86); the others
+   2.24 (the conv state's oldest inputs) to 10.8 at least. This test's
+   worst gaps so (fenrir, 2026-11-08): RoPE's pairs 0.897 in float32
+   (outside its band on every prompt, 7.5e-3 at least) and 0.899 in
+   float16 (outside it on 2 of the 5 prompts); the others 4.31 to 27.8.
 
    The Thor (sm_110, aarch64): unmeasured. The test runs there as it is,
    given MLX's CUDA build for sm_110, llama.cpp's aarch64 library (for
@@ -128,14 +150,16 @@
 (defn- band
   "The band of MLX's CUDA forward against its CPU's on the GGUF file at
    path, in dtype (the measurements above): by family (Qwen3; Qwen3.5 and
-   Qwen3.6) and quantization (Q8_0; K-quants, the MoE's), and dtype."
-  [path dtype]
+   Qwen3.6) and quantization (Q8_0; K-quants, the MoE's), and dtype; with
+   forced?, a mixture of experts' with the CPU's experts."
+  [path dtype forced?]
   (let [qwen35? (#{"qwen35" "qwen35moe"} (against/architecture path))
         k? (against/k-quants? path)]
     (get-in {:qwen3 {:float32 5.1e-4 :float16 0.19}
              :qwen35 {:float32 7.5e-4 :float16 0.48}
-             :qwen35-k {:float32 0.80 :float16 12.2}}
-            [(cond (and qwen35? k?) :qwen35-k qwen35? :qwen35 :else :qwen3) dtype])))
+             :qwen35-k {:float32 0.80 :float16 12.2}
+             :qwen35-k-forced {:float32 1.1e-3 :float16 0.35}}
+            [(cond (and qwen35? k? forced?) :qwen35-k-forced (and qwen35? k?) :qwen35-k qwen35? :qwen35 :else :qwen3) dtype])))
 
 (def ^:private prompts
   "gen.llm.models.qwen35-llama-test's: of 2 to about 60 tokens, and one
@@ -167,31 +191,47 @@
 (defn- check
   "The forward on CUDA in dtype against the CPU's in float32: every reading
    of every prompt within the band; with planted? every planted error
-   outside it, its worst gap over the prompts (a reading it would fail)."
-  [dtype planted?]
+   outside it, its worst gap over the prompts (a reading it would fail).
+   With forced?, a mixture of experts' forward takes the CPU's experts
+   (against-llama/compare-readings' :forced)."
+  [dtype planted? forced?]
   ((mlx 'collect!))
-  (let [refs @reference
+  (let [refs (cond->> @reference forced? (mapv #(assoc % :forced (:experts %))))
         m (against/load-model model-path {:dtype dtype})
-        b (band model-path dtype)]
+        b (band model-path dtype forced?)]
     (doseq [[text {toks :tokens :as r}] (map vector prompts refs)]
-      (testing (str (name dtype) ", " (count toks) " tokens: " (pr-str (subs text 0 (min 30 (count text)))))
+      (testing (str (name dtype) (when forced? ", the CPU's experts") ", " (count toks) " tokens: "
+                    (pr-str (subs text 0 (min 30 (count text)))))
         (doseq [{:keys [what max-diff argmax? top5?]} (against/compare-readings m r b)]
           (is (<= max-diff b) (str what ": |Δ log p| " max-diff " (band " b ")"))
           (is argmax? (str what ": the argmax"))
           (is top5? (str what ": the top 5")))))
     (when planted?
-      (testing (str (name dtype) ", the planted convention errors")
+      (testing (str (name dtype) (when forced? ", the CPU's experts") ", the planted convention errors")
         (doseq [mutation (sort (keys (against/mutations-of m)))]
           (let [ds (mapv #(against/mutated m % mutation) refs)
                 d (reduce max ds)]
-            (println (format "cuda-reference-test %s %s: worst %.3f nats, by prompt %s (band %s)"
-                             (name dtype) (name mutation) d (mapv #(Double/parseDouble (format "%.3g" %)) ds) b))
+            (println (format "cuda-reference-test %s%s %s: worst %.3f nats, by prompt %s (band %s)"
+                             (name dtype) (if forced? " forced" "") (name mutation) d
+                             (mapv #(Double/parseDouble (format "%.3g" %)) ds) b))
             (is (< b d) (str (name mutation) ": |Δ log p| " d ", inside the band " b))))))))
 
 (deftest ^:slow float32-forward-is-the-cpu-s
   (ts/when-native :cuda available?
-    (check :float32 true)))
+    (check :float32 true false)))
 
 (deftest ^:slow float16-forward-is-the-cpu-s
   (ts/when-native :cuda available?
-    (check :float16 false)))
+    (check :float16 false false)))
+
+(deftest ^:slow float32-forward-with-the-cpu-s-experts-is-the-cpu-s
+  (ts/when-native :cuda available?
+    (if (:experts (first @reference))
+      (check :float32 true true)
+      (println "cuda-reference-test: the CPU's experts forced on a mixture of experts only"))))
+
+(deftest ^:slow float16-forward-with-the-cpu-s-experts-is-the-cpu-s
+  (ts/when-native :cuda available?
+    (if (:experts (first @reference))
+      (check :float16 true true)
+      (println "cuda-reference-test: the CPU's experts forced on a mixture of experts only"))))

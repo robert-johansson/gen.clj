@@ -263,6 +263,20 @@
 ;; The weights, by llama.cpp's names
 ;; ---------------------------------------------------------------------------
 
+(defn- router-dtype
+  "The dtype a mixture of experts' router computes in, for a model
+   computing in dtype: float32 for a half float, else dtype. The router
+   picks the top k of its logits: rounded to a half float (an ulp of
+   2^-7 at 8), they tie or swap experts whose logits are close, and each
+   such flip changes a layer's output by a whole expert's share. On
+   Qwen3.6-35B-A3B in float16 (genclj-fxag, bench/gen/moe_routing.clj),
+   given the float32 forward's experts upstream, this halves the layers
+   and positions whose top k differs from it (1.9% to 1.0%); the rest
+   come from the half-float input and cascade through later layers and
+   positions."
+  [dtype]
+  (if (#{:float16 :bfloat16} dtype) :float32 dtype))
+
 (defn- mtp-tensor?
   "Is name a tensor of the MTP blocks (blk.i for i at or past layers)?"
   [name layers]
@@ -275,7 +289,9 @@
    dtype it computes in), and the weights by llama.cpp's names, each
    checked against the configuration's shape. Options: :dtype, a float
    dtype (default: the backend's default float), to which the float
-   weights are cast, the quantized matrices' scales and biases among them.
+   weights are cast, the quantized matrices' scales and biases among them;
+   a mixture of experts' router (ffn_gate_inp) is cast to float32 under a
+   half float (router-dtype).
    Loud when a tensor the forward reads is missing or of another shape
    (:invalid-args), and when the file holds one it does not read but the
    MTP block's (:unsupported).
@@ -300,8 +316,9 @@
          dtype (common/check-dtype who (or dtype (:float (array/defaults array/*backend*))))
          seen (atom #{})
          tensor (fn tensor
-                  ([name shape] (tensor name shape false))
-                  ([name shape dense?]
+                  ([name shape] (tensor name shape false dtype))
+                  ([name shape dense?] (tensor name shape dense? dtype))
+                  ([name shape dense? as]
                    (let [w (or (get tensors name)
                                (throw (invalid (str "the file has no tensor " name) {:tensor name})))
                          s (common/weight-shape w)]
@@ -310,7 +327,7 @@
                      (when (and dense? (map? w))
                        (throw (unsupported (str "tensor " name " is quantized; the forward reads it dense") {:tensor name})))
                      (swap! seen conj name)
-                     (common/cast-weight who w dtype))))
+                     (common/cast-weight who w as))))
          embed (tensor "token_embd.weight" nil)
          vocab (first (common/weight-shape embed))
          _ (when-not (= [vocab hidden] (common/weight-shape embed))
@@ -339,7 +356,8 @@
                                 :ssm-norm (t "ssm_norm" [delta-value-dim] true)
                                 :out (t "ssm_out" [hidden value-width])})
                        feed (if experts
-                              {:moe (merge {:router (t "ffn_gate_inp" [experts hidden])
+                              {:moe (merge {:router (tensor (str "blk." i ".ffn_gate_inp.weight") [experts hidden] false
+                                                            (router-dtype dtype))
                                             :gate (t "ffn_gate_exps" [experts expert-ffn hidden])
                                             :up (t "ffn_up_exps" [experts expert-ffn hidden])
                                             :down (t "ffn_down_exps" [experts hidden expert-ffn])}
@@ -868,18 +886,26 @@
   (let [[idx p] (top-k probs k)]
     [idx (/ p (array/maximum (array/sum p {:axis -1 :keep-dims? true}) 6.103515625e-5))]))
 
+(defn- router-logits
+  "The router's logits [N experts] of xs [N hidden] (in dtype, the
+   model's), in router-dtype: xs cast up under a half float, times the
+   router's weights (loaded in router-dtype)."
+  [dtype router xs]
+  (let [rd (router-dtype dtype)]
+    (common/linear (if (= rd (array/dtype xs)) xs (array/astype xs rd)) router)))
+
 (defn- moe
   "The mixture of experts of the normed x [B T hidden], as llama.cpp's
    build_moe_ffn with qwen35moe's settings (softmax gating, the top k
-   weights renormalized, no scale), plus the shared expert."
+   weights renormalized, no scale), plus the shared expert. The router's
+   product and softmax in router-dtype (float32 under a half float)."
   [{:keys [experts-used dtype]} {:keys [router gate up down shared shared-gate]} x]
   (let [s (array/shape x)
         hidden (peek s)
         xs (array/reshape x [-1 hidden])
         n (long (first (array/shape xs)))
         k (long experts-used)
-        logits (common/linear xs router)
-        probs (array/softmax (if (#{:float16 :bfloat16} dtype) (array/astype logits :float32) logits) {:axis -1})
+        probs (array/softmax (router-logits dtype router xs) {:axis -1})
         [idx p] (routing probs k)
         p (if (= dtype (array/dtype p)) p (array/astype p dtype))
         x1 (array/reshape xs [n 1 1 hidden])
