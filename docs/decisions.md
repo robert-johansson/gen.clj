@@ -6974,3 +6974,31 @@ v1.3.0, annotated (tag object 5d57ce3), on main a17901d, pushed with main
 (e6f611c..a17901d) after the scan, which was clean. The milestone
 genclj-lv7t is closed. Its follow-ups are genclj-sgue, "gen.clj 1.3.x —
 follow-ups after 1.3.0".
+
+### 1.3.x training: what comes after 1.3.0's LoRA, SFT and GRPO
+
+(Owner, 2026-11-09: "yes, file them", after the lead's comparison with
+mlx-node's training: its README and @mlx-node/trl at dd3df1a)
+
+The epic genclj-i4kv, under genclj-sgue:
+- **Small, mlx-node has them:**
+  - built-in rewards: length, XML/format tags, tool use (genclj-i49i);
+  - entropy filtering (genclj-nsu9);
+  - min-p and a repetition penalty for rollouts (genclj-ucwm);
+  - SFT label smoothing and checkpoint rotation (genclj-oxwm);
+  - reward timeouts (genclj-6b62);
+  - datasets and a run monitor (genclj-6zx0, moved here).
+- **Larger:**
+  - full-parameter fine-tuning (genclj-fjzj), mlx-node's way where gen.clj
+    trains adapters;
+  - GRPO rollouts through the continuous-batching engine (genclj-ufhj);
+  - preference training, DPO first (genclj-ydfc), which mlx-node lacks;
+  - a merged model exported as GGUF, and several adapters served at once
+    (genclj-nmuz);
+  - agentic GRPO over tool-use episodes, with kmet (genclj-wowi).
+- **Moved here too:** LoRA on the MoE's routed experts (genclj-wfv1),
+  gated-delta's backward pass (genclj-oze3), and the checkpoint follow-up
+  (genclj-8xua).
+- **The lead's order:** the small ones and the engine-backed rollouts first;
+  full fine-tuning and preference training are larger decisions of their
+  own.
