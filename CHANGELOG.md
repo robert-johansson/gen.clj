@@ -216,8 +216,10 @@ Checked before the tag: CHECKED
   to CUDA (`gen.backend.mlx.gated-delta-cuda`), in place of the token
   loop's composite (about 10 kernels a token). Its values are the
   composite's within float32 round-off (gated-delta-test's band, 1e-5).
-  `gen.llm.models.qwen35` makes the same values in fewer kernels on every
-  device (qwen35-test's fewer-kernels-are-the-old-forms): a GatedDeltaNet
+  `gen.llm.models.qwen35` makes the same values in fewer kernels on the
+  JVM backend, Metal and CUDA, and values within float32 round-off on
+  MLX's CPU, which reduces the one norm below in another order
+  (qwen35-test's fewer-kernels-are-the-old-forms): a GatedDeltaNet
   layer's query and key heads l2-normed in one rms-norm, scaled and cast
   to the rule's dtype in one elementwise chain, then tiled to the value
   heads by one copy each (not a concatenation of the repeats); the

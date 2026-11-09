@@ -470,8 +470,11 @@
             old-q (array/* (concatenated (l2-norm (heads 0 width) eps) hv) (/ 1.0 (Math/sqrt dk)))
             old-k (concatenated (l2-norm (heads width (* 2 width)) eps) hv)
             [q k] (query-and-key cfg mixed (array/dtype mixed))]
-        (is (= (host old-q) (host q)) "q")
-        (is (= (host old-k) (host k)) "k")
+        ;; the same values bit for bit on the JVM backend, Metal and CUDA;
+        ;; MLX's CPU reduces the one 5-D norm in another order, so there
+        ;; within float32 round-off (the 1.3.0 gate, the MacBook, 2026-11-09)
+        (is (if (ts/jvm?) (= (host old-q) (host q)) (ts/close? old-q q)) "q")
+        (is (if (ts/jvm?) (= (host old-k) (host k)) (ts/close? old-k k)) "k")
         (is (not= (host old-k) (host (concatenated (array/reshape (l2-norm (array/reshape (heads width (* 2 width)) [2 3 1 (* hk dk)]) eps)
                                                                    [2 3 hk dk])
                                                    hv)))
