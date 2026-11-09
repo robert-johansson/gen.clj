@@ -6965,3 +6965,12 @@ possible.")
 
 **The tag waits for the owner's go:** v1.3.0, annotated, on main, then main
 and the tag pushed, after the scan.
+
+### v1.3.0 tagged and pushed (the owner's go, 2026-11-09)
+
+(Owner: "Go ahead.")
+
+v1.3.0, annotated (tag object 5d57ce3), on main a17901d, pushed with main
+(e6f611c..a17901d) after the scan, which was clean. The milestone
+genclj-lv7t is closed. Its follow-ups are genclj-sgue, "gen.clj 1.3.x —
+follow-ups after 1.3.0".
