@@ -111,7 +111,20 @@ LlamaRuntime, llama.h's adapter functions and five of ggml's): compile it
 again with `clojure -T:build java`. `native/build-llama.sh --bench` also
 builds llama-bench, the ceiling in docs/benchmarks.md.
 
-Checked before the tag: CHECKED
+Checked before the tag: every test on the JVM backend, the book included
+(2,555 tests, 34,745 assertions), with ext/codegen's (25), ext/commons-math's
+(27) and ext/device's (47); on the Mac mini M4 the full battery on Metal
+(2,554 tests, 30,461 assertions) and the light tier on MLX's CPU in float64
+(2,426 tests, 27,719 assertions, in two runs); on MLX's CPU in float32, a
+MacBook Pro M2 Max, the full battery (2,554 tests, 30,441 assertions); on
+CUDA, an RTX PRO 6000 (fenrir), all 171 test namespaces in five JVMs
+(2,479 tests, 30,422 assertions) and the JVM battery under C2 (2,440);
+llama.cpp v0.9.0's tests and the real models' (Qwen3-0.6B, Qwen3.5-0.8B,
+Gemma-3-270M; Qwen3.6-35B-A3B on CUDA against llama.cpp and against MLX's
+CPU) on Metal and CUDA; memo.clj (231 tests), its ext/synth (17) and GenGDT
+(15) against the candidate. Six tests new in 1.3.0 assumed what MLX's CPU
+or a locale doesn't give (an exact reduction order, float64 where the values
+are float32's, a decimal point); each was fixed and rerun where it failed.
 
 ### Known issues
 

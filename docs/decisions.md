@@ -6922,3 +6922,46 @@ possible.")
   CPU (float32 full, float64 light), llama.cpp and the real models per model
   on Metal (the MacBook) and CUDA (fenrir), the CUDA battery, and the
   dependents. The tag waits for the owner's go.
+
+### 1.3.0's gate: green (2026-11-09 ~05:15)
+
+(The lead, for the owner's go to tag; genclj-0ye6)
+
+**Every leg passed on the candidate, or was fixed and rerun:**
+
+| Leg | Result |
+|---|---|
+| JVM battery with the book | 2,555 tests, 34,745 assertions (also before the last fixes) |
+| ext/codegen, ext/commons-math, ext/device | 25, 27 and 47 tests |
+| Metal full (M4) | 2,554 tests, 30,461 assertions, 3 h 39 min |
+| MLX CPU float64 light (M4, in two runs) | 1,193 + 1,233 tests |
+| MLX CPU float32 full (MacBook) | 2,554 tests, 2 failures fixed and rerun |
+| CUDA (fenrir), every namespace in five JVMs | 2,479 tests, 30,422 assertions |
+| CUDA JVM battery under C2 | 2,440 tests |
+| llama.cpp and real models (Metal, CUDA) | three models each; the MoE on CUDA |
+| memo.clj, ext/synth, GenGDT | 231, 17 and 15 tests |
+
+**Fixed during the gate:**
+- **genclj-6fik:** MLX's CUDA rope fails to launch a rotation of 16
+  dimensions or fewer over 128 or more rows. Those shapes take gen.array's
+  composite (gen.backend.mlx.rope-cuda), with no change off CUDA.
+- **Tests new in 1.3.0** that assumed what a backend or a locale doesn't
+  give:
+  - two tests round-tripping numbers through the machine's locale (a decimal
+    comma on the MacBook), now Locale/ROOT;
+  - qwen35-test's exact equality of a norm taken over one 5-D array, which
+    MLX's CPU reduces in another order: float32-close there, exact on the
+    JVM, Metal and CUDA;
+  - the LoRA round trip's band keyed on the JVM, not on float64 (MLX's CPU
+    in float64 rounds to float32 in the file too);
+  - gguf-test's quantized products and nn-test's half-float softmax held to
+    float64 under MLX's float64 default, where the values are float32's.
+- **Docs:** the CHANGELOG's [1.3.0], README, the installing chapter, DESIGN;
+  the notices' intro (no native library of ours) and ggml-quants.c's origin
+  (MIT throughout); gguf.clj's K-quant decoders attributed to llama.cpp.
+- **A follow-up, not a gate failure** (genclj-r6q6): mcmc-test's dense-metric
+  test took 4.4 h on CUDA against about 1.4 h in 1.2.1's gate, under other
+  contention. To be measured alone.
+
+**The tag waits for the owner's go:** v1.3.0, annotated, on main, then main
+and the tag pushed, after the scan.
