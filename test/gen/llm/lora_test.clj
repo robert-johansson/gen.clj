@@ -384,7 +384,10 @@
         (is (= (array/tree-map f32 (:params ad)) (array/tree-map f32 (:params back))) "the params, rounded to float32")
         (is (= (ts/float-dtype) (array/dtype (get-in back [:params 0 :q :a]))) "in the backend's float")
         (is (<= (max-abs (qwen3/log-probs (lora/adapt m back) tokens) (qwen3/log-probs (lora/adapt m ad) tokens))
-                (if (ts/jvm?) 1e-5 0.0))
+                ;; a float64 backend (the JVM's, MLX's with gen.mlx.dtypes=64)
+                ;; rounds the params to float32 in the file; a float32 one
+                ;; holds them as written (the 1.3.0 gate, MLX's CPU in float64)
+                (if (ts/f32?) 0.0 1e-5))
             (str (name k) ": the same model, but for float32's rounding of the params")))
       (finally (Files/deleteIfExists (Path/of f (make-array String 0)))))))
 

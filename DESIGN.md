@@ -492,7 +492,9 @@ decision is appended there, and this summary changes with it.
   [1.0's](docs/decisions.md#before-the-tag), [1.1.0's](docs/decisions.md#the-gate-lighter-than-10s)
 - 1.1.0 consolidated 1.0 ([decided](docs/decisions.md#genclj-110-a-consolidation-release), [scope](docs/decisions.md#its-scope-in-order),
   [off the path](docs/decisions.md#off-the-critical-path), [as it went](docs/decisions.md#as-the-release-went)); 1.2.0 is the language-model
-  release ([decided](docs/decisions.md#120s-theme-language-models)); 1.2.1 the health check's fixes ([decided](docs/decisions.md#121-the-health-checks-fixes)).
+  release ([decided](docs/decisions.md#120s-theme-language-models)); 1.2.1 the health check's fixes ([decided](docs/decisions.md#121-the-health-checks-fixes));
+  1.3.0 the MLX engine and training, paged attention and continuous batching
+  its narrowed scope, the rest moved to 1.3.x ([narrowed](docs/decisions.md#130s-scope-narrowed), [triage](docs/decisions.md#130s-release-triage)).
 
 ### Process
 
