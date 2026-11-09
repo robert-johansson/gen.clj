@@ -797,7 +797,9 @@
     (let [x (array/astype @sel-logits :float16)
           out (array/selective-log-softmax x @sel-idx {:chunk 3})]
       (is (= :float32 (array/dtype out)))
-      (is (ts/close? out (array/selective-log-softmax (array/astype x :float32) @sel-idx))))))
+      ;; both float32, whatever the backend's default float: float32's band
+      ;; (the 1.3.0 gate, MLX's CPU in float64)
+      (is (ts/close? out (array/selective-log-softmax (array/astype x :float32) @sel-idx) {:rtol 2e-5 :atol 2e-5})))))
 
 (deftest selective-log-softmax-misuse-is-loud
   (let [x @sel-logits idx @sel-idx

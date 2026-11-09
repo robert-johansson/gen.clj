@@ -198,14 +198,18 @@
   ;; quantized-matmul and gather-qmm take each tensor's bits and group
   ;; size (4 and 5 here), as a mixed file's model does: the products of
   ;; the dequantized matrices, within the round-off of a sum of 512
-  ;; products in float32 (or float64), relative to the largest
+  ;; products in float32 (or float64 on the JVM backend), relative to the
+  ;; largest. MLX's quantized products are float32's whatever its default
+  ;; float: their scales and biases are float32 (k-quants' decision), so with
+  ;; gen.mlx.dtypes=64 a product is float64 at float32's precision
+  ;; (2.1e-7 relative, the 1.3.0 gate)
   (let [{:keys [tensors]} (array/load-gguf (fixture "kquants.gguf"))
         opts (fn [q] (select-keys q [:bits :group-size]))
         dense (fn [{:keys [wq scales biases] :as q} x]
                 (array/dequantize wq scales biases (assoc (opts q) :dtype (array/dtype x))))
         near? (fn [expected actual]
                 (let [scale (array/item (array/max (array/abs expected)))]
-                  (ts/close? actual expected {:rtol 0.0 :atol (* (ts/tol 1e-12) 50 (double scale))})))]
+                  (ts/close? actual expected {:rtol 0.0 :atol (* (if (ts/jvm?) 1e-12 2e-5) 50 (double scale))})))]
     (doseq [name ["t.q4_k.weight" "t.q5_k.weight"]]
       (let [{:keys [wq scales biases] :as q} (tensors name)
             x (random/normal (random/key 3) [3 512])
